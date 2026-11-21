@@ -106,6 +106,10 @@ def main():
     # F-311 (engage order): RCCB + first-port SYNC + CC_EN before the AC_CC
     # scheme; a failed scheme write keeps RCCB.
     f311 = "F-311" in kg
+    # F-321 (T1(f) per-port isolation): disarm_preflight checks only
+    # fp->table_v4 and shared (!per_port) tables, not other ports' tables.
+    if "F-321" in pcd:
+        compile_flags.append("-DFMAN_F321=1")
     with tempfile.TemporaryDirectory(prefix="fman-disarm-") as tmp:
         tmp = Path(tmp)
         (tmp / "disarm_body.h").write_text(disarm)

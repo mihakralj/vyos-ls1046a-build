@@ -124,30 +124,43 @@ struct sk_buff {
 static unsigned int wgfp_rx_fast = 2;
 static long wgfp_p6_fwd, wgfp_p6_stack, wgfp_p6_replay, wgfp_p6_auth,
 	    wgfp_p6_err, wgfp_p6_aip, wgfp_p6_nomem;
-static int drops, xmits, xmit_egress, delivered, timers, ecn_outer = -1;
-static u32 xmit_off, xmit_len, delivered_len;
+static int drops, xmits, xmit_egress, xmit_ifindex, delivered, timers, ecn_outer = -1;
+static u32 xmit_len, delivered_len;
+static u8 xmit_buf[2048];
 static size_t stats;
 static u8 seen[4096];
 static struct wgfp_rflow *rflow;
 static struct wg_peer *aip_peer;
 static struct sk_buff *last_skb;
+static bool frame_mutated_before_drop;
+static u8 frame_snapshot[2048];
+static size_t frame_snapshot_len;
 
 /* The buffer goes back to BMan: FMan may refill it at once, so scribble it
- * (0x6b reads as IP version 6) to catch a read after release. */
+ * (0x6b reads as IP version 6) to catch a read after release. Also verify the
+ * read-only DMA_FROM_DEVICE RX buffer was never written prior to release! */
 static bool scribble = true;
 static void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f)
 {
+	if (frame_snapshot_len &&
+	    memcmp(f->buf, frame_snapshot, frame_snapshot_len) != 0)
+		frame_mutated_before_drop = true;
 	drops++;
 	if (scribble)
 		memset(f->buf + f->off, 0x6b, f->len);
 }
-static void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 off, u32 len)
+static void dpaa_wgfp_xmit_skb(struct dpaa_wgfp_frame *f, int egress,
+			       int expected_ifindex, struct sk_buff *skb)
 {
-	(void)f;
+	if (f)
+		dpaa_wgfp_drop(f);
 	xmits++;
 	xmit_egress = egress;
-	xmit_off = off;
-	xmit_len = len;
+	xmit_ifindex = expected_ifindex;
+	xmit_len = skb->len;
+	assert(skb->len <= sizeof(xmit_buf));
+	memcpy(xmit_buf, skb->data, skb->len);
+	free(skb);
 }
 static bool ether_addr_equal(const u8 *a, const u8 *b) { return !memcmp(a, b, ETH_ALEN); }
 static bool ip_is_fragment(const struct iphdr *ip) { return (ntohs(ip->frag_off) & 0x3fff) != 0; }
@@ -186,9 +199,10 @@ static bool chacha20poly1305_decrypt(u8 *dst, const u8 *src, size_t len,
 		dst[i] = src[i] ^ 0x5a;
 	return true;
 }
-static bool wgfp_open(u8 *p, size_t clen, u64 nonce, const u8 *key)
+static bool wgfp_open_dst(u8 *dst, const u8 *src, size_t clen, u64 nonce,
+			  const u8 *key)
 {
-	return chacha20poly1305_decrypt(p, p, clen, NULL, 0, nonce, key);
+	return chacha20poly1305_decrypt(dst, src, clen, NULL, 0, nonce, key);
 }
 static bool wg_fastpath_rx_validate(struct noise_keypair *kp, u64 nonce)
 {
@@ -220,6 +234,18 @@ static struct sk_buff *netdev_alloc_skb(struct net_device *d, u32 len)
 	return skb;
 }
 static void skb_reserve(struct sk_buff *skb, u32 n) { skb->data += n; }
+static u8 *skb_put(struct sk_buff *skb, u32 len)
+{
+	u8 *p = skb->data + skb->len;
+
+	skb->len += len;
+	return p;
+}
+static void skb_trim(struct sk_buff *skb, u32 len)
+{
+	if (skb->len > len)
+		skb->len = len;
+}
 static void skb_put_data(struct sk_buff *skb, const void *p, u32 len)
 {
 	memcpy(skb->data, p, len);
@@ -416,13 +442,18 @@ static void learn(const struct pkt *p)
 static void reset(void)
 {
 	drops = xmits = delivered = timers = 0;
-	xmit_off = xmit_len = delivered_len = 0;
+	xmit_egress = xmit_ifindex = 0;
+	xmit_len = delivered_len = 0;
+	memset(xmit_buf, 0, sizeof(xmit_buf));
 	stats = 0;
 	ecn_outer = -1;
 	wgfp_p6_fwd = wgfp_p6_stack = wgfp_p6_replay = wgfp_p6_auth = 0;
 	wgfp_p6_err = wgfp_p6_aip = wgfp_p6_nomem = 0;
 	pst.last_rx_timer = 0;
 	aip_peer = &peer;
+	frame_mutated_before_drop = false;
+	frame_snapshot_len = sizeof(frame);
+	memcpy(frame_snapshot, frame, sizeof(frame));
 }
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: %s\n", __func__, __LINE__, #c); exit(1); } } while (0)
@@ -445,21 +476,22 @@ static void test_forward_v4(void)
 	struct iphdr *i4;
 
 	learn(&p);
+	rec.l2.ifindex = 5;
 	CHECK(run(&p, &f) == 1);
-	CHECK(xmits == 1 && drops == 0 && delivered == 0 && wgfp_p6_fwd == 1);
-	CHECK(xmit_egress == 3);
-	CHECK(xmit_off == inner_off - ETH_HLEN);
+	CHECK(xmits == 1 && drops == 1 && delivered == 0 && wgfp_p6_fwd == 1);
+	CHECK(!frame_mutated_before_drop);
+	CHECK(xmit_egress == 3 && xmit_ifindex == 5);
 	CHECK(xmit_len == ETH_HLEN + inner_len);		/* padding dropped */
-	CHECK(!memcmp(frame + xmit_off, out_l2, ETH_HLEN));
-	i4 = (struct iphdr *)(frame + inner_off);
+	CHECK(!memcmp(xmit_buf, out_l2, ETH_HLEN));
+	i4 = (struct iphdr *)(xmit_buf + ETH_HLEN);
 	CHECK(i4->ttl == 63 && ip_fast_csum((u8 *)i4, 5) == 0);
-	CHECK(frame[inner_off + 20 + 20] == 0 && frame[inner_off + 20 + 21] == 1);	/* payload decrypted */
-	CHECK(stats == (size_t)ntohs(((struct udphdr *)(frame + 64 + ETH_HLEN + 20))->len) - 8);
+	CHECK(xmit_buf[ETH_HLEN + 20 + 20] == 0 && xmit_buf[ETH_HLEN + 20 + 21] == 1);	/* payload decrypted */
+	CHECK(stats == (size_t)ntohs(((struct udphdr *)(frame_snapshot + 64 + ETH_HLEN + 20))->len) - 8);
 	CHECK(timers == 1);
 
 	/* the same nonce again: authenticated, then refused by the window */
 	CHECK(run(&p, &f) == 1);
-	CHECK(drops == 1 && xmits == 0 && wgfp_p6_replay == 1);
+	CHECK(drops == 1 && xmits == 0 && wgfp_p6_replay == 1 && !frame_mutated_before_drop);
 }
 
 static void test_forward_v6_over_v6(void)
@@ -470,8 +502,9 @@ static void test_forward_v6_over_v6(void)
 
 	learn(&p);
 	CHECK(run(&p, &f) == 1);
-	CHECK(xmits == 1 && xmit_len == ETH_HLEN + inner_len);
-	CHECK(((struct ipv6hdr *)(frame + inner_off))->hop_limit == 8);
+	CHECK(xmits == 1 && drops == 1 && !frame_mutated_before_drop);
+	CHECK(xmit_len == ETH_HLEN + inner_len);
+	CHECK(((struct ipv6hdr *)(xmit_buf + ETH_HLEN))->hop_limit == 8);
 }
 
 static void test_stack_handoffs(void)

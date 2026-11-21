@@ -262,12 +262,13 @@ static void wgfp_seal_one(u8 *p, u32 n, u32 room, u64 nonce,
 	memzero_explicit(ks, sizeof(ks));
 }
 
-/* @n plaintext bytes at @p, tag at p + n; the buffer is untouched when the
- * tag does not verify.  Block 0 rides with the open fold's head when the
- * length allows it, else a one-block NEON call. */
-static bool wgfp_open_one(u8 *p, size_t n, u64 nonce,
-			  const u8 key[CHACHA20POLY1305_KEY_SIZE],
-			  unsigned int neon_min)
+/* @n plaintext bytes from @src into @dst (may equal @src), tag at src + n;
+ * @dst is untouched when the tag does not verify, and @src is never written
+ * when @dst != @src. Block 0 rides with the open fold's head when the length
+ * allows it, else a one-block NEON call. */
+static bool wgfp_open_one_dst(u8 *dst, const u8 *src, size_t n, u64 nonce,
+			      const u8 key[CHACHA20POLY1305_KEY_SIZE],
+			      unsigned int neon_min)
 {
 	bool neon = n > neon_min && crypto_simd_usable();
 	u8 buf[CHACHA_BLOCK_SIZE + WGFP_OPEN_HEAD];
@@ -279,34 +280,41 @@ static bool wgfp_open_one(u8 *p, size_t n, u64 nonce,
 	wgfp_chacha_setup(&st, nonce, key);
 	if (!neon) {
 		chacha_block_generic(&st, buf, 20);
-		wgfp_mac(buf, p, n, false, tag);
-		ok = !crypto_memneq(tag, p + n, POLY1305_DIGEST_SIZE);
+		wgfp_mac(buf, src, n, false, tag);
+		ok = !crypto_memneq(tag, src + n, POLY1305_DIGEST_SIZE);
 		if (ok)
-			wgfp_chacha_gen(&st, p, p, n);
+			wgfp_chacha_gen(&st, dst, src, n);
 	} else {
 		memset(buf, 0, CHACHA_BLOCK_SIZE);
 		kernel_neon_begin();
 		if (wgfp_open_foldable(n)) {
 			head = min_t(size_t, n, ALIGN(n % (5 * CHACHA_BLOCK_SIZE),
 						      CHACHA_BLOCK_SIZE));
-			memcpy(buf + CHACHA_BLOCK_SIZE, p, head);
+			memcpy(buf + CHACHA_BLOCK_SIZE, src, head);
 			wgfp_chacha_neon(&st, buf, buf, CHACHA_BLOCK_SIZE + head);
 		} else {
 			chacha_block_xor_neon(&st, buf, buf, 20);
 			st.x[12]++;
 		}
-		wgfp_mac(buf, p, n, true, tag);
-		ok = !crypto_memneq(tag, p + n, POLY1305_DIGEST_SIZE);
+		wgfp_mac(buf, src, n, true, tag);
+		ok = !crypto_memneq(tag, src + n, POLY1305_DIGEST_SIZE);
 		if (ok) {
 			if (n > head)
-				wgfp_chacha_neon(&st, p + head, p + head, n - head);
-			memcpy(p, buf + CHACHA_BLOCK_SIZE, head);
+				wgfp_chacha_neon(&st, dst + head, src + head, n - head);
+			memcpy(dst, buf + CHACHA_BLOCK_SIZE, head);
 		}
 		kernel_neon_end();
 	}
 	chacha_zeroize_state(&st);
 	memzero_explicit(buf, CHACHA_BLOCK_SIZE + head);
 	return ok;
+}
+
+static bool wgfp_open_one(u8 *p, size_t n, u64 nonce,
+			  const u8 key[CHACHA20POLY1305_KEY_SIZE],
+			  unsigned int neon_min)
+{
+	return wgfp_open_one_dst(p, p, n, nonce, key, neon_min);
 }
 
 /* Both directions against the library once: seal with and without room in
@@ -506,9 +514,10 @@ static int wgfp_open_fold = -1;
 module_param(wgfp_open_fold, int, 0600);
 MODULE_PARM_DESC(wgfp_open_fold, "Open: -1 self-test then best, 0 library, 1 key block folded into a NEON call, 2 one NEON section a packet");
 
-/* @n plaintext bytes at @p, tag at p + n; caller checked foldable */
-static bool wgfp_open_folded(u8 *p, size_t n, u64 nonce,
-			     const u8 key[CHACHA20POLY1305_KEY_SIZE])
+/* @n plaintext bytes from @src into @dst (may equal @src), tag at src + n;
+ * caller checked foldable. */
+static bool wgfp_open_folded_dst(u8 *dst, const u8 *src, size_t n, u64 nonce,
+				 const u8 key[CHACHA20POLY1305_KEY_SIZE])
 {
 	static const u8 pad0[16];
 	size_t head = min_t(size_t, n, ALIGN(n % (5 * CHACHA_BLOCK_SIZE),
@@ -527,25 +536,31 @@ static bool wgfp_open_folded(u8 *p, size_t n, u64 nonce,
 		k[i] = get_unaligned_le32(key + 4 * i);
 	chacha_init(&st, k, (const u8 *)iv);
 	memset(buf, 0, CHACHA_BLOCK_SIZE);
-	memcpy(buf + CHACHA_BLOCK_SIZE, p, head);
+	memcpy(buf + CHACHA_BLOCK_SIZE, src, head);
 	chacha20_crypt(&st, buf, buf, CHACHA_BLOCK_SIZE + head);
 	poly1305_init(&mac, buf);
-	poly1305_update(&mac, p, n);
+	poly1305_update(&mac, src, n);
 	if (n & 0xf)
 		poly1305_update(&mac, pad0, 0x10 - (n & 0xf));
 	poly1305_update(&mac, (const u8 *)lens, sizeof(lens));
 	poly1305_final(&mac, tag);
-	ok = !crypto_memneq(tag, p + n, POLY1305_DIGEST_SIZE);
+	ok = !crypto_memneq(tag, src + n, POLY1305_DIGEST_SIZE);
 	if (ok) {
 		/* head is whole blocks here, so st continues at the next one */
 		if (n > head)
-			chacha20_crypt(&st, p + head, p + head, n - head);
-		memcpy(p, buf + CHACHA_BLOCK_SIZE, head);
+			chacha20_crypt(&st, dst + head, src + head, n - head);
+		memcpy(dst, buf + CHACHA_BLOCK_SIZE, head);
 	}
 	chacha_zeroize_state(&st);
 	memzero_explicit(buf, CHACHA_BLOCK_SIZE + head);
 	memzero_explicit(k, sizeof(k));
 	return ok;
+}
+
+static bool wgfp_open_folded(u8 *p, size_t n, u64 nonce,
+			     const u8 key[CHACHA20POLY1305_KEY_SIZE])
+{
+	return wgfp_open_folded_dst(p, p, n, nonce, key);
 }
 
 /* Seal with the library, open folded: plaintext and verdict must match for
@@ -603,9 +618,10 @@ static int wgfp_open_selftest(void)
 	return ok;
 }
 
-/* chacha20poly1305_decrypt() in place; @clen includes the tag */
-static bool wgfp_open(u8 *p, size_t clen, u64 nonce,
-		      const u8 key[CHACHA20POLY1305_KEY_SIZE])
+/* Out-of-place chacha20poly1305_decrypt() from read-only @src into @dst;
+ * @clen includes the 16-byte tag. */
+static bool wgfp_open_dst(u8 *dst, const u8 *src, size_t clen, u64 nonce,
+			  const u8 key[CHACHA20POLY1305_KEY_SIZE])
 {
 	int fold = READ_ONCE(wgfp_open_fold);
 
@@ -613,13 +629,14 @@ static bool wgfp_open(u8 *p, size_t clen, u64 nonce,
 		fold = wgfp_open_selftest();
 #ifdef WGFP_ONE_NEON
 	if (likely(fold == 2) && clen > POLY1305_DIGEST_SIZE)
-		return wgfp_open_one(p, clen - POLY1305_DIGEST_SIZE, nonce, key,
-				     READ_ONCE(wgfp_neon_min));
+		return wgfp_open_one_dst(dst, src, clen - POLY1305_DIGEST_SIZE,
+					 nonce, key, READ_ONCE(wgfp_neon_min));
 #endif
 	if (fold > 0 && clen > POLY1305_DIGEST_SIZE &&
 	    wgfp_open_foldable(clen - POLY1305_DIGEST_SIZE))
-		return wgfp_open_folded(p, clen - POLY1305_DIGEST_SIZE, nonce, key);
-	return chacha20poly1305_decrypt(p, p, clen, NULL, 0, nonce, key);
+		return wgfp_open_folded_dst(dst, src, clen - POLY1305_DIGEST_SIZE,
+					    nonce, key);
+	return chacha20poly1305_decrypt(dst, src, clen, NULL, 0, nonce, key);
 }
 
 static struct wgfp_lab wgfp_lab_state;
@@ -634,18 +651,19 @@ static struct wgfp_binds __rcu *wgfp_bs;
 static int wgfp_lab_frame(void *priv, struct dpaa_wgfp_frame *f)
 {
 	struct wgfp_lab *l = priv;
-	u8 *data = f->buf + f->off;
-	u8 *inner = data + ETH_HLEN;
+	const u8 *data = f->buf + f->off;
+	const u8 *inner = data + ETH_HLEN;
 	const struct iphdr *iph;
 	struct message_data *wg;
+	struct sk_buff *skb;
 	struct udphdr *udp;
 	struct iphdr *oip;
-	u32 ip_len, plain, tot;
+	u32 ip_len, plain, tot, room;
 	u64 ctr;
-	u8 *hdr;
+	u8 *dst, *hdr;
 
 	if (f->len < ETH_HLEN + sizeof(*iph) ||
-	    ((struct ethhdr *)data)->h_proto != htons(ETH_P_IP))
+	    ((const struct ethhdr *)data)->h_proto != htons(ETH_P_IP))
 		return 0;
 	iph = (const struct iphdr *)inner;
 	if (iph->version != 4)
@@ -655,15 +673,22 @@ static int wgfp_lab_frame(void *priv, struct dpaa_wgfp_frame *f)
 		return 0;
 
 	plain = ALIGN(ip_len, 16);
-	if (f->off < WGFP_ADDED ||
-	    f->off + ETH_HLEN + plain + POLY1305_DIGEST_SIZE > f->buf_size)
-		return 0;
+	room = max_t(u32, WGFP_HDR_LEN, CHACHA_BLOCK_SIZE);
+	skb = dpaa_wgfp_alloc_xmit_skb(l->egress, 0,
+				       room + plain + POLY1305_DIGEST_SIZE);
+	if (unlikely(!skb)) {
+		dpaa_wgfp_drop(f);
+		return 1;
+	}
+	skb_reserve(skb, room);
+	dst = skb_put(skb, plain + POLY1305_DIGEST_SIZE);
+	memcpy(dst, inner, ip_len);
+	memset(dst + ip_len, 0, plain - ip_len);
 
-	memset(inner + ip_len, 0, plain - ip_len);
 	ctr = (u64)atomic64_inc_return(&l->counter) - 1;
-	wgfp_seal(inner, plain, inner - f->buf, ctr, l->key);
+	wgfp_seal(dst, plain, CHACHA_BLOCK_SIZE, ctr, l->key);
 
-	hdr = inner - WGFP_HDR_LEN;
+	hdr = skb_push(skb, WGFP_HDR_LEN);
 	memcpy(hdr, l->tmpl, sizeof(l->tmpl));
 
 	tot = sizeof(struct iphdr) + sizeof(struct udphdr) +
@@ -680,8 +705,7 @@ static int wgfp_lab_frame(void *priv, struct dpaa_wgfp_frame *f)
 	wg->key_idx = l->rcv_idx;
 	wg->counter = cpu_to_le64(ctr);
 
-	dpaa_wgfp_xmit(f, l->egress, f->off - WGFP_ADDED,
-		       WGFP_HDR_LEN + plain + POLY1305_DIGEST_SIZE);
+	dpaa_wgfp_xmit_skb(f, l->egress, 0, skb);
 	return 1;
 }
 
@@ -906,11 +930,14 @@ static void wgfp_rx_fold(struct wgfp_pst *pst)
  */
 #define WGFP_OBS_PER_CPU	8
 
+#define WGFP_OBS_TTL	(30 * HZ)
+
 struct wgfp_obs {
 	struct dpaa_wgfp_tuple t;
 	int wg_ifindex;
 	int ifindex;
 	unsigned long jiffies;
+	u64 epoch;
 };
 
 struct wgfp_obs_ring {
@@ -920,6 +947,8 @@ struct wgfp_obs_ring {
 };
 
 static DEFINE_PER_CPU(struct wgfp_obs_ring, wgfp_obs);
+static atomic64_t wgfp_obs_epoch = ATOMIC64_INIT(1);
+static atomic_t wgfp_quiesce_active = ATOMIC_INIT(0);
 
 /* On by default: WireGuard offload follows the port offload, and a bound
  * peer's receive side is accelerated like its transmit side (the P6, P2b-3
@@ -1310,9 +1339,9 @@ static void wgfp_flow_withdraw(struct wgfp_flow *fl, atomic64_t *why)
  * forwarded, handed to the stack or dropped, never punted.  The UDP checksum
  * is not verified: the AEAD tag authenticates every byte that is used.
  */
-static unsigned int wgfp_rx_fast = 2;	/* default: decrypt in place and forward */
+static unsigned int wgfp_rx_fast = 0;	/* default: safe P3 until P6 soak & step-5 close */
 module_param(wgfp_rx_fast, uint, 0600);
-MODULE_PARM_DESC(wgfp_rx_fast, "P6 in-place decrypt on P3 sinks: 0 off, 1 decrypt then stack, 2 also forward learned inner flows");
+MODULE_PARM_DESC(wgfp_rx_fast, "P6 decrypt on P3 sinks: 0 off (safe P3 default), 1 decrypt then stack, 2 also forward learned inner flows");
 
 /* P7, see wg_fastpath_rx_tail() */
 static bool wgfp_rx_tail;
@@ -1486,8 +1515,10 @@ static unsigned int wgfp_rflow_hook(void *priv, struct sk_buff *skb,
 	r->l2.hlen = ETH_HLEN;
 
 	spin_lock_bh(&wgfp_flows_lock);
-	old = wgfp_rflow_lookup(&t, wgdev->ifindex, hash);
-	if (old) {
+	if (unlikely(atomic_read(&wgfp_quiesce_active))) {
+		kfree(r);
+		r = NULL;
+	} else if ((old = wgfp_rflow_lookup(&t, wgdev->ifindex, hash))) {
 		hlist_replace_rcu(&old->node, &r->node);
 		kfree_rcu(old, rcu);
 	} else if (wgfp_nrflows < WGFP_RFLOW_MAX) {
@@ -1606,29 +1637,18 @@ out:
 
 /* P6 stack hand-off: the plaintext inner packet at @pt as an skb on the wg
  * device, prepared like wg_packet_consume_data_done() does. */
-static int wgfp_rx_fast_stack(struct dpaa_wgfp_frame *f, struct wgfp_pst *pst,
-			      const u8 *pt, u32 len, u8 ds, u32 msg_len)
+static int wgfp_rx_fast_stack(struct sk_buff *skb, struct wgfp_pst *pst,
+			      u32 len, u8 ds, u32 msg_len)
 {
 	struct net_device *dev = pst->wgdev;
 	struct wg_peer *routed;
-	struct sk_buff *skb;
 
-	skb = netdev_alloc_skb(dev, WGFP_RX_HEADROOM + len);
-	if (unlikely(!skb)) {
-		dpaa_wgfp_drop(f);
-		DEV_STATS_INC(dev, rx_dropped);
-		atomic64_inc(&wgfp_p6_nomem);
-		return 1;
-	}
-	skb_reserve(skb, WGFP_RX_HEADROOM);
-	skb_put_data(skb, pt, len);
-	dpaa_wgfp_drop(f);
+	skb_trim(skb, len);
 	skb_reset_mac_header(skb);
 	skb_reset_network_header(skb);
 	/* the Poly1305 tag covered it: as upstream, no checksum to verify */
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
 	skb->csum_level = ~0;
-	/* pt went back to BMan above: read the copy */
 	if ((skb->data[0] >> 4) == 4) {
 		skb->protocol = htons(ETH_P_IP);
 		INET_ECN_decapsulate(skb, ds, ip_hdr(skb)->tos);
@@ -1651,11 +1671,12 @@ static int wgfp_rx_fast_stack(struct dpaa_wgfp_frame *f, struct wgfp_pst *pst,
 	return 1;
 }
 
-/* P6 direct forward of the inner packet at @pt (@len bytes) of a learned
- * flow; false leaves the frame untouched for the stack hand-off. */
-static bool wgfp_rx_forward(struct dpaa_wgfp_frame *f, struct wgfp_pst *pst,
-			    u8 *pt, u32 len, u32 msg_len)
+/* P6 direct forward of the decrypted inner packet in @skb (@len bytes) of a
+ * learned flow; false leaves @skb untouched for the stack hand-off. */
+static bool wgfp_rx_forward(struct sk_buff *skb, struct wgfp_pst *pst,
+			    u32 len, u32 msg_len)
 {
+	u8 *pt = skb->data;
 	struct dpaa_wgfp_tuple t = {};
 	const struct wgfp_rflow *r;
 	u32 hl, tlen;
@@ -1687,18 +1708,20 @@ static bool wgfp_rx_forward(struct dpaa_wgfp_frame *f, struct wgfp_pst *pst,
 			return false;
 		ip6->hop_limit--;
 	}
-	hdr = pt - ETH_HLEN;
+	skb_trim(skb, len);
+	hdr = skb_push(skb, ETH_HLEN);
 	memcpy(hdr, r->l2.hdr, ETH_HLEN);
 	wgfp_rx_stats(pst, msg_len);
 	dpaa_wgfp_stat_inc(&wgfp_p6_fwd);
-	dpaa_wgfp_xmit(f, r->l2.egress, hdr - f->buf, ETH_HLEN + len);
+	dpaa_wgfp_xmit_skb(NULL, r->l2.egress, r->l2.ifindex, skb);
 	return true;
 }
 
 /*
  * P6 in the P3 sink, for the outer flow @fl arriving on @dev.  Returns 0 to
  * leave the frame (unchanged) to the P3 path, 1 when it was consumed.  NAPI
- * context, RCU held by the sink.
+ * context, RCU held by the sink. Decrypts out-of-place from read-only f->buf
+ * into an owned skb so the DMA_FROM_DEVICE BMan RX page is never mutated.
  */
 static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 			      struct net_device *dev)
@@ -1707,9 +1730,11 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	struct wgfp_pst *pst = fl->pst;
 	struct wg_peer *peer = pst->peer;
 	struct noise_keypair *kp;
-	struct message_data *msg;
+	const struct message_data *msg;
 	const struct udphdr *udp;
+	struct sk_buff *skb;
 	u32 hl, ilen, ulen, clen, plen, len;
+	const u8 *ct;
 	u8 ds, *pt;
 	unsigned long t;
 	u64 nonce;
@@ -1745,7 +1770,7 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	if (ulen > ilen - hl || ulen <= sizeof(*udp) + MESSAGE_MINIMUM_LENGTH ||
 	    (fl->t.family == AF_INET6 && !udp->check))
 		return 0;
-	msg = (struct message_data *)(udp + 1);
+	msg = (const struct message_data *)(udp + 1);
 	if (msg->header.type != cpu_to_le32(MESSAGE_DATA))
 		return 0;
 	/* only the current keypair; the previous and the next one (whose
@@ -1757,26 +1782,36 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	    READ_ONCE(kp->receiving_counter.counter) >= REJECT_AFTER_MESSAGES)
 		return 0;
 	nonce = le64_to_cpu(msg->counter);
-	pt = (u8 *)(msg + 1);
+	ct = (const u8 *)(msg + 1);
 	clen = ulen - sizeof(*udp) - sizeof(*msg);	/* ciphertext + tag */
-	/* leaves the buffer untouched when the tag does not verify */
-	if (!wgfp_open(pt, clen, nonce, kp->receiving.key)) {
+	plen = clen - POLY1305_DIGEST_SIZE;
+	skb = netdev_alloc_skb(pst->wgdev, WGFP_RX_HEADROOM + plen);
+	if (unlikely(!skb)) {
+		dpaa_wgfp_drop(f);
+		DEV_STATS_INC(pst->wgdev, rx_dropped);
+		atomic64_inc(&wgfp_p6_nomem);
+		return 1;
+	}
+	skb_reserve(skb, WGFP_RX_HEADROOM);
+	pt = skb_put(skb, plen);
+	/* Decrypt out-of-place: f->buf is read-only DMA_FROM_DEVICE memory. */
+	if (!wgfp_open_dst(pt, ct, clen, nonce, kp->receiving.key)) {
 		atomic64_inc(&wgfp_p6_auth);
+		kfree_skb(skb);
 		dpaa_wgfp_drop(f);
 		return 1;
 	}
+	dpaa_wgfp_drop(f);
 	/* after authentication, as wg_packet_rx_poll() does */
 	if (!wg_fastpath_rx_validate(kp, nonce)) {
 		atomic64_inc(&wgfp_p6_replay);
-		dpaa_wgfp_drop(f);
+		kfree_skb(skb);
 		return 1;
 	}
-	/* spread mode decrypts one peer on every CPU: one of them takes each turn */
 	t = READ_ONCE(pst->last_rx_timer);
 	if (time_after(jiffies, t) &&
 	    cmpxchg(&pst->last_rx_timer, t, jiffies + HZ / 100) == t)
 		wg_fastpath_rx_timers(peer);
-	plen = clen - POLY1305_DIGEST_SIZE;
 	if ((pt[0] >> 4) == 4 && plen >= sizeof(struct iphdr))
 		len = ntohs(((const struct iphdr *)pt)->tot_len);
 	else if ((pt[0] >> 4) == 6 && plen >= sizeof(struct ipv6hdr))
@@ -1788,14 +1823,14 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 		DEV_STATS_INC(pst->wgdev, rx_errors);
 		DEV_STATS_INC(pst->wgdev, rx_frame_errors);
 		atomic64_inc(&wgfp_p6_err);
-		dpaa_wgfp_drop(f);
+		kfree_skb(skb);
 		return 1;
 	}
 	/* outer ECT(1) or CE needs INET_ECN_decapsulate(): the stack hand-off */
 	if (READ_ONCE(wgfp_rx_fast) >= 2 && !(ds & INET_ECN_ECT_1) &&
-	    wgfp_rx_forward(f, pst, pt, len, ulen - sizeof(*udp)))
+	    wgfp_rx_forward(skb, pst, len, ulen - sizeof(*udp)))
 		return 1;
-	return wgfp_rx_fast_stack(f, pst, pt, len, ds, ulen - sizeof(*udp));
+	return wgfp_rx_fast_stack(skb, pst, len, ds, ulen - sizeof(*udp));
 }
 
 /*
@@ -1974,11 +2009,8 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	if (unlikely(!t))
 		goto decline;
 	/* outer IP + UDP + WireGuard header in front of the inner packet */
-	added = t->hlen - ETH_HLEN + sizeof(struct message_data);
+	added = t->hlen + sizeof(struct message_data);
 	plain = min_t(u32, mtu, ALIGN(ip_len, MESSAGE_PADDING_MULTIPLE));
-	if (f->off < added ||
-	    f->off + ETH_HLEN + plain + POLY1305_DIGEST_SIZE > f->buf_size)
-		goto decline;
 	/* Roaming: unlocked compare, as wg_socket_set_peer_endpoint() does; a
 	 * torn read costs one punt.  The stopping test pairs with the
 	 * synchronize_rcu() before the refresh work is cancelled for good. */
@@ -1994,59 +2026,72 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	ctr = (u64)atomic64_inc_return(&kp->sending_counter) - 1;
 	if (unlikely(ctr >= REJECT_AFTER_MESSAGES))
 		goto decline;
-	if (tup.family == AF_INET)
-		ip_decrease_ttl((struct iphdr *)iph);
-	else
-		((struct ipv6hdr *)inner)->hop_limit--;
-	memset(inner + ip_len, 0, plain - ip_len);
-	wgfp_seal(inner, plain, inner - f->buf, ctr, kp->sending.key);
+	{
+		u32 room = max_t(u32, added, CHACHA_BLOCK_SIZE);
+		struct sk_buff *skb = dpaa_wgfp_alloc_xmit_skb(t->egress, t->ifindex,
+					room + plain + POLY1305_DIGEST_SIZE);
+		u8 *dst;
 
-	hdr = inner - added - ETH_HLEN;
-	memcpy(hdr, t->hdr, t->hlen);
-	tot = sizeof(struct udphdr) + sizeof(struct message_data) + plain +
-	      POLY1305_DIGEST_SIZE;		/* the UDP datagram */
-	if (t->family == AF_INET) {
-		oip = (struct iphdr *)(hdr + ETH_HLEN);
-		oip->tot_len = htons(sizeof(*oip) + tot);
-		oip->check = 0;
-		oip->check = ip_fast_csum((const u8 *)oip, oip->ihl);
-		udp = (struct udphdr *)(oip + 1);
-	} else {
-		((struct ipv6hdr *)(hdr + ETH_HLEN))->payload_len = htons(tot);
-		udp = (struct udphdr *)(hdr + ETH_HLEN + sizeof(struct ipv6hdr));
-	}
-	udp->len = htons(tot);
-	wg = (struct message_data *)(udp + 1);
-	wg->header.type = cpu_to_le32(MESSAGE_DATA);
-	wg->key_idx = kp->remote_index;
-	wg->counter = cpu_to_le64(ctr);
-	if (t->family == AF_INET6) {
-		const struct ipv6hdr *ip6 = (const struct ipv6hdr *)(hdr + ETH_HLEN);
-
-		udp->check = csum_ipv6_magic(&ip6->saddr, &ip6->daddr, tot,
-					     IPPROTO_UDP, csum_partial(udp, tot, 0));
-		if (!udp->check)
-			udp->check = CSUM_MANGLED_0;
-	}
-
-	if (time_after(jiffies, READ_ONCE(pst->last_timer))) {
-		WRITE_ONCE(pst->last_timer, jiffies + HZ / 100);
-		wg_timers_any_authenticated_packet_traversal(peer);
-		wg_timers_any_authenticated_packet_sent(peer);
-		wg_timers_data_sent(peer);
-		/* Same test as keep_key_fresh(); the send is itself rate limited. */
-		if (ctr > REKEY_AFTER_MESSAGES ||
-		    (kp->i_am_the_initiator &&
-		     wg_birthdate_has_expired(kp->sending.birthdate, REKEY_AFTER_TIME))) {
-			atomic64_inc(&wgfp_rekeys);
-			wg_packet_send_queued_handshake_initiation(peer, false);
+		if (unlikely(!skb)) {
+			dpaa_wgfp_drop(f);
+			return 1;
 		}
+		skb_reserve(skb, room);
+		dst = skb_put(skb, plain + POLY1305_DIGEST_SIZE);
+		/* Copy from read-only DMA_FROM_DEVICE f->buf before mutating/sealing. */
+		memcpy(dst, inner, ip_len);
+		if (tup.family == AF_INET)
+			ip_decrease_ttl((struct iphdr *)dst);
+		else
+			((struct ipv6hdr *)dst)->hop_limit--;
+		memset(dst + ip_len, 0, plain - ip_len);
+		wgfp_seal(dst, plain, CHACHA_BLOCK_SIZE, ctr, kp->sending.key);
+
+		hdr = skb_push(skb, added);
+		memcpy(hdr, t->hdr, t->hlen);
+		tot = sizeof(struct udphdr) + sizeof(struct message_data) + plain +
+		      POLY1305_DIGEST_SIZE;		/* the UDP datagram */
+		if (t->family == AF_INET) {
+			oip = (struct iphdr *)(hdr + ETH_HLEN);
+			oip->tot_len = htons(sizeof(*oip) + tot);
+			oip->check = 0;
+			oip->check = ip_fast_csum((const u8 *)oip, oip->ihl);
+			udp = (struct udphdr *)(oip + 1);
+		} else {
+			((struct ipv6hdr *)(hdr + ETH_HLEN))->payload_len = htons(tot);
+			udp = (struct udphdr *)(hdr + ETH_HLEN + sizeof(struct ipv6hdr));
+		}
+		udp->len = htons(tot);
+		wg = (struct message_data *)(udp + 1);
+		wg->header.type = cpu_to_le32(MESSAGE_DATA);
+		wg->key_idx = kp->remote_index;
+		wg->counter = cpu_to_le64(ctr);
+		if (t->family == AF_INET6) {
+			const struct ipv6hdr *ip6 = (const struct ipv6hdr *)(hdr + ETH_HLEN);
+
+			udp->check = csum_ipv6_magic(&ip6->saddr, &ip6->daddr, tot,
+						     IPPROTO_UDP, csum_partial(udp, tot, 0));
+			if (!udp->check)
+				udp->check = CSUM_MANGLED_0;
+		}
+
+		if (time_after(jiffies, READ_ONCE(pst->last_timer))) {
+			WRITE_ONCE(pst->last_timer, jiffies + HZ / 100);
+			wg_timers_any_authenticated_packet_traversal(peer);
+			wg_timers_any_authenticated_packet_sent(peer);
+			wg_timers_data_sent(peer);
+			/* Same test as keep_key_fresh(); the send is itself rate limited. */
+			if (ctr > REKEY_AFTER_MESSAGES ||
+			    (kp->i_am_the_initiator &&
+			     wg_birthdate_has_expired(kp->sending.birthdate, REKEY_AFTER_TIME))) {
+				atomic64_inc(&wgfp_rekeys);
+				wg_packet_send_queued_handshake_initiation(peer, false);
+			}
+		}
+		dpaa_wgfp_stat_inc(&wgfp_sealed);
+		dpaa_wgfp_xmit_skb(f, t->egress, t->ifindex, skb);
+		return 1;
 	}
-	dpaa_wgfp_stat_inc(&wgfp_sealed);
-	dpaa_wgfp_xmit(f, t->egress, hdr - f->buf,
-		       t->hlen + sizeof(struct message_data) + plain +
-		       POLY1305_DIGEST_SIZE);
-	return 1;
 decline_flow:
 	withdraw = true;
 decline:
@@ -2054,8 +2099,13 @@ decline:
 	return wgfp_punt(f, fl, withdraw);
 }
 
+static int wgfp_port_quiesce(void *priv, struct net_device *dev);
+static int wgfp_policy_revoke(void *priv);
+
 static const struct dpaa_wgfp_ops wgfp_peer_ops = {
 	.frame = wgfp_peer_frame,
+	.port_quiesce = wgfp_port_quiesce,
+	.policy_revoke = wgfp_policy_revoke,
 };
 
 /* Is @t the peer's current endpoint (unlocked, as wgfp_endpoint_matches())? */
@@ -2130,14 +2180,17 @@ void wg_fastpath_rx_observe(struct wg_device *wg, struct sk_buff *skb)
 	o->wg_ifindex = wg->dev->ifindex;
 	o->ifindex = skb->skb_iif;
 	o->jiffies = jiffies;
+	o->epoch = atomic64_read(&wgfp_obs_epoch);
 	smp_wmb();
 	WRITE_ONCE(ring->seq, ring->seq + 1);
 }
 
-/* Find an observation of @pst's current endpoint on any port. */
+/* Find a fresh observation of @pst's current endpoint on any port. */
 static bool wgfp_rx_observed(struct wgfp_pst *pst, struct dpaa_wgfp_tuple *rt,
 			     int *ifindex)
 {
+	u64 cur_epoch = atomic64_read(&wgfp_obs_epoch);
+	unsigned long now = jiffies;
 	int cpu;
 	unsigned int i;
 
@@ -2154,7 +2207,9 @@ static bool wgfp_rx_observed(struct wgfp_pst *pst, struct dpaa_wgfp_tuple *rt,
 
 			if (!o->t.family ||
 			    o->wg_ifindex != pst->wgdev->ifindex ||
-			    o->ifindex <= 0)
+			    o->ifindex <= 0 ||
+			    o->epoch != cur_epoch ||
+			    time_after(now, o->jiffies + WGFP_OBS_TTL))
 				continue;
 			if (!wgfp_endpoint_is(pst->peer, &o->t))
 				continue;
@@ -2199,7 +2254,8 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst)
 		pst->rxfl = NULL;
 		fl = NULL;
 	}
-	if (want && !fl && wgfp_nflows < WGFP_FLOW_MAX &&
+	if (want && !fl && !atomic_read(&wgfp_quiesce_active) &&
+	    wgfp_nflows < WGFP_FLOW_MAX &&
 	    !wgfp_flow_find_tuple(&rt, ifindex, wgfp_tuple_hash(&rt))) {
 		fl = kzalloc(sizeof(*fl), GFP_ATOMIC);
 		if (fl) {
@@ -2366,6 +2422,8 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 	/* ponytail: one global lock per slow-path packet of a bound device;
 	 * an RCU fast check first if it ever shows in a profile. */
 	spin_lock_bh(&wgfp_flows_lock);
+	if (atomic_read(&wgfp_quiesce_active))
+		goto out;
 	fl = wgfp_flow_find(&t, skb->skb_iif, hash);
 	if (fl) {
 		if (fin && !fl->del) {
@@ -2430,12 +2488,17 @@ static u8 wgfp_flow_slot_locked(const struct wgfp_flow *nfl)
 	return best;
 }
 
+/* Pinned target netdev during wgfp_port_quiesce() (guarded by wgfp_flows_lock)
+ * so NETDEV_UNREGISTER deletes succeed even after unlist_netdevice(). */
+static struct net_device *wgfp_quiesce_dev;
+
 /* Install PENDING records, withdraw del-marked ones.  Only this worker and
  * the teardown (after cancelling it) free entries; nobody frees an
  * INSTALLING entry, so the job pointers stay valid across the unlock. */
 static void wgfp_flow_work_fn(struct work_struct *w)
 {
-	struct { struct wgfp_flow *fl; struct dpaa_wgfp_tuple t; int ifindex;
+	struct { struct wgfp_flow *fl; struct net_device *dev;
+		 struct dpaa_wgfp_tuple t; int ifindex;
 		 bool add, rx; u8 slot; } job[WGFP_BATCH];
 	struct wgfp_flow *fl;
 	struct hlist_node *tmp;
@@ -2468,6 +2531,12 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 		fl->state = WGFP_INSTALLING;
 		job[n].slot = fl->slot;
 		job[n].fl = fl;
+		job[n].dev = NULL;
+		if (!add && wgfp_quiesce_dev &&
+		    wgfp_quiesce_dev->ifindex == fl->ifindex) {
+			dev_hold(wgfp_quiesce_dev);
+			job[n].dev = wgfp_quiesce_dev;
+		}
 		job[n].t = fl->t;
 		job[n].ifindex = fl->ifindex;
 		job[n].add = add;
@@ -2477,7 +2546,8 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 	spin_unlock_bh(&wgfp_flows_lock);
 
 	for (i = 0; i < n; i++) {
-		struct net_device *dev = dev_get_by_index(&init_net, job[i].ifindex);
+		struct net_device *dev = job[i].dev ? job[i].dev :
+			dev_get_by_index(&init_net, job[i].ifindex);
 		int err = -ENODEV;
 
 		if (dev) {
@@ -2492,7 +2562,11 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 		if (job[i].add) {
 			if (err < 0) {
 				atomic64_inc(&wgfp_install_fail);
-				fl->state = WGFP_FAILED;
+				/* Uncertain SYNC/barrier failure may leave an
+				 * unowned or quarantined HW record; keep STUCK
+				 * instead of freeing after WGFP_FAIL_HOLD. */
+				fl->state = (err == -ETIMEDOUT || err == -EIO) ?
+					    WGFP_STUCK : WGFP_FAILED;
 			} else {
 				atomic64_inc(&wgfp_installs);
 				fl->state = WGFP_INSTALLED;
@@ -2513,6 +2587,92 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 	}
 	if (more)
 		queue_work(system_wq, &wgfp_flow_work);
+}
+
+static int wgfp_quiesce_flows_locked_loop(int ifindex)
+{
+	const unsigned int max_passes =
+		DIV_ROUND_UP(WGFP_FLOW_MAX, WGFP_BATCH) + 16;
+	struct wgfp_flow *fl;
+	struct wgfp_rflow *r;
+	struct hlist_node *tmp;
+	unsigned int bkt, pass, pending = 0, stuck = 0;
+
+	for (pass = 0; pass < max_passes; pass++) {
+		pending = 0;
+		stuck = 0;
+		spin_lock_bh(&wgfp_flows_lock);
+		hash_for_each(wgfp_flows, bkt, fl, node) {
+			if (ifindex > 0 && fl->ifindex != ifindex)
+				continue;
+			if (fl->state == WGFP_STUCK) {
+				stuck++;
+				continue;
+			}
+			fl->del = true;
+			if (fl->pst && fl->pst->rxfl == fl)
+				fl->pst->rxfl = NULL;
+			if (fl->state == WGFP_PENDING ||
+			    fl->state == WGFP_INSTALLING ||
+			    fl->state == WGFP_INSTALLED ||
+			    fl->state == WGFP_LEARNING ||
+			    fl->state == WGFP_FAILED)
+				pending++;
+		}
+		spin_unlock_bh(&wgfp_flows_lock);
+		if (!pending)
+			break;
+		queue_work(system_wq, &wgfp_flow_work);
+		flush_work(&wgfp_flow_work);
+	}
+
+	spin_lock_bh(&wgfp_flows_lock);
+	hash_for_each_safe(wgfp_rflows, bkt, tmp, r, node) {
+		if (ifindex > 0 && r->l2.ifindex != ifindex)
+			continue;
+		hash_del_rcu(&r->node);
+		wgfp_nrflows--;
+		kfree_rcu(r, rcu);
+	}
+	spin_unlock_bh(&wgfp_flows_lock);
+	return (stuck || pending) ? -EBUSY : 0;
+}
+
+static int wgfp_port_quiesce(void *priv, struct net_device *dev)
+{
+	int rc;
+
+	(void)priv;
+	if (!dev || dev->ifindex <= 0)
+		return 0;
+	atomic_inc(&wgfp_quiesce_active);
+	spin_lock_bh(&wgfp_flows_lock);
+	wgfp_quiesce_dev = dev;
+	spin_unlock_bh(&wgfp_flows_lock);
+	synchronize_rcu();
+	rc = wgfp_quiesce_flows_locked_loop(dev->ifindex);
+	/* Ensure no worker batch still holds a reference obtained from
+	 * wgfp_quiesce_dev before clearing it and returning. */
+	flush_work(&wgfp_flow_work);
+	spin_lock_bh(&wgfp_flows_lock);
+	wgfp_quiesce_dev = NULL;
+	spin_unlock_bh(&wgfp_flows_lock);
+	atomic_dec(&wgfp_quiesce_active);
+	return rc;
+}
+
+static int wgfp_policy_revoke(void *priv)
+{
+	int rc;
+
+	(void)priv;
+	atomic_inc(&wgfp_quiesce_active);
+	atomic64_inc(&wgfp_obs_epoch);
+	wgfp_rflows_reap(true);
+	synchronize_rcu();
+	rc = wgfp_quiesce_flows_locked_loop(0);
+	atomic_dec(&wgfp_quiesce_active);
+	return rc;
 }
 
 /* Free peers without flows: unhash under the lock, then let every sink-path

@@ -21,14 +21,18 @@ def extract(start, end):
 
 
 def test_wgfp_xmit_uses_owned_skb_instead_of_real_bpid_fd():
-    body = extract("void dpaa_wgfp_xmit(", "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_xmit)")
-    success = body[body.index("skb_put_data("):]
-    assert "netdev_alloc_skb(" in body
-    assert "skb_put_data(" in body
-    assert "wgfp_frame_release(f)" in body
+    body = extract(
+        "static void wgfp_prepare_xmit_skb(",
+        "\nstatic int __init dpaa_wgfp_init(",
+    )
+    xmit = extract("void dpaa_wgfp_xmit(", "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_xmit)")
+    success = xmit[xmit.index("skb_put_data("):]
+    assert "netdev_alloc_skb(" in xmit
+    assert "skb_put_data(" in xmit
+    assert "wgfp_frame_release(f)" in xmit
     assert "dev_queue_xmit(" in body
     assert success.index("skb_put_data(") < success.index("wgfp_frame_release(f)")
-    assert success.index("wgfp_frame_release(f)") < success.index("dev_queue_xmit(")
+    assert success.index("wgfp_frame_release(f)") < success.index("wgfp_submit_skb(")
     assert "qman_enqueue" not in body
     assert "qm_fd_addr_set64" not in body
     release = extract(
@@ -53,7 +57,10 @@ def test_wgfp_xmit_fault_injection(tmp_path):
         "static void wgfp_frame_release(",
         "\nvoid dpaa_wgfp_drop(",
     )
-    body = extract("void dpaa_wgfp_xmit(", "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_xmit)")
+    body = extract(
+        "static void wgfp_prepare_xmit_skb(",
+        "\nstatic int __init dpaa_wgfp_init(",
+    )
     (tmp_path / "wgfp_xmit_body.h").write_text(release + "\n" + body + "\n")
     binary = tmp_path / "wgfp_skb_xmit"
     subprocess.run(

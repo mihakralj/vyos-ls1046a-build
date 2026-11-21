@@ -473,7 +473,7 @@ static int ask_bridge_rec_del(struct ask_bridge_rec *r)
 	if (r->unsettled && !r->dead)
 		return -EBUSY;
 	if (!r->dead) {
-		rc = ask_hw_l2_record(r->port, r->key, 0, r->act, r->vid,
+		rc = ask_hw_l2_record(r->port, r->key, r->fqid, r->act, r->vid,
 				      r->fe_token, false);
 		if (rc == -EAGAIN)
 			return rc;
@@ -485,6 +485,8 @@ static int ask_bridge_rec_del(struct ask_bridge_rec *r)
 					    r->port, rc);
 			return rc;
 		}
+	} else if (!r->unsettled && r->fqid) {
+		ask_hw_l2_fq_put(r->fqid);
 	}
 	list_del(&r->node);
 	ask_bridge_n_recs--;
@@ -933,7 +935,7 @@ static struct notifier_block ask_bridge_blocking_nb = {
  * failed delete stays listed and vetoes the upper-device change: asking FMan
  * to switch profiles with an uncertain bridge owner is never safe.
  */
-static int ask_bridge_port_quiesce(u8 hw_port_id)
+int ask_bridge_dev_quiesce(u8 hw_port_id, int ifindex)
 {
 	struct ask_bridge_rec *r, *tmp;
 	int rc = 0;
@@ -941,13 +943,23 @@ static int ask_bridge_port_quiesce(u8 hw_port_id)
 	ASSERT_RTNL();
 	mutex_lock(&ask_bridge_lock);
 	list_for_each_entry(r, &ask_bridge_recs, node) {
-		if (r->port == hw_port_id && r->unsettled && !r->dead) {
+		bool match = (hw_port_id != 0xff && r->port == hw_port_id) ||
+			     (ifindex > 0 &&
+			      (r->in_ifindex == ifindex ||
+			       r->out_ifindex == ifindex));
+
+		if (match && r->unsettled && !r->dead) {
 			rc = -EBUSY;
 			goto out;
 		}
 	}
 	list_for_each_entry_safe(r, tmp, &ask_bridge_recs, node) {
-		if (r->port != hw_port_id)
+		bool match = (hw_port_id != 0xff && r->port == hw_port_id) ||
+			     (ifindex > 0 &&
+			      (r->in_ifindex == ifindex ||
+			       r->out_ifindex == ifindex));
+
+		if (!match)
 			continue;
 		rc = ask_bridge_rec_del(r);
 		if (rc)
@@ -956,6 +968,11 @@ static int ask_bridge_port_quiesce(u8 hw_port_id)
 out:
 	mutex_unlock(&ask_bridge_lock);
 	return rc;
+}
+
+int ask_bridge_port_quiesce(u8 hw_port_id)
+{
+	return ask_bridge_dev_quiesce(hw_port_id, 0);
 }
 
 /*

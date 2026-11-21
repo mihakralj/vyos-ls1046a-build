@@ -10,9 +10,11 @@ means the reported "timeout" is always conservative: the quarantined records
 and generations are genuinely unreferenced, so no injected outcome can free
 memory a walker still holds.
 
-Writing 1 makes the next attempt recover on retry (timeouts+1, recovered+1);
-writing 3 (FMAN_EHASH_SYNC_TRIES) wedges one operation and poisons its table
-until a later un-injected SYNC (F-269 recover). Zero = production behaviour.
+After F-293 replaced F-271's 3-attempt retry with a single fail-closed
+100 ms INV0 handshake, writing 1 to ehash_sync_inject immediately poisons
+inv0_faulted (and the table) until cold boot, exercising quarantine,
+retention, module pinning, and publication fencing without risking DMA UAF.
+Zero = production behaviour.
 
 After F-273 and after the test-ehash-delete harness, which models the
 un-instrumented helper. Idempotent; count-gated anchors.

@@ -225,6 +225,11 @@ static int ask_hw_flow_publish_begin(const struct ask_flow_key *key, unsigned lo
 	return 0;
 }
 static void ask_hw_flow_publish_end(struct ask_hw_pcd *guard) {}
+static bool ask_hw_tx_fqid_live_locked(struct ask_hw_pcd *guard, u32 tx_fqid)
+{
+	(void)guard; (void)tx_fqid;
+	return true;
+}
 static unsigned long ask_hw_get_enq_fe_off(void) { return 1; }
 static int ask_hw_flow_get_sink_fqid(u32 hw_id, u32 *fqid)
 {

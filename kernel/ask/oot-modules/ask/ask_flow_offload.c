@@ -58,6 +58,7 @@
 #include <net/ndisc.h>
 #include <net/neighbour.h>
 #include <net/netevent.h>
+#include <linux/fsl/dpaa_wgfp.h>
 #include <net/ipv6.h>
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_ecache.h>	/* IPCT_ASSURED for offloaded UDP */
@@ -143,7 +144,7 @@ bool ask_vlan_push_only_enabled(void)
 	return READ_ONCE(ask_vlan_push_only);
 }
 
-static bool ask_ipv6_hw_frag = true;
+static bool ask_ipv6_hw_frag = false;
 static bool ask_ipv6_hw_frag_disable_incomplete;
 static int ask_flow_v6_frag_flush_sync(void);
 
@@ -157,9 +158,10 @@ static int ask_ipv6_hw_frag_set(const char *val, const struct kernel_param *kp)
 	rc = kstrtobool(val ? val : "1", &enabled);
 	if (rc)
 		goto out;
+	mutex_lock(&ask_killswitch_mutex);
 	if (enabled && ask_ipv6_hw_frag_disable_incomplete) {
 		rc = -EBUSY;
-		goto out;
+		goto unlock;
 	}
 	WRITE_ONCE(ask_ipv6_hw_frag, enabled);
 	if (ask_hw_is_ready() && !enabled) {
@@ -169,6 +171,8 @@ static int ask_ipv6_hw_frag_set(const char *val, const struct kernel_param *kp)
 			pr_err("ask: flow_offload: IPv6 HW frag disable incomplete (%d); hardware records may remain, resolve retained owners or cold boot before enabling\n",
 			       rc);
 	}
+unlock:
+	mutex_unlock(&ask_killswitch_mutex);
 out:
 	module_put(THIS_MODULE);
 	return rc;
@@ -181,11 +185,10 @@ static const struct kernel_param_ops ask_ipv6_hw_frag_ops = {
 module_param_cb(ipv6_hw_frag, &ask_ipv6_hw_frag_ops, &ask_ipv6_hw_frag, 0644);
 MODULE_PARM_DESC(ipv6_hw_frag,
 		 "Offload IPv6 flows whose egress MTU is below the ingress port MTU "
-		 "with the microcode fragmenter (vendor behaviour, default 1: oversize "
-		 "packets are fragmented in hardware and no Packet Too Big is sent, "
-		 "RFC 8200 4.5). Global RFC 8200 kill switch: 0 keeps such flows in "
-		 "software (the kernel sends Packet Too Big) and drops the live HW "
-		 "records that carry the MTU check");
+		 "with the microcode fragmenter (default 0, RFC 8200 safe: keeps such "
+		 "flows in software so the kernel sends Packet Too Big; opt-in 1 "
+		 "enables vendor hardware fragmentation, and switching 1->0 revokes "
+		 "both SW flowtable entries and live HW records)");
 
 /*
  * Offload only flows that have lived offload_delay_ms. Short connections then
@@ -1702,6 +1705,7 @@ rearm:
 
 struct ask_flow_block_priv {
 	struct net_device *dev;
+	netdevice_tracker dev_tracker;
 	u64 id;
 	bool indirect;
 	bool module_pinned;
@@ -1738,6 +1742,8 @@ ask_flow_block_priv_alloc(struct net_device *dev)
 		return NULL;
 
 	e->priv.dev = dev;
+	if (dev)
+		netdev_hold(dev, &e->priv.dev_tracker, GFP_KERNEL);
 	e->priv.id = atomic64_inc_return(&ask_flow_block_next_id) &
 		     (LONG_MAX >> 1);
 	if (!e->priv.id)
@@ -1760,10 +1766,14 @@ static void ask_flow_block_priv_free(void *cb_priv)
 	list_for_each_entry_safe(e, tmp, &ask_flow_block_priv_list, node) {
 		if (&e->priv == p) {
 			bool module_pinned = p->module_pinned;
+			struct net_device *dev = p->dev;
+			netdevice_tracker tracker = p->dev_tracker;
 
 			list_del(&e->node);
 			spin_unlock(&ask_flow_block_priv_lock);
 			kfree(e);
+			if (dev)
+				netdev_put(dev, &tracker);
 			if (module_pinned)
 				module_put(THIS_MODULE);
 			return;
@@ -3123,6 +3133,11 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	rc = ask_hw_flow_publish_begin(key, enq_off, &guard, &fm);
 	if (rc)
 		return rc;
+	/* T1(b): re-validate egress TX FQ is still registered under h->lock. */
+	if (!ask_hw_tx_fqid_live_locked(guard, action.tx_fqid)) {
+		ask_hw_flow_publish_end(guard);
+		return -ENODEV;
+	}
 	ask_pr_dbg("F-195 flow-add call fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
 		   fm, &action, key->port_id, table_idx, action.key_size,
 		   sizeof(action),
@@ -3904,18 +3919,32 @@ int ask_flow_nat66_flush(void)
 	return rc;
 }
 
+static bool ask_v6_frag_sw_match(const struct flow_offload *flow, void *data)
+{
+	(void)data;
+	return flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].tuple.l3proto == NFPROTO_IPV6 ||
+	       flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].tuple.l3proto == NFPROTO_IPV6;
+}
+
 static int ask_flow_v6_frag_flush_sync(void)
 {
-	int rc;
+	unsigned int ft_unres = 0;
+	int ft_rc, rc;
 
 	if (READ_ONCE(ask_ipv6_hw_frag))
 		return -EINVAL;
+	/* Patch 155: revoke SW flowtable entries before ask_flow_lifecycle_lock
+	 * (preserving conntrack/NAT) so subsequent packets traverse ip6_forward. */
+	ft_rc = nf_flow_table_revoke_match(&init_net, ask_v6_frag_sw_match,
+					   NULL, true, &ft_unres);
 	mutex_lock(&ask_flow_lifecycle_lock);
 	rc = __ask_flow_flush_checked(ask_v6_frag_collect,
 				      "IPv6 hardware fragmentation disabled",
 				      &ask_v6_frag_withdraw_unresolved,
 				      ASK_FE_CAP_V6_FRAG);
 	mutex_unlock(&ask_flow_lifecycle_lock);
+	if (!rc && (ft_rc || ft_unres))
+		rc = ft_rc ? ft_rc : -EBUSY;
 	return rc;
 }
 
@@ -5105,6 +5134,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		ask_resolve_neigh_v4(neigh_dev, dst_ip,
 				     key.next_hop_mac, key.egress_mac);
 
+	if (egress_dev)
+		key.oif_phys_ifindex = is_vlan_dev(egress_dev) ?
+			vlan_dev_real_dev(egress_dev)->ifindex :
+			egress_dev->ifindex;
 	if (neigh_dev) {
 		key.nh_ifindex = neigh_dev->ifindex;
 		if (is_v6)
@@ -6528,7 +6561,7 @@ int ask_flow_policy_revoke(void)
 	u32 rem_hw, unresolved;
 	bool sweep_identity_lost = false, exhausted, sticky_id_lost;
 	bool concurrent_unresolved;
-	int ft_rc, sweep_rc;
+	int ft_rc, sweep_rc, wgfp_rc;
 
 	mutex_lock(&ask_policy_revoke_mutex);
 
@@ -6557,6 +6590,7 @@ int ask_flow_policy_revoke(void)
 
 	ft_rc = nf_flow_table_revoke_all(&init_net, true, &ft_unresolved);
 	sweep_rc = ask_flow_policy_sweep_hw(&sweep_identity_lost);
+	wgfp_rc = dpaa_wgfp_policy_revoke();
 	orphans = ask_fe_orphan_count_get();
 	hw_cnt = t ? atomic_read(&t->num_hw_backed) : 0;
 	rem_hw = hw_cnt > 0 ? (u32)hw_cnt : 0;
@@ -6573,6 +6607,8 @@ int ask_flow_policy_revoke(void)
 	if (ft_rc && !ft_unresolved)
 		unresolved = ask_u32_sat_add(unresolved, 1);
 	if (sweep_rc && !rem_hw)
+		unresolved = ask_u32_sat_add(unresolved, 1);
+	if (wgfp_rc)
 		unresolved = ask_u32_sat_add(unresolved, 1);
 	if ((sticky_id_lost || exhausted || concurrent_unresolved) && !unresolved)
 		unresolved = 1;
@@ -6609,8 +6645,8 @@ int ask_flow_policy_revoke(void)
 	ask_policy_unresolved_count = unresolved;
 	ask_policy_revoke_state = ASK_REVOKE_UNRESOLVED;
 	spin_unlock_bh(&ask_policy_lock);
-	pr_err("ask: policy revocation UNRESOLVED (ft=%u hw=%u orphans=%u ft_rc=%d sweep_rc=%d id_lost=%u exhausted=%u race=%u); admission stays fenced\n",
-	       ft_unresolved, rem_hw, orphans, ft_rc, sweep_rc,
+	pr_err("ask: policy revocation UNRESOLVED (ft=%u hw=%u orphans=%u ft_rc=%d sweep_rc=%d wgfp_rc=%d id_lost=%u exhausted=%u race=%u); admission stays fenced\n",
+	       ft_unresolved, rem_hw, orphans, ft_rc, sweep_rc, wgfp_rc,
 	       sticky_id_lost, exhausted, concurrent_unresolved);
 	mutex_unlock(&ask_policy_revoke_mutex);
 	return -EBUSY;
@@ -6633,6 +6669,158 @@ static void ask_policy_revoke_exit(void)
 	mutex_unlock(&ask_policy_revoke_mutex);
 }
 /* End of policy revocation state machine. */
+
+bool ask_flow_policy_admission_fenced(void)
+{
+	return READ_ONCE(ask_policy_fence_depth) > 0 ||
+	       READ_ONCE(ask_policy_revoke_state) == ASK_REVOKE_UNRESOLVED;
+}
+
+static bool ask_ifindex_uses_phys_rcu(u32 idx, int phys_ifindex)
+{
+	struct net_device *d;
+
+	if (!idx || phys_ifindex <= 0)
+		return false;
+	if (idx == (u32)phys_ifindex)
+		return true;
+	d = dev_get_by_index_rcu(&init_net, idx);
+	return d && is_vlan_dev(d) && vlan_dev_real_dev(d)->ifindex == phys_ifindex;
+}
+
+static bool ask_port_withdraw_sw_match(const struct flow_offload *flow,
+				       void *data)
+{
+	int phys_ifindex = *(const int *)data;
+	int dir;
+
+	if (phys_ifindex <= 0)
+		return false;
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
+		const struct flow_offload_tuple *t = &flow->tuplehash[dir].tuple;
+		struct net_device *dst_dev;
+
+		if (ask_ifindex_uses_phys_rcu(t->iifidx, phys_ifindex))
+			return true;
+		if (t->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
+		    (ask_ifindex_uses_phys_rcu(t->out.ifidx, phys_ifindex) ||
+		     ask_ifindex_uses_phys_rcu(t->out.hw_ifidx, phys_ifindex)))
+			return true;
+		if (t->dst_cache) {
+			dst_dev = dst_dev_rcu(t->dst_cache);
+			if (dst_dev &&
+			    ask_ifindex_uses_phys_rcu(dst_dev->ifindex,
+						      phys_ifindex))
+				return true;
+		}
+	}
+	return false;
+}
+
+/* Guarded by ask_flow_lifecycle_lock during ask_flow_port_withdraw(). */
+static u8 ask_port_withdraw_pid = 0xff;
+static int ask_port_withdraw_ifindex;
+
+static int ask_port_withdraw_collect(struct ask_flow *f, void *arg)
+{
+	bool match = false;
+
+	if (ask_port_withdraw_pid != 0xff &&
+	    f->key.port_id == ask_port_withdraw_pid) {
+		match = true;
+	} else if (ask_port_withdraw_ifindex > 0) {
+		rcu_read_lock();
+		match = f->key.oif_phys_ifindex == (u32)ask_port_withdraw_ifindex ||
+			ask_ifindex_uses_phys_rcu(f->key.iif,
+						  ask_port_withdraw_ifindex) ||
+			ask_ifindex_uses_phys_rcu(f->oif,
+						  ask_port_withdraw_ifindex) ||
+			ask_ifindex_uses_phys_rcu(f->key.nh_ifindex,
+						  ask_port_withdraw_ifindex) ||
+			ask_ifindex_uses_phys_rcu(f->key.pppoe_session.ifindex,
+						  ask_port_withdraw_ifindex);
+		rcu_read_unlock();
+	}
+	return match ? ask_collect_flush_victim(f, arg) : 0;
+}
+
+static void ask_flow_pending_drop_port(u8 hw_port_id, int ifindex)
+{
+	struct ask_flow_pending *p, *tmp;
+
+	spin_lock_bh(&ask_flow_pending_lock);
+	rcu_read_lock();
+	list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
+		bool match = (hw_port_id != 0xff && p->key.port_id == hw_port_id) ||
+			     (ifindex > 0 &&
+			      (p->key.oif_phys_ifindex == (u32)ifindex ||
+			       ask_ifindex_uses_phys_rcu(p->key.iif, ifindex) ||
+			       ask_ifindex_uses_phys_rcu(p->oif, ifindex) ||
+			       ask_ifindex_uses_phys_rcu(p->key.nh_ifindex, ifindex) ||
+			       ask_ifindex_uses_phys_rcu(p->key.pppoe_session.ifindex,
+							 ifindex)));
+		if (!match)
+			continue;
+		list_del(&p->node);
+		ask_flow_pending_count--;
+		kfree(p);
+	}
+	rcu_read_unlock();
+	spin_unlock_bh(&ask_flow_pending_lock);
+}
+
+/*
+ * T1(b)/T1(f): synchronously withdraw every SW flowtable entry, deferred
+ * pending flow, and ASK hardware flow touching @hw_port_id or @ifindex
+ * (including VLAN vifs stacked on @ifindex and PPPoE sessions on it).
+ */
+int ask_flow_port_withdraw(u8 hw_port_id, int ifindex)
+{
+	unsigned int ft_unres = 0;
+	bool identity_lost = false;
+	int ft_rc = 0, rc;
+
+	if (ifindex > 0)
+		ft_rc = nf_flow_table_revoke_match(&init_net,
+						   ask_port_withdraw_sw_match,
+						   &ifindex, true, &ft_unres);
+
+	mutex_lock(&ask_flow_lifecycle_lock);
+	ask_flow_pending_drop_port(hw_port_id, ifindex);
+	ask_port_withdraw_pid = hw_port_id;
+	ask_port_withdraw_ifindex = ifindex;
+	rc = __ask_flow_flush_matching(ask_port_withdraw_collect,
+				       "port quiesce", true, &identity_lost);
+	ask_port_withdraw_pid = 0xff;
+	ask_port_withdraw_ifindex = 0;
+	mutex_unlock(&ask_flow_lifecycle_lock);
+
+	if (rc)
+		return rc;
+	if (identity_lost)
+		return -ESTALE;
+	if (ask_flow_has_port_orphan(hw_port_id, ifindex))
+		return -EBUSY;
+	if (ft_rc)
+		return ft_rc;
+	if (ft_unres)
+		return -EBUSY;
+	return 0;
+}
+
+bool ask_flow_has_port_orphan(u8 hw_port_id, int ifindex)
+{
+	bool blocked;
+
+	(void)hw_port_id;
+	(void)ifindex;
+	/* Fail closed: any unsettled FE orphan (even on another ingress port)
+	 * may target this port's egress TX FQ. */
+	mutex_lock(&ask_fe_orphan_lock);
+	blocked = !list_empty(&ask_fe_orphans);
+	mutex_unlock(&ask_fe_orphan_lock);
+	return blocked;
+}
 
 /* ------------------------------------------------------------------------- */
 /* Public block-bind helper                                                   */

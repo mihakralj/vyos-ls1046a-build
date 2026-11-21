@@ -1,6 +1,7 @@
 /* Host fault tests for generated FMan per-port table allocation. */
 #include <assert.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -13,6 +14,7 @@ typedef uint32_t u32;
 
 struct fman_pcd_ehash_table {
 	unsigned long table_dma;
+	bool per_port;
 };
 struct fake_list {
 	struct fman_pcd_ehash_table *first;
@@ -98,6 +100,9 @@ int main(void)
 		assert(allocations == 1 && !frees);
 		assert(chosen == &new_table && pcd.fe_arming_v4_table == chosen);
 		assert(pcd.fe_arming_port_id == 0x10);
+#ifdef FMAN_F321
+		assert(new_table.per_port);
+#endif
 	}
 	puts("FE arm: per-port allocation failures unwind without template fallback");
 	return 0;

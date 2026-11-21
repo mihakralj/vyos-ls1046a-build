@@ -18,6 +18,7 @@ struct fman_pcd_ehash_table {
 	struct list_head node;
 	struct list_head flows, quarantined_flows, quarantined_cu;
 	bool poisoned, draining;
+	bool per_port;
 };
 struct fman_pcd_fe_port { struct fman_pcd_ehash_table *table_v4; };
 struct fman_pcd {
@@ -139,6 +140,8 @@ int main(void)
 	assert(!pthread_mutex_init(&pcd.fe_lock.native, NULL));
 	pcd.port_present = true;
 	pcd.port.table_v4 = &pcd.table;
+	pcd.table.per_port = true;
+	pcd.shared.per_port = false;
 	tables[0] = &pcd.table;
 	tables[1] = &pcd.shared;
 	set_bit(0x10, pcd.fe_port_armed);

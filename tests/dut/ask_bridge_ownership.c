@@ -208,6 +208,27 @@ static bool ask_hw_l2_port_tearing_down(struct ask_hw_pcd *h, u8 port)
 	return l2_tearing_down;
 }
 
+static int l2_fq_users;
+static int ask_hw_l2_fq_get_locked(struct ask_hw_pcd *h, u32 fqid)
+{
+	assert(h->lock.held && fqid);
+	l2_fq_users++;
+	return 0;
+}
+static void ask_hw_l2_fq_put_locked(struct ask_hw_pcd *h, u32 fqid)
+{
+	assert(h->lock.held);
+	if (!fqid)
+		return;
+	if (l2_fq_users > 0)
+		l2_fq_users--;
+}
+static void ask_hw_l2_fq_put(u32 fqid)
+{
+	if (fqid && l2_fq_users > 0)
+		l2_fq_users--;
+}
+
 static unsigned long ask_hw_get_enq_fe_off(void) { return 1; }
 
 static int ask_bridge_fe_action(const u8 *key, u32 fqid, unsigned long off,

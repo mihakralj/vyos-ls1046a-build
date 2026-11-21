@@ -3141,6 +3141,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-scan.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
     echo "### fman_pcd.c: F-315 stats scan check passed"
+    # F-321 (T1(f)): strict per-port ehash table isolation so unrelated ports
+    # do not block port disengage with -EBUSY.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_321.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f321-fixup.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_prepared_disarm,fman_arm_table 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c/dpaa_ethtool.c: F-321 per-port ehash isolation verified"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_294.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-netns-guard 2>&1
     echo "### dpaa_eth.c: F-294 immutable DPAA netdev identity verified"

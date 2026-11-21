@@ -216,6 +216,11 @@ static int ask_fe_flow_publish(struct fman *owner, u8 port, const u8 *key,
 
 #include "ask_hw_flow_family_body.h"
 #include "ask_hw_publish_body.h"
+static bool ask_hw_tx_fqid_live_locked(struct ask_hw_pcd *guard, u32 tx_fqid)
+{
+	(void)guard; (void)tx_fqid;
+	return true;
+}
 #include "ask_fe_insert_body.h"
 #include "ask_pppoe_port_body.h"
 

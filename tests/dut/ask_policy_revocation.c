@@ -147,6 +147,8 @@ static int mock_ft_rc;
 static int mock_sweep_rc;
 static bool mock_sweep_identity_lost;
 static unsigned int mock_orphan_count;
+static int mock_wgfp_revoke_rc;
+static unsigned int wgfp_revoke_calls;
 static bool inject_concurrent_unresolved_during_sweep;
 static bool inject_new_g3_during_sweep;
 static u8 observed_state_during_sweep;
@@ -221,6 +223,12 @@ static void ask_flow_pending_drain_all(void)
 static unsigned int ask_fe_orphan_count_get(void)
 {
 	return mock_orphan_count;
+}
+static int dpaa_wgfp_policy_revoke(void)
+{
+	assert(!ask_flow_lifecycle_lock.held);
+	wgfp_revoke_calls++;
+	return mock_wgfp_revoke_rc;
 }
 
 static void ask_policy_note_unresolved(u32 count, bool identity_lost);
@@ -334,6 +342,8 @@ static void reset_all(void)
 	mock_sweep_rc = 0;
 	mock_sweep_identity_lost = false;
 	mock_orphan_count = 0;
+	mock_wgfp_revoke_rc = 0;
+	wgfp_revoke_calls = 0;
 	inject_concurrent_unresolved_during_sweep = false;
 	inject_new_g3_during_sweep = false;
 	observed_state_during_sweep = ASK_REVOKE_IDLE;
@@ -430,6 +440,13 @@ static void test_revoke_clean_and_concurrent_unresolved(void)
 	/* Recovery clears transient unresolved and lifts fence to 0. */
 	mock_ft_unresolved = 0;
 	mock_ft_rc = 0;
+	/* WGFP revoke failure must also hold UNRESOLVED and fence. */
+	mock_wgfp_revoke_rc = -EBUSY;
+	assert(ask_flow_policy_revoke() == -EBUSY);
+	ask_policy_get_telemetry(&epoch, &state, &unresolved);
+	assert(state == ASK_REVOKE_UNRESOLVED && unresolved >= 1 && nf_fence_depth == 1);
+	mock_wgfp_revoke_rc = 0;
+
 	assert(ask_flow_policy_revoke() == 0);
 	ask_policy_get_telemetry(&epoch, &state, &unresolved);
 	assert(state == ASK_REVOKE_RETIRED && unresolved == 0);

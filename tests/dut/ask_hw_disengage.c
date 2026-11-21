@@ -24,8 +24,11 @@ typedef uint64_t u64;
 #define ask_pr_err(...) ((void)0)
 #define ask_pr_dbg(...) ((void)0)
 #define ASK_HW_MAX_PORTS 8
+#define ASK_HW_NOCONF_SLOTS 8
 #define ASK_FAM_V4 1
 #define ASK_FAM_V6 2
+
+typedef int netdevice_tracker;
 
 enum fman_pcd_fe_profile {
 	FMAN_PCD_FE_PROFILE_ROUTED,
@@ -61,6 +64,16 @@ struct ask_hw_pcd {
 	struct fman *fman;
 	struct ask_hw_port port[ASK_HW_MAX_PORTS];
 	struct xarray flow_cookies;
+	struct {
+		struct net_device *dev;
+		netdevice_tracker dev_tracker;
+		u32 ifindex;
+		u32 fqid;
+		u32 legacy_users;
+		u32 l2_users;
+		bool unregistered;
+		bool retained;
+	} noconf_tx[ASK_HW_NOCONF_SLOTS];
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
@@ -240,6 +253,30 @@ static void ask_hw_prewarm_egress_fq(u8 port)
 	prewarms++;
 }
 static void ask_bridge_kick(void) { bridge_kicks++; }
+static u32 ask_hw_noconf_slot_users_locked(const struct ask_hw_pcd *h,
+					   unsigned int slot)
+{
+	return h->noconf_tx[slot].legacy_users + h->noconf_tx[slot].l2_users;
+}
+static int netdev_puts;
+static void netdev_put(struct net_device *dev, netdevice_tracker *t)
+{
+	(void)dev; (void)t;
+	netdev_puts++;
+}
+static int quiesce_owners_rc, quiesce_owners_calls, restore_family_calls;
+static int ask_hw_offload_quiesce_port_owners(u8 port)
+{
+	(void)port;
+	quiesce_owners_calls++;
+	return quiesce_owners_rc;
+}
+static void ask_hw_role_restore_family(struct ask_hw_pcd *h, u8 port,
+				       u8 fam, u64 policy_seq)
+{
+	(void)h; (void)port; (void)fam; (void)policy_seq;
+	restore_family_calls++;
+}
 /* No cookies survive to teardown in these scenarios. */
 #define xa_for_each(xa, idx, entry) \
 	for ((idx) = 0, (entry) = NULL; (void)(xa), (entry); )

@@ -23,7 +23,7 @@ def test_nat_and_v6_frag_switches_report_incomplete_withdrawal(tmp_path):
     n44_end = hw.index("\nbool ask_hw_nat44_offload_armed(", n44_start)
     n66_start = hw.index("static bool ask_nat66_offload = true;")
     n66_end = hw.index("\nbool ask_hw_nat66_offload_armed(", n66_start)
-    v6f_start = fo.index("static bool ask_ipv6_hw_frag = true;")
+    v6f_start = fo.index("static bool ask_ipv6_hw_frag = false;")
     v6f_end = fo.index("\nstatic const struct kernel_param_ops ask_ipv6_hw_frag_ops", v6f_start)
 
     body = hw[n44_start:n44_end] + "\n" + hw[n66_start:n66_end] + "\n" + fo[v6f_start:v6f_end]

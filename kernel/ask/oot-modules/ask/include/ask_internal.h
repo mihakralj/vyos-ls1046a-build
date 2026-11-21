@@ -138,12 +138,18 @@ unsigned long ask_hw_get_enq_fe_off(void);
 struct net_device *ask_hw_port_netdev(u8 hw_port_id);	/* rtnl held */
 int  ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id);
 int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
-int  ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
+int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
 		      u16 vid, u64 fe_token, bool add);
-int  ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 fe_token,
+void ask_hw_l2_fq_put(u32 fqid);
+int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 fe_token,
 			   u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
 u8   ask_hw_port_family_mask(u8 hw_port_id);
+int  ask_bridge_port_quiesce(u8 hw_port_id);
+int  ask_bridge_dev_quiesce(u8 hw_port_id, int ifindex);
+int  ask_flow_port_withdraw(u8 hw_port_id, int ifindex);
+bool ask_flow_has_port_orphan(u8 hw_port_id, int ifindex);
+bool ask_flow_policy_admission_fenced(void);
 
 /*
  * CR-012: warms this port's no-confirm egress TX FQ cache. MUST be called
@@ -458,7 +464,10 @@ bool ask_hw_flow_policy_current(const struct ask_flow_key *key);
 /* Successful begin holds the PCD mutex and an ASK module reference. */
 int ask_hw_flow_publish_begin(const struct ask_flow_key *key, unsigned long enq_off,
 			      struct ask_hw_pcd **guard, struct fman **fm);
+bool ask_hw_tx_fqid_live_locked(struct ask_hw_pcd *guard, u32 tx_fqid);
 void ask_hw_flow_publish_end(struct ask_hw_pcd *guard);
+/* Shared mutex serializing nat44/nat66/ipv6_hw_frag sysfs kill-switch writers. */
+extern struct mutex ask_killswitch_mutex;
 /* NAT offload gates: IPv4 is shipping/default-on; NAT66 is experiment/default-off. */
 bool ask_hw_nat44_offload_armed(void);
 bool ask_hw_nat66_offload_armed(void);
@@ -681,6 +690,10 @@ u8     nat_flags;
 	 */
 	u8     nh_ip[16];
 	u32    nh_ifindex;
+	/* T1(b): physical egress DPAA ifindex (resolved while VLAN vif is still
+	 * listed) so NETDEV_UNREGISTER withdrawal catches VLAN-egress flows even
+	 * after vlan_device_event() unlists the vif. Software-only, not in FE key. */
+	u32    oif_phys_ifindex;
 	/* Software-only session snapshot for REPLACE and neighbour replay. */
 	struct ask_pppoe_info pppoe_session;
 	u64    pppoe_session_epoch;

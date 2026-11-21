@@ -204,7 +204,7 @@ static bool wgfp_cpu_napi_ready;
  * CPUs, so it is pinned to that CPU before its NAPI is enabled; and the knob
  * is accepted only before WGFP has created any NAPI (once per boot, like
  * orp_td), so no NAPI ever runs threaded without being pinned. */
-static bool wgfp_threaded;
+static bool wgfp_threaded = true;
 
 
 /* Allocated at init, not static: sink_stash makes QMan DMA-map each sink's
@@ -241,8 +241,8 @@ static unsigned int wgfp_fanout;
  * 1-3 have headroom.  wgfp_fanout_home = m gives worker 0 one batch in m. */
 static unsigned int wgfp_fanout_home;
 #define WGFP_FANOUT_HOME_MAX	64
-/* Spread mode: RX records go to the port's ORP queue, so one tunnel's receive
- * work runs on every CPU in order (default on; "spread 0" is the A/B switch). */
+/* Spread mode: disabled in production (de598f26) because an independently
+ * submitted skb cannot safely inherit an ORP's wire-order slot. */
 static bool wgfp_spread = false;
 /* ORP queue settings, taken when a port's ORP queue is created (boot
  * lifetime, so set them before the first spread record): tail-drop bytes,
@@ -275,15 +275,10 @@ static void wgfp_fqd_stash(struct qm_mcc_initfq *opts)
 	qm_fqd_set_stashing(&opts->fqd, 1, 2,
 			    DIV_ROUND_UP(sizeof(struct qman_fq), 64));
 }
-/* Prefetch the whole frame when a sink dequeues it.  FMan DMAs it to DDR,
- * so the decrypt or seal otherwise takes its ~23 cache misses one at a time
- * (.185, image 2345, P6+spread 1T download: 26 L2 refills and ~18k cycles per
- * packet against ~9k for hot-cache ChaCha20-Poly1305).  1 = prefetch for
- * read, 2 = for store (the AEAD rewrites the buffer in place); 0 = off.
- * Default 2: on .106 (image 0011, P6 + spread) it took 1T download from
- * 3.74-3.77 to 4.59-4.61 Gbit/s (18.0k -> 14.6k cycles per packet), 4T
- * download from 3.63 to 4.59, and 1T upload from 3.94 to 4.25. */
-static unsigned int wgfp_prefetch = 2;
+/* Prefetch the whole frame when a sink dequeues it. Default 1 (prefetch for
+ * read): TX/RX paths now read f->buf without mutating the DMA_FROM_DEVICE
+ * BMan RX page. 2 = prefetchw, 0 = off. */
+static unsigned int wgfp_prefetch = 1;
 /* Prefetch at most this many bytes of a frame (0 = all of it).  Issuing a
  * prefetch for every line stalls once the core's outstanding-miss slots are
  * full: wgfp_dqrr_frame rose from 2.7% to 9.4% of cycles with prefetch 2
@@ -333,6 +328,11 @@ static inline void wgfp_sink_count(struct wgfp_sink *s, u32 len)
 	s->bytes += len;
 }
 static DEFINE_MUTEX(wgfp_lock);
+/* Serializes dpaa_wgfp_unregister() against sleeping port_quiesce/policy_revoke
+ * callbacks without holding wgfp_lock across flush_work(). Lock order:
+ * wgfp_lab_lock -> rtnl_lock / ask_policy_revoke_mutex -> wgfp_ops_quiesce_lock
+ * -> wgfp_lock -> pcd->fe_lock. */
+static DEFINE_MUTEX(wgfp_ops_quiesce_lock);
 
 /* Consumer hook (the wireguard module) and normal DPAA egress netdevices. */
 static const struct dpaa_wgfp_ops __rcu *wgfp_ops;
@@ -358,6 +358,9 @@ static atomic64_t wgfp_xmit_frame_wait_fail = ATOMIC64_INIT(0);
 static atomic64_t wgfp_xmit_poll_wait_fail = ATOMIC64_INIT(0);
 static atomic64_t wgfp_xmit_invalid_egress = ATOMIC64_INIT(0);
 static atomic64_t wgfp_xmit_orp_wait_fail = ATOMIC64_INIT(0);
+static atomic64_t wgfp_xmit_nomem = ATOMIC64_INIT(0);
+static atomic64_t wgfp_xmit_qdisc_drop = ATOMIC64_INIT(0);
+static atomic64_t wgfp_xmit_cn = ATOMIC64_INIT(0);
 
 static void wgfp_touch_frame(struct wgfp_sink *s, u8 *p, u32 len)
 {
@@ -1061,7 +1064,7 @@ static int wgfp_stats_emit(struct seq_file *m, bool query_fq)
 	for (i = 0; i < wgfp_nports; i++)
 		total += wgfp_ports[i].nsinks + !!wgfp_ports[i].dist +
 			 !!wgfp_ports[i].orp;
-	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu xmit_frame_wait_fail=%llu xmit_poll_wait_fail=%llu xmit_invalid_egress=%llu xmit_orp_wait_fail=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d sink_stash=%d prefetch=%u prefetch_max=%u threaded=%d tx_batch=%u orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=%s\n",
+	seq_printf(m, "touch=%u sinks=%u per_port=%u fanout=%u fanout_home=%u ports=%u global=%u pool_failed=%d ops=%d egress=%d xmit_ok=%llu xmit_fail=%llu xmit_ern=%llu xmit_frame_wait_fail=%llu xmit_poll_wait_fail=%llu xmit_invalid_egress=%llu xmit_orp_wait_fail=%llu xmit_nomem=%llu xmit_qdisc_drop=%llu xmit_cn=%llu rx_enq_fail=%llu rx_ern=%llu spread=%d orp_td=%u orp_stash=%d sink_stash=%d prefetch=%u prefetch_max=%u threaded=%d tx_batch=%u orp_frames=%llu orp_holes=%llu orp_wait_fail=%llu orp_hole_ern=%llu frm_cnt_encoding=%s\n",
 		   wgfp_touch, total, wgfp_per_port, READ_ONCE(wgfp_fanout),
 		   READ_ONCE(wgfp_fanout_home),
 		   wgfp_nports, wgfp_nglobal,
@@ -1074,6 +1077,9 @@ static int wgfp_stats_emit(struct seq_file *m, bool query_fq)
 		   (u64)atomic64_read(&wgfp_xmit_poll_wait_fail),
 		   (u64)atomic64_read(&wgfp_xmit_invalid_egress),
 		   (u64)atomic64_read(&wgfp_xmit_orp_wait_fail),
+		   (u64)atomic64_read(&wgfp_xmit_nomem),
+		   (u64)atomic64_read(&wgfp_xmit_qdisc_drop),
+		   (u64)atomic64_read(&wgfp_xmit_cn),
 		   (u64)atomic64_read(&wgfp_rx_enq_fail),
 		   (u64)atomic64_read(&wgfp_rx_ern),
 		   READ_ONCE(wgfp_spread), READ_ONCE(wgfp_orp_td),
@@ -1121,6 +1127,9 @@ int dpaa_wgfp_register(const struct dpaa_wgfp_ops *ops, void *priv)
 {
 	int ret = 0;
 
+	/* Hold wgfp_ops_quiesce_lock outside wgfp_lock (matching unregister) so
+	 * port_quiesce/policy_revoke readers see an ordered (ops, priv) pair. */
+	mutex_lock(&wgfp_ops_quiesce_lock);
 	mutex_lock(&wgfp_lock);
 	if (rcu_access_pointer(wgfp_ops)) {
 		ret = -EBUSY;
@@ -1139,6 +1148,7 @@ int dpaa_wgfp_register(const struct dpaa_wgfp_ops *ops, void *priv)
 		}
 	}
 	mutex_unlock(&wgfp_lock);
+	mutex_unlock(&wgfp_ops_quiesce_lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_register);
@@ -1146,16 +1156,55 @@ EXPORT_SYMBOL_GPL(dpaa_wgfp_register);
 void dpaa_wgfp_unregister(void)
 {
 	/*
-	 * Hold wgfp_lock across the grace period: readers load wgfp_ops and
-	 * wgfp_ops_priv separately, so a register racing in before old readers
-	 * finish would pair the old ops with the new priv.
+	 * Hold wgfp_ops_quiesce_lock outside wgfp_lock so any sleeping
+	 * port_quiesce/policy_revoke callback finishes before ops/priv vanish,
+	 * and hold wgfp_lock across the RCU grace period so a racing register
+	 * cannot pair old ops with new priv.
 	 */
+	mutex_lock(&wgfp_ops_quiesce_lock);
 	mutex_lock(&wgfp_lock);
 	rcu_assign_pointer(wgfp_ops, NULL);
 	synchronize_rcu();
 	mutex_unlock(&wgfp_lock);
+	mutex_unlock(&wgfp_ops_quiesce_lock);
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_unregister);
+
+int dpaa_wgfp_port_quiesce(struct net_device *dev)
+{
+	const struct dpaa_wgfp_ops *ops;
+	void *priv;
+	int ret = 0;
+
+	if (!dev)
+		return 0;
+	mutex_lock(&wgfp_ops_quiesce_lock);
+	ops = rcu_dereference_protected(wgfp_ops,
+					lockdep_is_held(&wgfp_ops_quiesce_lock));
+	priv = wgfp_ops_priv;
+	if (ops && ops->port_quiesce)
+		ret = ops->port_quiesce(priv, dev);
+	mutex_unlock(&wgfp_ops_quiesce_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_port_quiesce);
+
+int dpaa_wgfp_policy_revoke(void)
+{
+	const struct dpaa_wgfp_ops *ops;
+	void *priv;
+	int ret = 0;
+
+	mutex_lock(&wgfp_ops_quiesce_lock);
+	ops = rcu_dereference_protected(wgfp_ops,
+					lockdep_is_held(&wgfp_ops_quiesce_lock));
+	priv = wgfp_ops_priv;
+	if (ops && ops->policy_revoke)
+		ret = ops->policy_revoke(priv);
+	mutex_unlock(&wgfp_ops_quiesce_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_policy_revoke);
 
 static void wgfp_rx_ern_cb(struct qman_portal *portal, struct qman_fq *fq,
 			   const union qm_mr_entry *msg)
@@ -1166,7 +1215,7 @@ static void wgfp_rx_ern_cb(struct qman_portal *portal, struct qman_fq *fq,
 
 int dpaa_wgfp_egress(struct net_device *dev)
 {
-	int i, n, ret;
+	int i, n, slot, same_free = -1, any_free = -1, ret;
 
 	if (!dpaa_get_rx_fman_port(dev))	/* also the "is a DPAA port" test */
 		return -ENODEV;
@@ -1188,16 +1237,32 @@ int dpaa_wgfp_egress(struct net_device *dev)
 			ret = -EBUSY;
 			goto out;
 		}
+		if (!old) {
+			if (wgfp_eg_ifindex[i] == dev->ifindex && same_free < 0)
+				same_free = i;
+			else if (any_free < 0)
+				any_free = i;
+		}
 	}
-	ret = -ENOSPC;
-	if (n == WGFP_MAX_EGRESS)
+	/* Prefer reusing this same port's vacated slot, then appending a fresh
+	 * slot, then reusing another vacated slot (callers validate ifindex). */
+	if (same_free >= 0) {
+		slot = same_free;
+	} else if (n < WGFP_MAX_EGRESS) {
+		slot = n;
+	} else if (any_free >= 0) {
+		slot = any_free;
+	} else {
+		ret = -ENOSPC;
 		goto out;
-	rcu_assign_pointer(wgfp_eg_dev[n], dev);
-	wgfp_eg_ifindex[n] = dev->ifindex;
-	smp_store_release(&wgfp_neg, n + 1);
+	}
+	wgfp_eg_ifindex[slot] = dev->ifindex;
+	rcu_assign_pointer(wgfp_eg_dev[slot], dev);
+	if (slot == n)
+		smp_store_release(&wgfp_neg, n + 1);
 	pr_info("dpaa_wgfp: egress %u = %s, normal skb completion path\n",
-		n, dev->name);
-	ret = n;
+		slot, dev->name);
+	ret = slot;
 out:
 	mutex_unlock(&wgfp_lock);
 	return ret;
@@ -1445,54 +1510,12 @@ static void wgfp_orp_settle_after_skb(void)
 		wgfp_orp_hole(c);
 }
 
-void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
-		    u32 new_len)
+static void wgfp_prepare_xmit_skb(struct sk_buff *skb)
 {
-	struct net_device *dev;
-	struct sk_buff *skb;
 	const struct ethhdr *eth;
 	u16 protocol;
-	u32 network_off;
-	int err;
+	u32 network_off, new_len = skb->len;
 
-	if (unlikely(new_off > f->buf_size ||
-		     new_len > f->buf_size - new_off ||
-		     new_len < ETH_HLEN)) {
-		atomic64_inc(&wgfp_xmit_invalid_egress);
-		atomic64_inc(&wgfp_xmit_fail);
-		wgfp_frame_release(f);
-		wgfp_orp_settle_after_skb();
-		return;
-	}
-
-	rcu_read_lock();
-	if (unlikely(egress < 0 || egress >= smp_load_acquire(&wgfp_neg))) {
-		atomic64_inc(&wgfp_xmit_invalid_egress);
-		atomic64_inc(&wgfp_xmit_fail);
-		wgfp_frame_release(f);
-		wgfp_orp_settle_after_skb();
-		rcu_read_unlock();
-		return;
-	}
-	dev = rcu_dereference(wgfp_eg_dev[egress]);
-	if (unlikely(!dev || !netif_running(dev))) {
-		atomic64_inc(&wgfp_xmit_invalid_egress);
-		atomic64_inc(&wgfp_xmit_fail);
-		wgfp_frame_release(f);
-		wgfp_orp_settle_after_skb();
-		rcu_read_unlock();
-		return;
-	}
-
-	skb = netdev_alloc_skb(dev, new_len);
-	if (unlikely(!skb)) {
-		atomic64_inc(&wgfp_xmit_fail);
-		wgfp_frame_release(f);
-		wgfp_orp_settle_after_skb();
-		rcu_read_unlock();
-		return;
-	}
-	skb_put_data(skb, f->buf + new_off, new_len);
 	skb_reset_mac_header(skb);
 	eth = eth_hdr(skb);
 	skb->protocol = eth->h_proto;
@@ -1530,22 +1553,160 @@ void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 		skb_set_network_header(skb, network_off);
 		skb_set_transport_header(skb, network_off);
 	}
+}
+
+static void wgfp_submit_skb(struct sk_buff *skb)
+{
+	int err = dev_queue_xmit(skb);
+
+	/* NET_XMIT_CN means the packet was enqueued with congestion notice;
+	 * NET_XMIT_DROP / <0 is a qdisc drop, not an invalid egress handle. */
+	if (likely(err == NET_XMIT_SUCCESS || err == NET_XMIT_CN)) {
+		dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
+		if (unlikely(err == NET_XMIT_CN))
+			atomic64_inc(&wgfp_xmit_cn);
+	} else {
+		atomic64_inc(&wgfp_xmit_fail);
+		atomic64_inc(&wgfp_xmit_qdisc_drop);
+	}
+}
+
+void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
+		    u32 new_len)
+{
+	struct net_device *dev;
+	struct sk_buff *skb;
+
+	if (unlikely(new_off > f->buf_size ||
+		     new_len > f->buf_size - new_off ||
+		     new_len < ETH_HLEN)) {
+		atomic64_inc(&wgfp_xmit_invalid_egress);
+		atomic64_inc(&wgfp_xmit_fail);
+		wgfp_frame_release(f);
+		wgfp_orp_settle_after_skb();
+		return;
+	}
+
+	rcu_read_lock();
+	if (unlikely(egress < 0 || egress >= smp_load_acquire(&wgfp_neg))) {
+		atomic64_inc(&wgfp_xmit_invalid_egress);
+		atomic64_inc(&wgfp_xmit_fail);
+		wgfp_frame_release(f);
+		wgfp_orp_settle_after_skb();
+		rcu_read_unlock();
+		return;
+	}
+	dev = rcu_dereference(wgfp_eg_dev[egress]);
+	if (unlikely(!dev || !netif_running(dev))) {
+		atomic64_inc(&wgfp_xmit_invalid_egress);
+		atomic64_inc(&wgfp_xmit_fail);
+		wgfp_frame_release(f);
+		wgfp_orp_settle_after_skb();
+		rcu_read_unlock();
+		return;
+	}
+
+	skb = netdev_alloc_skb(dev, new_len);
+	if (unlikely(!skb)) {
+		atomic64_inc(&wgfp_xmit_nomem);
+		atomic64_inc(&wgfp_xmit_fail);
+		wgfp_frame_release(f);
+		wgfp_orp_settle_after_skb();
+		rcu_read_unlock();
+		return;
+	}
+	skb_put_data(skb, f->buf + new_off, new_len);
+	wgfp_prepare_xmit_skb(skb);
 
 	/* From here the original real-BPID FD no longer owns any TX state.
 	 * dev_queue_xmit consumes @skb on every return path; normal DPAA skb
 	 * confirmation, TX error and ERN handling own it instead. */
 	wgfp_frame_release(f);
-	err = dev_queue_xmit(skb);
-	if (likely(!err))
-		dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
-	else {
-		atomic64_inc(&wgfp_xmit_fail);
-		atomic64_inc(&wgfp_xmit_invalid_egress);
-	}
+	wgfp_submit_skb(skb);
 	wgfp_orp_settle_after_skb();
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_xmit);
+
+struct sk_buff *dpaa_wgfp_alloc_xmit_skb(int egress, int expected_ifindex,
+					 u32 total_len)
+{
+	struct net_device *dev;
+	struct sk_buff *skb;
+
+	rcu_read_lock();
+	if (unlikely(egress < 0 || egress >= smp_load_acquire(&wgfp_neg))) {
+		atomic64_inc(&wgfp_xmit_invalid_egress);
+		atomic64_inc(&wgfp_xmit_fail);
+		rcu_read_unlock();
+		return NULL;
+	}
+	dev = rcu_dereference(wgfp_eg_dev[egress]);
+	if (unlikely(!dev || !netif_running(dev) ||
+		     (expected_ifindex > 0 && dev->ifindex != expected_ifindex))) {
+		atomic64_inc(&wgfp_xmit_invalid_egress);
+		atomic64_inc(&wgfp_xmit_fail);
+		rcu_read_unlock();
+		return NULL;
+	}
+	skb = netdev_alloc_skb(dev, total_len);
+	if (unlikely(!skb)) {
+		atomic64_inc(&wgfp_xmit_nomem);
+		atomic64_inc(&wgfp_xmit_fail);
+	}
+	rcu_read_unlock();
+	return skb;
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_alloc_xmit_skb);
+
+void dpaa_wgfp_xmit_skb(struct dpaa_wgfp_frame *f, int egress,
+			int expected_ifindex, struct sk_buff *skb)
+{
+	struct net_device *dev;
+
+	if (unlikely(!skb || skb->len < ETH_HLEN)) {
+		if (skb)
+			kfree_skb(skb);
+		atomic64_inc(&wgfp_xmit_invalid_egress);
+		atomic64_inc(&wgfp_xmit_fail);
+		if (f)
+			wgfp_frame_release(f);
+		wgfp_orp_settle_after_skb();
+		return;
+	}
+
+	rcu_read_lock();
+	if (unlikely(egress < 0 || egress >= smp_load_acquire(&wgfp_neg))) {
+		kfree_skb(skb);
+		atomic64_inc(&wgfp_xmit_invalid_egress);
+		atomic64_inc(&wgfp_xmit_fail);
+		if (f)
+			wgfp_frame_release(f);
+		wgfp_orp_settle_after_skb();
+		rcu_read_unlock();
+		return;
+	}
+	dev = rcu_dereference(wgfp_eg_dev[egress]);
+	if (unlikely(!dev || !netif_running(dev) ||
+		     (expected_ifindex > 0 && dev->ifindex != expected_ifindex))) {
+		kfree_skb(skb);
+		atomic64_inc(&wgfp_xmit_invalid_egress);
+		atomic64_inc(&wgfp_xmit_fail);
+		if (f)
+			wgfp_frame_release(f);
+		wgfp_orp_settle_after_skb();
+		rcu_read_unlock();
+		return;
+	}
+	skb->dev = dev;
+	wgfp_prepare_xmit_skb(skb);
+	if (f)
+		wgfp_frame_release(f);
+	wgfp_submit_skb(skb);
+	wgfp_orp_settle_after_skb();
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(dpaa_wgfp_xmit_skb);
 
 static int __init dpaa_wgfp_init(void)
 {
@@ -1554,6 +1715,10 @@ static int __init dpaa_wgfp_init(void)
 	wgfp_ndev = alloc_netdev_dummy(0);
 	if (!wgfp_global || !wgfp_ports || !wgfp_ndev)
 		return -ENOMEM;
+	if (wgfp_threaded) {
+		if (dev_set_threaded(wgfp_ndev, NETDEV_NAPI_THREADED_ENABLED))
+			wgfp_threaded = false;
+	}
 	if (register_netdevice_notifier(&wgfp_netdev_notifier))
 		return -ENOMEM;
 	wgfp_dir = debugfs_create_dir("dpaa_wgfp", NULL);

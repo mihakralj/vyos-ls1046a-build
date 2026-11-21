@@ -152,6 +152,8 @@ static u8 ask_hw_port_family_get(u8 hw_port_id)
  * (T-M6-7.7) replaces it once the datapath is proven.
  */
 #define ASK_HW_PORT_ETH0_MGMT 0x0c
+/* Shared mutex serializing nat44, nat66, and ipv6_hw_frag sysfs kill switches. */
+DEFINE_MUTEX(ask_killswitch_mutex);
 /*
  * T-M6-7.7 productization: IPv4 NAT/PAT passed S0-S3 on 210.10.1
  * (SNAT+DNAT+masquerade, TCP 7.3 Gbit/s zero retr, UDP 500 Mbit/s zero loss).
@@ -171,9 +173,10 @@ static int ask_nat44_offload_set(const char *val, const struct kernel_param *kp)
 	rc = kstrtobool(val ? val : "1", &enabled);
 	if (rc)
 		goto out;
+	mutex_lock(&ask_killswitch_mutex);
 	if (enabled && ask_nat44_disable_incomplete) {
 		rc = -EBUSY;
-		goto out;
+		goto unlock;
 	}
 	WRITE_ONCE(ask_nat44_offload, enabled);
 	if (READ_ONCE(ask_hw_ready) && !enabled) {
@@ -183,6 +186,8 @@ static int ask_nat44_offload_set(const char *val, const struct kernel_param *kp)
 			ask_pr_err("hw: NAT44 offload disable incomplete (%d); hardware records may remain, resolve retained owners or cold boot before enabling\n",
 				   rc);
 	}
+unlock:
+	mutex_unlock(&ask_killswitch_mutex);
 out:
 	module_put(THIS_MODULE);
 	return rc;
@@ -228,9 +233,10 @@ static int ask_nat66_offload_set(const char *val, const struct kernel_param *kp)
 	rc = kstrtobool(val ? val : "1", &enabled);
 	if (rc)
 		goto out;
+	mutex_lock(&ask_killswitch_mutex);
 	if (enabled && ask_nat66_disable_incomplete) {
 		rc = -EBUSY;
-		goto out;
+		goto unlock;
 	}
 	WRITE_ONCE(ask_nat66_offload, enabled);
 	if (READ_ONCE(ask_hw_ready) && !enabled) {
@@ -240,6 +246,8 @@ static int ask_nat66_offload_set(const char *val, const struct kernel_param *kp)
 			ask_pr_err("hw: NAT66 offload disable incomplete (%d); hardware records may remain, resolve retained owners or cold boot before enabling\n",
 				   rc);
 	}
+unlock:
+	mutex_unlock(&ask_killswitch_mutex);
 out:
 	module_put(THIS_MODULE);
 	return rc;
@@ -531,6 +539,8 @@ static u8 ask_hw_wgfp_family(struct net_device *dev)
 	struct fman_port *port;
 	u8 id, m, out = 0;
 
+	if (ask_flow_policy_admission_fenced())
+		return 0;
 	if (is_vlan_dev(dev))
 		dev = vlan_dev_real_dev(dev);
 	port = dpaa_get_rx_fman_port(dev);
@@ -668,16 +678,34 @@ struct ask_hw_pcd {
 	 * store of nflow; users[] counts live cookies per set FQ (h->lock).
 	 */
 	struct {
+		struct net_device *dev;
+		netdevice_tracker dev_tracker;
 		u32     ifindex;
 		u32     fqid;
+		u32     legacy_users;
+		u32     l2_users;
 		u32     nflow;
 		u32     flow_fqid[ASK_HW_FLOW_FQS];
 		u32     users[ASK_HW_FLOW_FQS];
+		bool    unregistered;
+		bool    retained;
+		bool    module_pinned;
 	}               noconf_tx[ASK_HW_NOCONF_SLOTS];
 
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
+
+static u32 ask_hw_noconf_slot_users_locked(const struct ask_hw_pcd *h,
+					   unsigned int slot)
+{
+	u32 total = h->noconf_tx[slot].legacy_users + h->noconf_tx[slot].l2_users;
+	unsigned int j, n = smp_load_acquire(&h->noconf_tx[slot].nflow);
+
+	for (j = 0; j < n; j++)
+		total += h->noconf_tx[slot].users[j];
+	return total;
+}
 
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask)
 {
@@ -1214,12 +1242,29 @@ void ask_hw_pcd_teardown(void)
 			return;
 		}
 	}
+	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		if (h->noconf_tx[i].retained ||
+		    ask_hw_noconf_slot_users_locked(h, i) > 0) {
+			ask_pr_err("hw: teardown refused: egress slot %u (ifindex=%u) still owns TX FQ users\n",
+				   i, h->noconf_tx[i].ifindex);
+			mutex_unlock(&h->lock);
+			return;
+		}
+	}
 	mutex_unlock(&h->lock);
 
 	/* F-266: fence ask_punt_param_set(), which dereferences the instance. */
 	kernel_param_lock(THIS_MODULE);
 	ask_hw_pcd_inst = NULL;
 	kernel_param_unlock(THIS_MODULE);
+
+	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		if (h->noconf_tx[i].dev) {
+			netdev_put(h->noconf_tx[i].dev,
+				   &h->noconf_tx[i].dev_tracker);
+			h->noconf_tx[i].dev = NULL;
+		}
+	}
 
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
 		struct ask_hw_port *p = &h->port[i];
@@ -1702,6 +1747,72 @@ static int ask_hw_b2_port_of(const char *ifname, u8 *port_id)
 }
 
 /*
+ * T1(f): synchronously withdraw every software owner (bridge, routed/PPPoE,
+ * WGFP) anchored on @hw_port_id under rtnl before asking FMan to disarm the
+ * port's FE table. Callers close admission first so no new owner can slip in.
+ */
+static int ask_hw_offload_quiesce_port_owners(u8 hw_port_id)
+{
+	struct net_device *dev;
+	int ifindex = 0;
+	int brc, frc, wrc;
+
+	ASSERT_RTNL();
+	dev = ask_hw_port_netdev(hw_port_id);
+	if (dev)
+		ifindex = dev->ifindex;
+	brc = ask_bridge_port_quiesce(hw_port_id);
+	frc = ask_flow_port_withdraw(hw_port_id, ifindex);
+	wrc = dev ? dpaa_wgfp_port_quiesce(dev) : 0;
+	if (brc)
+		return brc;
+	if (frc)
+		return frc;
+	return wrc;
+}
+
+/*
+ * Restore @fam after a clean preflight -EBUSY on role_prepare, ONLY if the
+ * port is still engaged, unretained, admin-enabled, policy_seq unchanged, and
+ * its netdev is not unregistering.
+ */
+static void ask_hw_role_restore_family(struct ask_hw_pcd *h, u8 hw_port_id,
+				       u8 fam, u64 policy_seq)
+{
+	struct net_device *dev = ask_hw_port_netdev(hw_port_id);
+	unsigned int i;
+	bool unreg = false;
+
+	if (!h || !fam)
+		return;
+	mutex_lock(&h->lock);
+	if (dev) {
+		for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+			if (h->noconf_tx[i].dev == dev &&
+			    (h->noconf_tx[i].unregistered ||
+			     h->noconf_tx[i].retained)) {
+				unreg = true;
+				break;
+			}
+		}
+	}
+	if (!unreg && !ask_hw_role_admin_disabled[hw_port_id] &&
+	    ask_hw_role_policy_seq[hw_port_id] == policy_seq) {
+		for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+			struct ask_hw_port *p = &h->port[i];
+
+			if (p->in_use && p->port_id == hw_port_id &&
+			    p->offload_engaged && !p->fe_retained &&
+			    !p->teardown_in_progress) {
+				ask_hw_set_family_locked(hw_port_id, fam);
+				break;
+			}
+		}
+	}
+	mutex_unlock(&h->lock);
+}
+
+/*
  * Bridge plan D1 port role: engage @hw_port_id with @profile, disengaging it
  * first if it is armed with another one. NETDEV_PRECHANGEUPPER uses the
  * prepare/commit split: a successful prepare means FMan's readback-confirmed
@@ -1715,7 +1826,7 @@ int ask_hw_offload_role_prepare(u8 hw_port_id,
 				u64 expected_policy_seq)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
-	u8 fam;
+	u8 fam, old_fam;
 	bool engaged = false, other = false, retained = false, transitioning = false;
 	unsigned int i;
 
@@ -1739,7 +1850,8 @@ int ask_hw_offload_role_prepare(u8 hw_port_id,
 		mutex_unlock(&h->lock);
 		return -EACCES;
 	}
-	fam = *family_mask ? *family_mask : ask_hw_port_family_get(hw_port_id);
+	old_fam = ask_hw_port_family_get(hw_port_id);
+	fam = *family_mask ? *family_mask : old_fam;
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
 		if (h->port[i].in_use && h->port[i].port_id == hw_port_id) {
 			retained = h->port[i].fe_retained;
@@ -1751,6 +1863,8 @@ int ask_hw_offload_role_prepare(u8 hw_port_id,
 	if (!ask_hw_role_policy_seq[hw_port_id])
 		ask_hw_role_policy_seq[hw_port_id] = 1;
 	*policy_seq = ask_hw_role_policy_seq[hw_port_id];
+	if (!retained && !transitioning && other)
+		ask_hw_set_family_locked(hw_port_id, 0);
 	mutex_unlock(&h->lock);
 
 	if (retained)
@@ -1766,7 +1880,15 @@ int ask_hw_offload_role_prepare(u8 hw_port_id,
 
 		ask_pr_info("hw: port 0x%02x role change to profile %d\n",
 			    hw_port_id, profile);
+		/* Keep admission intentionally closed if owner withdrawal fails
+		 * (unsettled records remain and must not be superseded). */
+		rc = ask_hw_offload_quiesce_port_owners(hw_port_id);
+		if (rc)
+			return rc;
 		rc = ask_hw_offload_disengage(hw_port_id);
+		if (rc == -EBUSY)
+			ask_hw_role_restore_family(h, hw_port_id, old_fam,
+						   *policy_seq);
 		if (rc)
 			return rc;
 		*detached = true;
@@ -1958,6 +2080,16 @@ int ask_hw_offload_disengage(u8 hw_port_id)
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_disengage);
 
+static int ask_hw_offload_quiesce_port(u8 hw_port_id)
+{
+	int rc;
+
+	rc = ask_hw_offload_quiesce_port_owners(hw_port_id);
+	if (rc)
+		return rc;
+	return ask_hw_offload_disengage(hw_port_id);
+}
+
 int ask_hw_offload_disengage_admin(u8 hw_port_id)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
@@ -1969,8 +2101,9 @@ int ask_hw_offload_disengage_admin(u8 hw_port_id)
 	mutex_lock(&h->lock);
 	ask_hw_role_admin_disabled[hw_port_id] = true;
 	++ask_hw_role_policy_seq[hw_port_id];
+	ask_hw_set_family_locked(hw_port_id, 0);
 	mutex_unlock(&h->lock);
-	return ask_hw_offload_disengage(hw_port_id);
+	return ask_hw_offload_quiesce_port(hw_port_id);
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_disengage_admin);
 
@@ -2275,13 +2408,30 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
 	phys_ifindex = phys->ifindex;
 
 	slot = phys_ifindex % ASK_HW_NOCONF_SLOTS;
-	if (h && h->noconf_tx[slot].fqid &&
-	    h->noconf_tx[slot].ifindex == phys_ifindex) {
-		*fqid = h->noconf_tx[slot].fqid;
-		if (slotp)
-			*slotp = slot;
-		dev_put(dev);
-		return 0;
+	if (h) {
+		mutex_lock(&h->lock);
+		if (h->noconf_tx[slot].fqid &&
+		    h->noconf_tx[slot].ifindex == phys_ifindex) {
+			if (h->noconf_tx[slot].unregistered ||
+			    h->noconf_tx[slot].retained) {
+				mutex_unlock(&h->lock);
+				dev_put(dev);
+				return -ENODEV;
+			}
+			*fqid = h->noconf_tx[slot].fqid;
+			if (slotp)
+				*slotp = slot;
+			mutex_unlock(&h->lock);
+			dev_put(dev);
+			return 0;
+		}
+		if (h->noconf_tx[slot].unregistered ||
+		    h->noconf_tx[slot].retained) {
+			mutex_unlock(&h->lock);
+			dev_put(dev);
+			return -ENODEV;
+		}
+		mutex_unlock(&h->lock);
 	}
 
 	/* CR-013: cache miss from an unsafe (hot-path) caller -- do not risk
@@ -2289,6 +2439,11 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
 	 * stays in software. A later engage's prewarm (or a retry once this
 	 * port's own prewarm has run) covers it going forward. */
 	if (!allow_alloc) {
+		dev_put(dev);
+		return -ENODEV;
+	}
+
+	if (phys->reg_state != NETREG_REGISTERED) {
 		dev_put(dev);
 		return -ENODEV;
 	}
@@ -2314,14 +2469,26 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
 		return rc ? rc : -ENODEV;
 	}
 
-	if (h && h->noconf_tx[slot].fqid == 0) {
-		h->noconf_tx[slot].ifindex = phys_ifindex;
-		h->noconf_tx[slot].fqid = *fqid;
-		if (slotp)
-			*slotp = slot;
-	} else if (h && h->noconf_tx[slot].ifindex != phys_ifindex) {
-		ask_pr_warn("hw: no-confirm TX FQ cache collision slot=%u phys_ifindex=%u (cached %u); not caching\n",
-			    slot, phys_ifindex, h->noconf_tx[slot].ifindex);
+	if (h) {
+		mutex_lock(&h->lock);
+		if (h->noconf_tx[slot].fqid == 0 &&
+		    !h->noconf_tx[slot].unregistered &&
+		    !h->noconf_tx[slot].retained &&
+		    phys->reg_state == NETREG_REGISTERED) {
+			/* T1(b): hold netdev once on first slot bind so dpaa_remove
+			 * cannot free these TX FQs while FMan records target them. */
+			netdev_hold(phys, &h->noconf_tx[slot].dev_tracker,
+				    GFP_KERNEL);
+			h->noconf_tx[slot].dev = phys;
+			h->noconf_tx[slot].ifindex = phys_ifindex;
+			h->noconf_tx[slot].fqid = *fqid;
+			if (slotp)
+				*slotp = slot;
+		} else if (h->noconf_tx[slot].ifindex != phys_ifindex) {
+			ask_pr_warn("hw: no-confirm TX FQ cache collision slot=%u phys_ifindex=%u (cached %u); not caching\n",
+				    slot, phys_ifindex, h->noconf_tx[slot].ifindex);
+		}
+		mutex_unlock(&h->lock);
 	}
 
 	ask_pr_info("hw: no-confirm TX FQ 0x%x resolved for ifindex=%u (phys=%u)\n",
@@ -2436,11 +2603,24 @@ static void ask_hw_prewarm_flow_fqs(u8 hw_port_id, int slot)
 	if (!h || slot < 0)
 		return;
 	mutex_lock(&ask_hw_prewarm_lock);
-	n = h->noconf_tx[slot].nflow;
+	n = smp_load_acquire(&h->noconf_tx[slot].nflow);
 	while (n < ASK_HW_FLOW_FQS) {
+		u32 want_ifindex = 0;
+
+		mutex_lock(&h->lock);
+		if (h->noconf_tx[slot].fqid &&
+		    !h->noconf_tx[slot].unregistered &&
+		    !h->noconf_tx[slot].retained)
+			want_ifindex = h->noconf_tx[slot].ifindex;
+		mutex_unlock(&h->lock);
+		if (!want_ifindex) {
+			rc = -ENODEV;
+			break;
+		}
 		rtnl_lock();
 		dev = ask_hw_port_netdev(hw_port_id);
-		if (dev && dev->ifindex == h->noconf_tx[slot].ifindex)
+		if (dev && dev->ifindex == want_ifindex &&
+		    dev->reg_state == NETREG_REGISTERED)
 			dev_hold(dev);
 		else
 			dev = NULL;
@@ -2453,8 +2633,17 @@ static void ask_hw_prewarm_flow_fqs(u8 hw_port_id, int slot)
 		dev_put(dev);
 		if (rc)
 			break;
+		mutex_lock(&h->lock);
+		if (h->noconf_tx[slot].ifindex != want_ifindex ||
+		    h->noconf_tx[slot].unregistered ||
+		    h->noconf_tx[slot].retained) {
+			mutex_unlock(&h->lock);
+			rc = -ENODEV;
+			break;
+		}
 		h->noconf_tx[slot].flow_fqid[n] = fqid;
 		smp_store_release(&h->noconf_tx[slot].nflow, ++n);
+		mutex_unlock(&h->lock);
 	}
 	mutex_unlock(&ask_hw_prewarm_lock);
 	if (rc)
@@ -2477,8 +2666,10 @@ static u32 ask_hw_flow_fq_get(struct ask_hw_pcd *h, int slot, u32 legacy)
 	unsigned int i, best = 0;
 
 	lockdep_assert_held(&h->lock);
-	if (!n)
+	if (!n) {
+		h->noconf_tx[slot].legacy_users++;
 		return legacy;
+	}
 	for (i = 1; i < n; i++)
 		if (users[i] < users[best])
 			best = i;
@@ -2493,6 +2684,11 @@ static void ask_hw_flow_fq_put(struct ask_hw_pcd *h, u32 fqid)
 
 	lockdep_assert_held(&h->lock);
 	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		if (h->noconf_tx[i].fqid == fqid) {
+			if (!WARN_ON_ONCE(!h->noconf_tx[i].legacy_users))
+				h->noconf_tx[i].legacy_users--;
+			return;
+		}
 		n = smp_load_acquire(&h->noconf_tx[i].nflow);
 		for (j = 0; j < n; j++) {
 			if (h->noconf_tx[i].flow_fqid[j] != fqid)
@@ -2502,6 +2698,73 @@ static void ask_hw_flow_fq_put(struct ask_hw_pcd *h, u32 fqid)
 			return;
 		}
 	}
+}
+
+/* Account an L2 bridge record against a live noconf_tx slot. h->lock held. */
+static int ask_hw_l2_fq_get_locked(struct ask_hw_pcd *h, u32 fqid)
+{
+	unsigned int i;
+
+	lockdep_assert_held(&h->lock);
+	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		if (h->noconf_tx[i].fqid != fqid)
+			continue;
+		if (h->noconf_tx[i].unregistered || h->noconf_tx[i].retained)
+			return -ENODEV;
+		h->noconf_tx[i].l2_users++;
+		return 0;
+	}
+	return -ENODEV;
+}
+
+static void ask_hw_l2_fq_put_locked(struct ask_hw_pcd *h, u32 fqid)
+{
+	unsigned int i;
+
+	lockdep_assert_held(&h->lock);
+	if (!fqid)
+		return;
+	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		if (h->noconf_tx[i].fqid != fqid)
+			continue;
+		if (!WARN_ON_ONCE(!h->noconf_tx[i].l2_users))
+			h->noconf_tx[i].l2_users--;
+		return;
+	}
+}
+
+void ask_hw_l2_fq_put(u32 fqid)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+
+	if (!h || !fqid)
+		return;
+	mutex_lock(&h->lock);
+	ask_hw_l2_fq_put_locked(h, fqid);
+	mutex_unlock(&h->lock);
+}
+
+bool ask_hw_tx_fqid_live_locked(struct ask_hw_pcd *guard, u32 tx_fqid)
+{
+	unsigned int i, j, n;
+
+	if (!guard || !tx_fqid)
+		return false;
+	lockdep_assert_held(&guard->lock);
+	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		if (!guard->noconf_tx[i].fqid)
+			continue;
+		if (guard->noconf_tx[i].fqid == tx_fqid)
+			return !guard->noconf_tx[i].unregistered &&
+			       !guard->noconf_tx[i].retained;
+		n = smp_load_acquire(&guard->noconf_tx[i].nflow);
+		for (j = 0; j < n; j++) {
+			if (guard->noconf_tx[i].flow_fqid[j] == tx_fqid)
+				return !guard->noconf_tx[i].unregistered &&
+				       !guard->noconf_tx[i].retained;
+		}
+	}
+	return false;
 }
 
 /* @hw_port_id's slot if it is engaged as L2_DA. h->lock held. */
@@ -2563,16 +2826,24 @@ int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
 	}
 
 	mutex_lock(&h->lock);
-	if (!ask_hw_l2_port(h, hw_port_id))
+	if (!ask_hw_l2_port(h, hw_port_id)) {
 		rc = (!add && ask_hw_l2_port_tearing_down(h, hw_port_id)) ?
 		     -EAGAIN : -ENODEV;
-	else if (add)
-		rc = fman_pcd_fe_flow_add(h->fman, hw_port_id, &a);
-	else
+	} else if (add) {
+		rc = ask_hw_l2_fq_get_locked(h, fqid);
+		if (!rc) {
+			rc = fman_pcd_fe_flow_add(h->fman, hw_port_id, &a);
+			if (rc)
+				ask_hw_l2_fq_put_locked(h, fqid);
+		}
+	} else {
 		rc = fman_pcd_fe_flow_del_identified(h->fman, hw_port_id, a.key,
 						    FMAN_PCD_FE_L2_DA_KEY_SIZE,
 						    FMAN_PCD_FE_OWNER_ASK,
 						    fe_token);
+		if (!rc || rc == -ENOENT)
+			ask_hw_l2_fq_put_locked(h, fqid);
+	}
 	mutex_unlock(&h->lock);
 	return rc;
 }
@@ -2774,6 +3045,13 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 
 	mutex_lock(&h->lock);
 
+	if (oif_slot < 0 || !h->noconf_tx[oif_slot].fqid ||
+	    h->noconf_tx[oif_slot].unregistered ||
+	    h->noconf_tx[oif_slot].retained) {
+		rc = -ENODEV;
+		goto out_unlock;
+	}
+
 	p = ask_hw_port_slot_get(h, port_id);
 	if (!p) {
 		rc = -ENOSPC;
@@ -2785,8 +3063,7 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 	 * ask_flow_offload.c. This function now only snapshots the cookie
 	 * metadata for teardown (port_id, sink_ifindex, sink_fqid). */
 
-	if (oif_slot >= 0)
-		tx_fqid = ask_hw_flow_fq_get(h, oif_slot, tx_fqid);
+	tx_fqid = ask_hw_flow_fq_get(h, oif_slot, tx_fqid);
 
 	ck.fm           = h->fman;
 	ck.port_id      = port_id;
@@ -2852,6 +3129,154 @@ int ask_hw_flow_query_stats(u32 hw_flow_id, u64 *packets, u64 *bytes)
 EXPORT_SYMBOL_GPL(ask_hw_flow_query_stats);
 
 /* ------------------------------------------------------------------------- */
+/* T1(b) NETDEV_UNREGISTER notifier for DPAA netdev / TX FQ lifetime          */
+/* ------------------------------------------------------------------------- */
+
+static bool ask_hw_netdev_notifier_registered;
+
+static bool ask_hw_port_active_locked(const struct ask_hw_pcd *h, u8 port_id)
+{
+	unsigned int i;
+
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+		const struct ask_hw_port *p = &h->port[i];
+
+		if (p->in_use && p->port_id == port_id &&
+		    (p->offload_engaged || p->fe_retained ||
+		     p->teardown_in_progress))
+			return true;
+	}
+	return false;
+}
+
+static int ask_hw_netdev_event(struct notifier_block *nb, unsigned long event,
+			       void *ptr)
+{
+	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	int slot_idx = -1, brc = 0, frc = 0, wrc = 0, drc = 0;
+	u8 port_id = 0xff;
+	bool has_port = false;
+	unsigned int i;
+
+	if (event != NETDEV_UNREGISTER || !h || !dev)
+		return NOTIFY_DONE;
+
+	/* Withdraw flows referencing an unregistering VLAN vif stacked on a
+	 * DPAA port before its parent port unregisters. */
+	if (is_vlan_dev(dev)) {
+		u8 parent_pid;
+
+		if (!ask_hw_dev_port(vlan_dev_real_dev(dev), &parent_pid))
+			(void)ask_flow_port_withdraw(0xff, dev->ifindex);
+		return NOTIFY_DONE;
+	}
+
+	has_port = !ask_hw_dev_port(dev, &port_id);
+
+	mutex_lock(&h->lock);
+	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		if (h->noconf_tx[i].dev == dev) {
+			slot_idx = (int)i;
+			break;
+		}
+	}
+	if (slot_idx < 0 && (!has_port || !ask_hw_port_active_locked(h, port_id))) {
+		mutex_unlock(&h->lock);
+		return NOTIFY_DONE;
+	}
+
+	/*
+	 * Fast-path for netdev_wait_allrefs_any() 1-Hz rebroadcasts: when this
+	 * slot is already retained, do not re-run sleeping withdrawal every
+	 * second; simply re-check if all users, FE state, and orphans have
+	 * drained, and release the netdev + module pin if clean.
+	 */
+	if (slot_idx >= 0 && h->noconf_tx[slot_idx].retained) {
+		struct net_device *put_dev = NULL;
+		netdevice_tracker tracker;
+		bool drop_mod = false;
+		bool clean = ask_hw_noconf_slot_users_locked(h, slot_idx) == 0 &&
+			     (!has_port || !ask_hw_port_active_locked(h, port_id)) &&
+			     !ask_flow_has_port_orphan(port_id, dev->ifindex);
+
+		if (clean) {
+			put_dev = h->noconf_tx[slot_idx].dev;
+			tracker = h->noconf_tx[slot_idx].dev_tracker;
+			drop_mod = h->noconf_tx[slot_idx].module_pinned;
+			memset(&h->noconf_tx[slot_idx], 0,
+			       sizeof(h->noconf_tx[slot_idx]));
+		}
+		mutex_unlock(&h->lock);
+		if (put_dev) {
+			netdev_put(put_dev, &tracker);
+			if (drop_mod)
+				module_put(THIS_MODULE);
+			ask_pr_info("hw: NETDEV_UNREGISTER %s drained; released retained netdev pin\n",
+				    netdev_name(dev));
+		}
+		return NOTIFY_DONE;
+	}
+
+	/* First unregister pass: close egress & ingress admission atomically. */
+	if (slot_idx >= 0)
+		h->noconf_tx[slot_idx].unregistered = true;
+	if (has_port) {
+		ask_hw_role_admin_disabled[port_id] = true;
+		++ask_hw_role_policy_seq[port_id];
+		ask_hw_set_family_locked(port_id, 0);
+	}
+	mutex_unlock(&h->lock);
+
+	/* Synchronously withdraw every owner referencing dev (ingress or egress). */
+	brc = ask_bridge_dev_quiesce(port_id, dev->ifindex);
+	frc = ask_flow_port_withdraw(port_id, dev->ifindex);
+	wrc = dpaa_wgfp_port_quiesce(dev);
+	if (has_port && !brc && !frc && !wrc)
+		drc = ask_hw_offload_disengage(port_id);
+
+	if (slot_idx >= 0) {
+		struct net_device *put_dev = NULL;
+		netdevice_tracker tracker;
+		bool clean = true;
+
+		mutex_lock(&h->lock);
+		if (h->noconf_tx[slot_idx].dev == dev &&
+		    !h->noconf_tx[slot_idx].retained) {
+			clean = !brc && !frc && !wrc && !drc &&
+				ask_hw_noconf_slot_users_locked(h, slot_idx) == 0 &&
+				(!has_port || !ask_hw_port_active_locked(h, port_id)) &&
+				!ask_flow_has_port_orphan(port_id, dev->ifindex);
+			if (clean) {
+				put_dev = h->noconf_tx[slot_idx].dev;
+				tracker = h->noconf_tx[slot_idx].dev_tracker;
+				memset(&h->noconf_tx[slot_idx], 0,
+				       sizeof(h->noconf_tx[slot_idx]));
+			} else {
+				/* Keep netdev_hold + pin ask.ko so dpaa_remove
+				 * blocks in netdev_wait_allrefs_any() instead of
+				 * freeing TX FQs still targeted by FMan records. */
+				h->noconf_tx[slot_idx].retained = true;
+				h->noconf_tx[slot_idx].module_pinned =
+					try_module_get(THIS_MODULE);
+				WARN_ON_ONCE(!h->noconf_tx[slot_idx].module_pinned);
+			}
+		}
+		mutex_unlock(&h->lock);
+		if (put_dev)
+			netdev_put(put_dev, &tracker);
+		else if (!clean)
+			ask_pr_err("hw: NETDEV_UNREGISTER %s incomplete (br=%d flow=%d wgfp=%d dis=%d); retaining netdev reference to prevent TX FQ UAF\n",
+				   netdev_name(dev), brc, frc, wrc, drc);
+	}
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block ask_hw_netdev_nb = {
+	.notifier_call = ask_hw_netdev_event,
+};
+
+/* ------------------------------------------------------------------------- */
 /* Module hooks                                                               */
 /* ------------------------------------------------------------------------- */
 
@@ -2866,6 +3291,11 @@ int ask_hw_init(void)
 			    rc);
 
 	(void)ask_hw_pcd_bringup();
+	rc = register_netdevice_notifier(&ask_hw_netdev_nb);
+	if (rc)
+		ask_pr_warn("hw: register_netdevice_notifier failed (%d)\n", rc);
+	else
+		ask_hw_netdev_notifier_registered = true;
 	return 0;
 }
 
@@ -2888,6 +3318,10 @@ void ask_hw_set_ready(bool ready)
 
 void ask_hw_exit(void)
 {
+	if (ask_hw_netdev_notifier_registered) {
+		unregister_netdevice_notifier(&ask_hw_netdev_nb);
+		ask_hw_netdev_notifier_registered = false;
+	}
 	ask_hw_pcd_teardown();
 	WRITE_ONCE(ask_hw_cached_valid, false);
 }

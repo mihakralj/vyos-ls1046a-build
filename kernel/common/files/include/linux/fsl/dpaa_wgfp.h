@@ -20,6 +20,7 @@
 #include <linux/dma-mapping.h>
 
 struct net_device;
+struct sk_buff;
 
 static inline void dpaa_wgfp_stat_inc(atomic64_t __percpu *stat)
 {
@@ -53,9 +54,21 @@ struct dpaa_wgfp_frame {
 struct dpaa_wgfp_ops {
 	/* Called in NAPI context, buffer already synced for the CPU.
 	 * Return 1 when the consumer took the buffer (it must have called
-	 * dpaa_wgfp_xmit() or dpaa_wgfp_drop()), 0 to decline.
+	 * dpaa_wgfp_xmit(), dpaa_wgfp_xmit_skb(), or dpaa_wgfp_drop()),
+	 * 0 to decline.
 	 */
 	int (*frame)(void *priv, struct dpaa_wgfp_frame *f);
+	/* Synchronously withdraw all flows/rflows referencing @dev.
+	 * Called in process context (may be under RTNL); must NOT take
+	 * wgfp_lab_lock. Takes @dev directly because during NETDEV_UNREGISTER
+	 * @dev is already unlisted from init_net. Returns 0 when settled or
+	 * -EBUSY if stuck.
+	 */
+	int (*port_quiesce)(void *priv, struct net_device *dev);
+	/* Synchronously withdraw all flows/rflows and bump observation epoch.
+	 * Called in process context; must NOT take wgfp_lab_lock.
+	 */
+	int (*policy_revoke)(void *priv);
 };
 
 /* An inner flow arriving on a DPAA port (network byte order).  IPv4 uses
@@ -107,6 +120,17 @@ void dpaa_wgfp_unregister(void);
 int dpaa_wgfp_egress(struct net_device *dev);
 /* The handle dpaa_wgfp_egress() already gave @dev, or -ENOENT; any context. */
 int dpaa_wgfp_egress_find(const struct net_device *dev);
+/* Synchronously quiesce WGFP records targeting @dev (T1(f)/T1(b)). */
+int dpaa_wgfp_port_quiesce(struct net_device *dev);
+/* Synchronously revoke all WGFP records and rflows on policy change (P3). */
+int dpaa_wgfp_policy_revoke(void);
+/* Allocate an owned skb for @egress (validating @expected_ifindex if > 0). */
+struct sk_buff *dpaa_wgfp_alloc_xmit_skb(int egress, int expected_ifindex,
+					 u32 total_len);
+/* Transmit an already-built owned @skb on @egress (validating @expected_ifindex
+ * if > 0) and release @f (if non-NULL) before dev_queue_xmit(). */
+void dpaa_wgfp_xmit_skb(struct dpaa_wgfp_frame *f, int egress,
+			int expected_ifindex, struct sk_buff *skb);
 /* Transmit the (modified) buffer on @egress: new data offset and length. */
 void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 new_off,
 		    u32 new_len);
@@ -132,6 +156,11 @@ static inline int dpaa_wgfp_register(const struct dpaa_wgfp_ops *ops, void *priv
 static inline void dpaa_wgfp_unregister(void) { }
 static inline int dpaa_wgfp_egress(struct net_device *dev) { return -ENODEV; }
 static inline int dpaa_wgfp_egress_find(const struct net_device *dev) { return -ENODEV; }
+static inline int dpaa_wgfp_port_quiesce(struct net_device *dev) { return 0; }
+static inline int dpaa_wgfp_policy_revoke(void) { return 0; }
+static inline struct sk_buff *dpaa_wgfp_alloc_xmit_skb(int e, int i, u32 l) { return NULL; }
+static inline void dpaa_wgfp_xmit_skb(struct dpaa_wgfp_frame *f, int e, int i,
+				      struct sk_buff *skb) { }
 static inline void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int e, u32 o, u32 l) { }
 static inline void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f) { }
 #endif

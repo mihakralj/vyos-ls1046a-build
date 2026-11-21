@@ -342,6 +342,24 @@ static int ask_flow_pending_invalidate_nat44(void)
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
 	return 0;
 }
+#define NFPROTO_IPV6 10
+enum { FLOW_OFFLOAD_DIR_ORIGINAL = 0, FLOW_OFFLOAD_DIR_REPLY = 1, FLOW_OFFLOAD_DIR_MAX = 2 };
+struct flow_offload_tuple { u8 l3proto; };
+struct flow_offload_tuple_rhash { struct flow_offload_tuple tuple; };
+struct flow_offload { struct flow_offload_tuple_rhash tuplehash[FLOW_OFFLOAD_DIR_MAX]; };
+struct net { int id; };
+static struct net init_net;
+static int nf_flow_table_revoke_match(struct net *net,
+				      bool (*match)(const struct flow_offload *, void *),
+				      void *data, bool wait_hw,
+				      unsigned int *unresolved_out)
+{
+	(void)net; (void)match; (void)data; (void)wait_hw;
+	assert(!ask_flow_lifecycle_lock.held);
+	if (unresolved_out)
+		*unresolved_out = 0;
+	return 0;
+}
 
 #include "ask_fe_flush_body.h"
 #include "ask_fe_nat_frag_flush_body.h"

@@ -51,6 +51,11 @@ static int nat44_flush_calls, nat66_flush_calls, v6_frag_flush_calls;
 static int nat44_flush_rc, nat66_flush_rc, v6_frag_flush_rc;
 static bool flow_table_present = true;
 
+struct mutex { bool held; };
+static struct mutex ask_killswitch_mutex;
+static void mutex_lock(struct mutex *m) { assert(!m->held); m->held = true; }
+static void mutex_unlock(struct mutex *m) { assert(m->held); m->held = false; }
+
 static bool try_module_get(void *m)
 {
 	(void)m;
@@ -137,9 +142,16 @@ int main(void)
 	check_switch(ask_nat66_offload_set, &ask_nat66_offload,
 		     &ask_nat66_disable_incomplete,
 		     &nat66_flush_calls, &nat66_flush_rc, false);
+	/* A1: ipv6_hw_frag defaults OFF (RFC 8200 safe); opt in before testing disable path. */
+	assert(!ask_ipv6_hw_frag);
+	{
+		struct kernel_param kp = { .arg = &ask_ipv6_hw_frag };
+		assert(ask_ipv6_hw_frag_set("1", &kp) == 0 && ask_ipv6_hw_frag);
+	}
 	check_switch(ask_ipv6_hw_frag_set, &ask_ipv6_hw_frag,
 		     &ask_ipv6_hw_frag_disable_incomplete,
 		     &v6_frag_flush_calls, &v6_frag_flush_rc, true);
+	assert(!ask_killswitch_mutex.held);
 	puts("ask_nat_frag_kill_switch: OK");
 	return 0;
 }
