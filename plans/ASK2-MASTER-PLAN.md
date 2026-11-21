@@ -1,6 +1,6 @@
 # ASK2 Master Plan
 
-**Version 2.35.0 · 2026-10-29**
+**Version 2.37.0 · 2026-11-21**
 
 This is the single ASK2 task list and execution order. Feature plans own
 detailed designs and runbooks; `ASK2-VENDOR-PARITY.md` owns current measurement
@@ -34,9 +34,10 @@ encap/decap and MTU-shrink fragmentation exist. Bridge learned/static unicast
 and B7a same-tagging have silicon acceptance and a current-image repeat. The
 production YNL family serves per-record silicon counters and `get-flow`.
 
-F-266 TCP control punt is implemented but default-off; its transit gate and
-the A14 TTL/neighbour gate both FAILED on 2026-10-18 (§4.1). Closed TCP
-flows can linger in conntrack. Do not claim scale acceptance.
+F-266 and A14 have later passing transit and TTL/neighbour evidence in §4.1;
+NAT44 FIN and current-image regressions remain open. The earlier 2026-10-18
+failures and their boot/image conditions remain in the evidence trail. Do not
+infer scale acceptance or current deployed defaults from those historical runs.
 
 The Dell-controlled paired 10×10 routed/NAT/VLAN campaign on `0551` is
 `COMPLETE_WITH_ISSUES`: 17 of 24 cells PASS under the strict-mean rule. Six
@@ -58,7 +59,7 @@ Gates closed since the 2026-10-15 snapshot. The evidence is in
 | Bridge harness verdicts (nonzero exit on any failure) | 2026-10-16 | — |
 | Bridge B6/B7a current-image repeat and 100-cycle soak | `2012` cold boot, 2026-10-17 | B2 and capacity need the debugfs image (`.149`) |
 | PPPoE ASK2-side fragmentation | `2012`, 2026-10-17 | Vendor half, 10,000-cycle, exhaustion, soak open |
-| IPsec Tier 1 (CAAM-backed host-terminated ESP, SW baseline, rekey) | 2026-10-17 | Reboot-clean open |
+| IPsec Tier 1 (CAAM-backed host-terminated ESP, SW baseline, rekey, reboot-clean) | 2026-10-17 / 2026-10-21 (`.185`/0729) | Routed gateway-forwarding benchmark, IPv6 ESP, and SEC QoS register decode remain open (`ASK2-IPSEC-OFFLOAD-PLAN.md`) |
 | P4 per-port loop, eth3 and eth4 (idempotent engage, MTU 1280/2500/3600/1500, link flap ×3, 100-cycle disengage/engage churn, CLI remove/reapply ×10) | `.185`/`2044`, 2026-10-21..23 | MURAM 52922, `pcd-snapshot diff` clean, 0 kernel errors; module unload refused by design (patch 0145 pins `ask.ko`) |
 | P4 MTU > 1500 with offload engaged (F-270) | `.185`/`2044`, 2026-10-23: MTU 1280-3600 steps, UDP sweep 1472-2400 incl. 1473, routed MTU-shrink | 9.2-9.7 Gbit/s; PPPoE-specific shrink case not rerun |
 | P4 neighbour change under load, eth3 and eth4 sides, IPv4 and IPv6 | `.185`/`2044`, 2026-10-22/23 | IPv6 needs a link-local on the port (see §5 ND finding, resolved); `fe80::185/64` now persistent in config on eth3/eth4. Re-run 2026-10-23 after fix: IPv6 plain and VLAN (eth3.10→eth4.20) IPv4+IPv6 all PASS: hw-hit before/after, MURAM 52922, 0 kernel errors, ask-check 36/36 |
@@ -74,10 +75,10 @@ cannot forward in software. Vendor source support is not a live benchmark.
 |---|---|---|
 | IPsec ESP | Full FMan→CAAM→FMan path absent; SA lifecycle, v4/v6 tunnel mode, supported suites, NAT-T, ESN/anti-replay, rekey/expiry, encrypted fragmentation and SEC rate control | T-M6-4 / IP1 / IP2; IPsec plan |
 | Multicast | IPv4/IPv6 routed multicast and MDB-owned replication absent | T-M6-MC |
-| Bridge | B7b access↔trunk pop/push, IRB, routed+bridged on one port, PPPoE-session bridging; QinQ remains unsupported | T-M6-2; bridge plan |
-| Multi-table dispatch | One key profile/table per port prevents simultaneous L2/routed/ESP classes | T-M6-DISPATCH; bridge plan |
+| Bridge | B7b access↔trunk has a silicon gate (§3); paired parity and capacity remain open. Full IRB, routed+bridged on one port and PPPoE-session bridging remain open; QinQ unsupported | T-M6-2; bridge plan |
+| Multi-table dispatch | Silicon proof of multiple classes exists (§3.3); production coexistence and lifecycle acceptance remain open | T-M6-DISPATCH; bridge plan |
 | VLAN | QinQ/802.1ad/stacked tags and DSCP→PCP absent; routed PCP≠0 fallback needs board proof | T-M6-VLAN2 |
-| PPPoE | PPPoE-over-VLAN hardware path implemented 2026-10-29 (G2, HW gate pending); relay absent; current-image validation, churn and exhaustion still open | T-M6-SP4; PPPoE plan |
+| PPPoE | PPPoE-over-VLAN quick hardware gate passed 2026-10-30 (G2); relay absent; current-image validation, churn, exhaustion and soak remain open | T-M6-SP4; PPPoE plan |
 | Tunnels | 6in4 and 4in6 absent; other modes require vendor datapath proof before scope expansion | T-M6-SP5 / TN |
 | QoS | Rate limit on ASK-forwarded traffic, CEETM shaping/scheduling, DSCP→queue and exception-path rate limit absent; ingress policer bypassed on ASK-engaged ports | T-M6-QOS |
 | Parser safety | F-266 transit gate, TTL/hop-limit expiry punts, IKE/NAT-T control separation | T-M6-SP1 / SP2 / SP3 |
@@ -135,8 +136,12 @@ programming recipes. Resolve contradictions before touching code.
 - MTU-shrink fragmentation retains F-262's owned frag-info and RX triple:
   params misc `|=0x40000000`, RCMNE `0x0e`, RFENE `0x22`, readback and reverse
   restoration. IPv6 HW fragmentation defaults on by operator decision;
-  `ask.ipv6_hw_frag=0` is the RFC 8200/software-PMTUD opt-out. Concurrent
-  oversize IPv6 flows can reuse fragment IDs; this limitation remains open.
+  `ask.ipv6_hw_frag=0` is the intended RFC 8200/software-PMTUD opt-out.
+  Commit `20784423` upgraded `ipv6_hw_frag=0` (and `nat44_offload=0` /
+  `nat66_offload=0`) to synchronous fail-closed withdrawal under
+  `ask_hw_is_ready()` (blocking re-enable with `-EBUSY` until disable settles;
+  host-gated in `tests/ask_nat_frag_kill_switch.py`), but cold-boot board
+  verification and concurrent oversize IPv6 fragment-ID reuse remain open.
 - Per-flow MURAM allocation is zero in the production ehash path. Do not
   revive archived allocators or CC-tree scale-out without a measured need.
 - IPsec starts AES-CBC-SHA256; AES-CTR-SHA256 is a later suite. GCM remains
@@ -144,53 +149,61 @@ programming recipes. Resolve contradictions before touching code.
 
 ## 3. Execution order
 
-| Priority | Work | Dependency / exit |
+This order is safety-first, not a claim that every prerequisite has passed.
+Existing evidence and the G identifiers below remain authoritative for their
+individual gates; historical board/image results are not current-image proof.
+Work may proceed in parallel only where it does not bypass a named dependency.
+
+| Priority | Work | Exit / dependency |
 |---|---|---|
-| 1 | **B7b access↔trunk pop/push** (silicon gate and regression smoke checks PASS 2026-10-20 on cold-booted `.155`, image 0326, commit `1e845e2d`) | IPv4/IPv6 pop/push wire/hit/fallback/churn gates passed. On a second cold boot: B6/B7a zero failures; routed/NAT/VLAN/PPPoE quick matrix 23/23 HW. Teardown PCD state exact, MURAM unchanged. Separate F-266/A14 correctness, capacity/soak and vendor-parity gates remain open. Runbook: `ASK2-BRIDGE-OFFLOAD-PLAN.md` §6.1 |
-| 2 | F-266 FIN/RST transit and NAT correctness; A14 IPv6 TTL and stale-neighbour safety | FAILED 2026-10-18; **PASS 2026-10-29** on `.185` (A14 IPv4/IPv6 10/10; F-266 N=300 IPv4/IPv6 with and without reuse). NAT44 FIN still unmeasured on the rig |
-| 3 | Existing-feature acceptance: PPPoE cycles/exhaustion/soak, bridge B2/capacity (debugfs on `.149`), resource failure, five-port breadth | Use owning runbooks; do not reimplement shipped paths |
-| 4 | IPsec Tier 1 reboot-clean, then Tier 2 design/bring-up | Full path required for parity |
-| 5 | Multi-table dispatch; PPPoE-over-VLAN; multicast | Dispatch must prove coexistence before IRB/mixed classes/ESP coexistence |
-| 6 | QinQ, relay, tunnels, QoS | Feature-specific kernel ownership and forward/inverse/fallback gates |
-| Unblocked 2026-10-28 | Refreshed vendor comparisons | Vendor board `.70` (Mono OpenWrt 25.12.6, kernel 6.12.112, `cdx` + `ask_flowtable` loaded). Run after the correctness gates; same-rig A/B only (`bin/testrig-pppoe-vendor.sh`, `RIG_NS`) |
-| Parallel, not on the active rig | Phase 2 code/patch consolidation | No behavior change; preserve regression evidence |
-| After correctness gates | Current pps, scale, latency and soak; final per-feature vendor comparisons | No historical figures substituted for current acceptance |
-| Separate track | WireGuard, VPP ZC, upstream preparation, genl per-op policies | Not missing vendor hardware features |
+| 1 | **Policy change and revocation** (G3, G7; §3.1.1) | **Cold-boot DUT verified for G3 & global flush (`2026.11.21-1724-rolling`, `943610c1`, patch `155`):** `ASK_CMD_FLUSH_FLOWS` NAT-preserving SW+HW revocation (`policy-epoch` bump, `revoke-state=2`, 0 retr), G3 wire-level blackhole route drop (`0/0` wire pkts on GEN2, closing `XMIT_DIRECT` stale-route forwarding), and `a14-neigh` v4/v6 (0 stale frames). **Still open:** persistence across restarts, request-to-containment leakage measurement, and G7 Suricata approval barrier. |
+| 2 | **FE/QMan/DPAA/CAAM lifecycle** (T1–T6, §4.9) | **Source + CI host gates mostly landed (`de598f26`, `20784423`, `a94e49f6`):** T1(a)/(c)/(d)/(e), T2 (F-310/F-311), T3 (F-319 QMan MC/shutdown), T4 (F-318 CAAM QI + F-320 DPAA parent lifetime + F-316 shared offload CGR), T5 (F-292/F-293), and WGFP DPAA-skb TX ownership. **Still open:** T1(b) `ask.ko` `netdev_hold`/unregister, T1(f) port-disengage `-EBUSY`, T6 natural-timeout decision, and cold-boot board soak/port-loop under load. |
+| 3 | **IPv6 fragment-ID safety and WireGuard exposure** (§3.1.1) | `20784423` closed synchronous fail-closed `ipv6_hw_frag=0` withdrawal in source and `de598f26` closed WGFP real-BPID TX ownership, but concurrent IPv6 fragment-ID reuse and WireGuard default-on P6/spread blockers (FMan wedge, per-flow black hole/P6 drop stall, DMA-direction proof, `threaded=1` `xmit_fail` + drain check) remain open before release or WG performance work. |
+| 4 | **Existing-path acceptance** | Cold-boot validation of `a94e49f6` shared `priv->offload_cgr` (1500 & 9000 MTU) and F-308 jumbo attribution; PPPoE A8 (10,000 cycles, exhaustion, soak, G2 parity); F-266 NAT44 FIN, current-image A14, R4 UDP reopen, G8 `max_flows`, T-M6-A4 fault injection, bridge B2/capacity/B7b parity, vyos-1x T3871 naming-store upgrade gate, and remaining scaling/matrix gates (`ASK2-FLOW-SCALING-PLAN.md`, `ASK2-PERF-MATRIX-PLAN.md`, `TREX-NDR-PERF-PLAN.md`). B7b passed the cold-boot 2026-10-20 silicon and regression gates on `.155`/0326, commit `1e845e2d`. |
+| 5 | **Useful observability and shaping** | F-315/`720ccfb5` batched stats scan and `ask_genl.c` per-op hardening (`20784423`) are in source; validate existing counters/cached stats, add YNL `nat-*`/`first-seen-ns`/`fallback-reason` attrs and Phase 0 Q2 / Option A `pmacct` checks (`ASK2-SILICON-TELEMETRY-PLAN.md`) before building an exporter. Scope G10 CEETM shaper/FQ coexistence independently; implement after G4 where classifier coexistence requires it. Fairness/AQM is a separate outcome. |
+| 6 | **Inspection and flood resilience** | Guard silent inspection bypass first (G7 Track 0 commit-time validation in `ASK2-SURICATA-OFFLOAD-PLAN.md`); optional shunting requires the §3.1.1 contract. Measure and bound control-plane and established-flow survival under approved workloads; no ingress-policer flood. |
+| 7 | **IPsec and demand-driven breadth** | Tier 1 reboot-clean passed (2026-10-21; routed/IPv6/SEC-QoS measurements remain); scoped Tier 1.5/Tier 2 only after shared safety gates; G4 production dispatch before mixed-profile features that actually require it. IRB, multicast, tunnels, QinQ and relay follow explicit deployment need and their own gates. |
 
-### 3.1 Vendor-gap implementation order (2026-10-29)
+Current pps, scale, latency, soak and same-rig vendor comparisons follow the
+relevant correctness gates; historical results are not substituted for current
+acceptance. Phase 2 consolidation, VPP ZC and upstream preparation are separate
+tracks and must not obscure safety blockers. Verify vendor-board availability
+and rig configuration at execution time. Each silicon step needs its own reviewed
+change, CI image and cold-boot gate under §6.
 
-This sequence implements the remaining vendor-ASK gaps from §1.2 and
-`ASK2-VENDOR-ASK-REVIEW.md` (R6–R13). It runs after the acceptance work in
-priorities 1–3 above and replaces the coarse ordering of priorities 4–6. Status on
-2026-10-29: unicast, NAT, routed VLAN, PPPoE and HW fragmentation are at
-parity (paired `.185`/`.70` runs, review §13). Everything below is open.
+### 3.1 Vendor-gap implementation order and dependencies
 
-The ordering rules:
-- Operator-visible feature gaps that block common deployments come first:
-  PPPoE over VLAN (ISP access), IRB and multicast (LAN/IPTV).
-- Work that fits the current single-table key comes before the classifier
-  change that needs it. PPPoE over VLAN fits the existing 50-byte key: VID
-  at bytes 46–47 and SID at 48–49 are both already extracted.
-- Multi-table dispatch comes before any feature that needs two traffic classes
-  on one port (IRB, ESP alongside routed traffic).
-- Retirement correctness (R11) comes before IRB and multicast, because a stale
-  L2 or replication entry forwards silently.
-- Each step ships in its own CI image and passes its gate on a cold-booted DUT
-  before the next silicon step starts.
+The G rows retain the existing work and evidence, not a second priority order.
+G1 and G2 have partial hardware evidence; G3 is not a complete policy-revocation
+mechanism. G4 has a silicon proof (§3.3), not a production coexistence gate.
+G5a does not require G4; G5b and mixed routed/ESP do. G6's routed single-OIF
+work does not require G5, while bridge replication may. G10 preliminary egress
+shaper/FQ scoping may proceed independently; retain G4 before implementation
+where policer, RSS or other mixed-class coexistence needs dispatch. Prove the
+actual dependency and how offload and ordinary TX FQs share the shaper.
+G8's implemented budget still needs its acceptance gate. G11, G12, G13 and G14
+remain conditional work, not release claims. The 2026-10-29 review §13 records
+paired `.185`/`.70` unicast, NAT, routed VLAN, PPPoE and HW-fragmentation
+parity for those tested cells, not all current acceptance. On 2026-10-29 `.185`
+A14 IPv4/IPv6 passed 10/10 and F-266 passed N=300 IPv4/IPv6 with and without
+reuse; NAT44 FIN remained unmeasured. See `ASK2-VENDOR-ASK-REVIEW.md`
+for the R6–R13 evidence and §4 for feature-specific gates.
 
 ```mermaid
 flowchart TD
     G1["G1 R10 one-line enable"]
     G2["G2 PPPoE over VLAN"]
     G3["G3 R11 dependency retirement audit"] --> G4["G4 multi-table dispatch"]
-    G4 --> G5["G5 bridge IRB and mixed L2/routed"]
+    G5a["G5a routed ingress to bridge member"]
+    G4 --> G5b["G5b full mixed-profile IRB"]
     G3 --> G6["G6 multicast"]
-    G5 --> G6
+    G5b -. "bridge replication only" .-> G6
     G1 --> G7["G7 Suricata flow shunting"]
     G3 --> G7
     G8["G8 R9 admission budget"]
     G4 --> G9["G9 IPsec ESP Tier 2"]
-    G4 --> G10["G10 QoS on offloaded traffic"]
+    G10scope["G10 egress shaper/FQ scoping"] --> G10["G10 CEETM implementation and coexistence"]
+    G4 -. "where dispatch is required" .-> G10
     G4 --> G11["G11 tunnels 6in4/4in6"]
     G2 --> G12["G12 QinQ and DSCP to PCP"]
     G13["G13 R7 step 2 degraded mode"]
@@ -199,34 +212,106 @@ flowchart TD
 
 | Step | Work | Why here | Gate / exit | Owner |
 |---|---|---|---|---|
-| G1 | **R10 one-line enable.** `offload ipv4\|ipv6` generates a hidden flowtable and an early offload rule for the armed ports. Excludes the FTP, SIP and PPTP control ports by default. **HW-verified 2026-10-30 (image 2026.10.30-0153): 20/20 HW with the auto flowtable only, no user `FT`.** **Exclusions HW-verified 2026-10-30 (1612):** with the auto chain active, iperf3 to TCP 21 and TCP 1723 stayed in software (`hw=0`, 1.5 Gbit/s) while port 5201 offloaded (`hw=2`, 8.6 Gbit/s). TCP 5060/5061 SIP added to the exclusions 2026-10-30 (patch 058, probe 44/44 ok; HW check pending the next image). R9 admission budget (`ask.max_flows`, default 262144 since 2026-10-31 (was 32768, which capped HW share at 32768 / (2 x flows)), 0 = unlimited, reported in `get-info max-flows`; over-budget inserts return `-ENOSPC` and stay in software) and the opt-in `kasan` build input (R14) are implemented, not yet board-tested. R13: engaged ports read `FMBM_RIM=0x60000000`, `FMBM_RPSO=0x60`, same as the vendor (see `arch/fman-microcode-210-programming-reference.md`). G2 PPPoE-over-VLAN quick cells 2026-10-30: down 9.33, up 9.35 Gbit/s, HW. R8 stats-cost measurement not run (needs a 16k-flow generator). A user `firewall flowtable` on the same ports suppresses the auto chain by design. One unexplained DUT hang (no oops, log silent) followed the first port-21 run; three repeats, including the original 2-stream 12 s run, did not reproduce it. | vyos-1x only, small, no silicon. Today an armed port offloads nothing without a hand-written rule. G7 needs the generated rule as its hook. | Fresh config with only `offload ipv4 ipv6` passes the quick matrix as HW. `delete … offload` removes the rule and flowtable. The exclusions are verified with an FTP control session (SW). | **Implemented 2026-10-29** in `data/vyos-1x-058-offload-auto-flowtable.patch` (generated `VYOS_FLOWTABLE_ASK_AUTO` + `VYOS_ASK_AUTO_FORWARD` at `filter + 10`; patch-rot probe 44/44 ok; nft syntax validated in a netns on `.185`). HW gate pending the next image. **Fix 2026-10-30:** the first board test (image `2026.10.30-0005`) was 10/10 SW with the `flow add` counter at 0. VyOS conntrack is opt-in: `system_conntrack.py` sets `FW_CONNTRACK` to `return` unless a firewall rule uses state, so PREROUTING ends in `notrack` and the generated rule never sees an established flow. Patch 058 now computes `ask_auto_families` (families with an engaged, enabled port outside a user flowtable) and sets `{family}_firewall_action='accept'`. Hot-patched on `.185`: **10/10 HW at 9.1–9.4 Gbit/s** (`quick-20261030-0141.csv`). `ASK2-VENDOR-ASK-REVIEW.md` R10 |
-| G2 | **PPPoE over VLAN** (T-M6-SP4). Decap and encap of PPPoE inside an 802.1Q tag on the WAN port. **Implemented 2026-10-29** (`ask_flow_cookie_pppoe()` VID, POP/PUSH cross-check, kernel fixup F-272 for the 0x42 inner EtherType); HW gate pending. **HW gate PASSED 2026-10-30 (`.185`, image 0153, PPPoE on `eth3.30`, gen1 `pppoe-server` on `enp1s0f0np0.30`):** quick cells pppoe-down/up v4/v6 all HW at 9.20-9.34 Gbit/s (`hw_ratio` 1.06-1.13). Wire capture shows `vlan 30, p 0, PPPoE S [ses 0x1] IP`. Still open: paired parity cell against `.70` and a churn/exhaustion pass. Rig and DUT config reverted afterwards. | Common ISP access topology. The existing key already holds VID and SID, so the work is in the AD/encap path, not the classifier layout. | Wire capture of tag+PPPoE headers. HW hit both directions. Paired parity cell against `.70`. A churn and exhaustion pass. | PPPoE plan |
-| G3 | **R11 dependency retirement audit.** **Audit done 2026-10-29 (§3.2); route/rule and MTU/MAC retirement added to ask.ko, HW gate pending.** Builds an event table against the vendor's (neighbour, route prefix, MTU/carrier/MAC, upper-device, FDB move/age, bridge VLAN, rule add/delete) and fixes each missing notifier. **2026-10-30:** eth3 MTU toggle mid-flow inconclusive (stayed HW, only REPLACE dedup lines); **Route retirement HW-verified 2026-10-30 (0153):** a blackhole /32 added mid-flow took `hardware-backed` flows 8→0 (log `route change, removed 4 HW flow(s)`) and they were not re-offloaded. The stock SW flowtable (xmit DIRECT skips the dst check) keeps forwarding the flow, so traffic does not follow the new route; that is kernel behaviour, not ask.ko. Rule add/del HW-verified (`route change, removed 8 HW flow(s)`). **MTU/MAC retirement FAILED on 0153 and root-caused 2026-10-30:** `ask_devchg_collect()` skipped records with `!key.l3_proto`, but `ASK_FLOW_L3_IPV4 == 0`, so every IPv4 record was skipped (no log, flows stayed HW; ifindex fields in the dump were correct). Fixed by testing only `l4_proto`, like the other collectors. **HW-verified 2026-10-30 on `2026.10.30-1612`:** under a live 4-stream flow, eth3 MTU 1500→1400→1500 and eth4 MAC change and revert each logged `device MTU/MAC change, removed 8 HW flow(s)` and the flows re-offloaded (hw=8 within 2 s). The MAC change stalled iperf for about 12 s because gen2's neighbour entry held the old DUT MAC until it refreshed; that is expected for a real MAC change. | A stale HW entry forwards silently. IRB (FDB moves), multicast (MDB changes) and Suricata revocation all depend on it. | Each event is tested with a live HW flow: the flow leaves HW within 1 s and traffic follows the new path. | `ask_neigh.c`, `ask_flow_offload.c`, R11 |
-| G4 | **Multi-table dispatch (T-M6-DISPATCH).** More than one key profile and table per port, so L2, routed and ESP classes can coexist. **Status 2026-10-29: not started in silicon.** The design is in §4 T-M6-DISPATCH (soft-parser LCV → one KG scheme per class → one RCCB row per scheme). The first step is a rig experiment, not shippable code: two schemes (routed plus L2_DA) on a cold-booted sacrificial `.185` eth3, tested against the `next_engine=3` RX wedge first. **Silicon proof 2026-11-09 (§3.3): dispatch works without any LCV change.** A soft-parser routine that writes `$nia = 0x480300 \| scheme` (KeyGen, AC_CC, KG-direct) sends one protocol class to its own scheme; that scheme's CCOBASE selects its own row in the port's 256-byte RCCB scaffold. On `.106` eth3, TCP (routed scheme, row 0), UDP (second scheme, row 1, HIT) and ESP (third scheme, row 2, 38-byte table, MISS to the PCD FQ) ran concurrently; restore left `pcd-snapshot diff` clean. Next: a kernel implementation (§3.3 "Production shape"), then the L2/IRB class. | Prerequisite for IRB (G5) and ESP alongside routed traffic (G9). The largest classifier change, so the S0 qdrant gate applies. | The routed, VLAN, PPPoE and bridge quick matrix stays 100 % HW on one port with two classes engaged. `pcd-snapshot` S1→S0 is byte-exact. MURAM is at baseline after disengage. | Bridge plan, §4.6 |
-| G5 | **Bridge IRB, routed plus bridged on one port, PPPoE-session bridging** (T-M6-2). **Split 2026-10-29.** G5a (no dispatch needed): routed port → `br0` → member port. The ingress is a ROUTED port, so only the egress side changes. Resolve the neighbour on the L3 device (`br0`) and the egress port from the forward path (`out.hw_ifidx`), then enqueue to the member's TX FQ. The reverse direction stays SW until G4. G5b: the full IRB after G4. **G5a result 2026-10-30 (`.185`, eth4 in `br0`):** no egress code was needed. The kernel's `nf_flow_table_path` already resolves `br0` to the member (`DEV_PATH_BRIDGE`, `xmit DIRECT`, `h_dest` from the FDB), and ask.ko enqueues to the member. unicast-v4 and unicast-v6 eth3 → br0/eth4 are **HW at ~9.4 Gbit/s**; the reverse stays SW (G5b). Added FDB retirement: `ask_bridge_fdb_notifier` calls `ask_flow_fdb_change()`, which retires every routed record whose next-hop MAC moved to another port or was deleted ("bridge FDB change" log). Compiles clean; HW test needs a signed image. **G5a HW-verified 2026-10-30 (0153):** unicast v4/v6 into `br0` HW; FDB delete mid-flow logs `bridge FDB change, removed 8 HW flow(s)` and re-offloads. | The main LAN topology on a VyOS gateway (bridge with a routed `br` address). Needs G4. | Bridge plan gates. Routed↔bridged HW hit through `br0`. B7b paired parity. | Bridge plan |
+| G1 | **R10 one-line enable.** `offload ipv4\|ipv6` generates a hidden flowtable and an early offload rule for the armed ports. Excludes the FTP, SIP and PPTP control ports by default. **HW-verified 2026-10-30 (image 2026.10.30-0153): 20/20 HW with the auto flowtable only, no user `FT`.** **Exclusions HW-verified 2026-10-30 (1612):** with the auto chain active, iperf3 to TCP 21 and TCP 1723 stayed in software (`hw=0`, 1.5 Gbit/s) while port 5201 offloaded (`hw=2`, 8.6 Gbit/s). TCP 5060/5061 SIP added to the exclusions 2026-10-30 (patch 058, probe 44/44 ok; HW check pending the next image). R9 admission budget (`ask.max_flows`, default 262144 since 2026-10-31 (was 32768, which capped HW share at 32768 / (2 x flows)), 0 = unlimited, reported in `get-info max-flows`; over-budget inserts return `-ENOSPC` and stay in software) and the opt-in `kasan` build input (R14) are implemented, not yet board-tested. R13: engaged ports read `FMBM_RIM=0x60000000`, `FMBM_RPSO=0x60`, same as the vendor (see `arch/fman-microcode-210-programming-reference.md`). G2 PPPoE-over-VLAN quick cells 2026-10-30: down 9.33, up 9.35 Gbit/s, HW. R8 stats-cost measurement not run (needs a 16k-flow generator). A user `firewall flowtable` on the same ports suppresses the auto chain by design. One unexplained DUT hang (no oops, log silent) followed the first port-21 run; three repeats, including the original 2-stream 12 s run, did not reproduce it. | vyos-1x only, small, no silicon. The auto chain removes the earlier need for a hand-written rule; G7 needs a safe admission hook. | Fresh config with only `offload ipv4 ipv6` passes the quick matrix as HW. `delete … offload` removes the rule and flowtable. The exclusions are verified with an FTP control session (SW). | **Implemented 2026-10-29** in `data/vyos-1x-058-offload-auto-flowtable.patch` (generated `VYOS_FLOWTABLE_ASK_AUTO` + `VYOS_ASK_AUTO_FORWARD` at `filter + 10`; patch-rot probe 44/44 ok; nft syntax validated in a netns on `.185`). HW gate was pending at the time of implementation; later 0153 evidence is above. **Fix 2026-10-30:** the first board test (image `2026.10.30-0005`) was 10/10 SW with the `flow add` counter at 0. VyOS conntrack is opt-in: `system_conntrack.py` sets `FW_CONNTRACK` to `return` unless a firewall rule uses state, so PREROUTING ends in `notrack` and the generated rule never sees an established flow. Patch 058 now computes `ask_auto_families` (families with an engaged, enabled port outside a user flowtable) and sets `{family}_firewall_action='accept'`. Hot-patched on `.185`: **10/10 HW at 9.1–9.4 Gbit/s** (`quick-20261030-0141.csv`). `ASK2-VENDOR-ASK-REVIEW.md` R10 |
+| G2 | **PPPoE over VLAN** (T-M6-SP4). Decap and encap of PPPoE inside an 802.1Q tag on the WAN port. **Implemented 2026-10-29** (`ask_flow_cookie_pppoe()` VID, POP/PUSH cross-check, kernel fixup F-272 for the 0x42 inner EtherType). **HW gate PASSED 2026-10-30 (`.185`, image 0153, PPPoE on `eth3.30`, gen1 `pppoe-server` on `enp1s0f0np0.30`):** quick cells pppoe-down/up v4/v6 all HW at 9.20-9.34 Gbit/s (`hw_ratio` 1.06-1.13). Wire capture shows `vlan 30, p 0, PPPoE S [ses 0x1] IP`. Still open: paired parity cell against `.70` and a churn/exhaustion pass. Rig and DUT config reverted afterwards. | Common ISP access topology. The existing key already holds VID and SID, so the work is in the AD/encap path, not the classifier layout. | Wire capture of tag+PPPoE headers. HW hit both directions. Paired parity cell against `.70`. A churn and exhaustion pass. | PPPoE plan |
+| G3 | **R11 dependency retirement audit.** **Historical 2026-10-29 status:** audit done (§3.2); later route/rule and MTU/MAC hardware results follow, with incomplete withdrawal cases tracked in T1. Builds an event table against the vendor's (neighbour, route prefix, MTU/carrier/MAC, upper-device, FDB move/age, bridge VLAN, rule add/delete) and fixes each missing notifier. **2026-10-30:** eth3 MTU toggle mid-flow inconclusive (stayed HW, only REPLACE dedup lines); **Route retirement HW-verified 2026-10-30 (0153):** a blackhole /32 added mid-flow took `hardware-backed` flows 8→0 (log `route change, removed 4 HW flow(s)`) and they were not re-offloaded. The stock SW flowtable (xmit DIRECT skipped the dst check) kept forwarding the flow on the old route. Rule add/del HW-verified (`route change, removed 8 HW flow(s)`). **MTU/MAC retirement FAILED on 0153 and root-caused 2026-10-30:** `ask_devchg_collect()` skipped records with `!key.l3_proto`, but `ASK_FLOW_L3_IPV4 == 0`, so every IPv4 record was skipped. Fixed by testing only `l4_proto`, like the other collectors. **HW-verified 2026-10-30 on `2026.10.30-1612`:** under a live 4-stream flow, eth3 MTU 1500→1400→1500 and eth4 MAC change and revert each logged `device MTU/MAC change, removed 8 HW flow(s)` and the flows re-offloaded (hw=8 within 2 s). **Source + CI host gates + cold-boot DUT wire-level verification PASS 2026-11-21 (`.185`, `2026.11.21-1724-rolling`, `943610c1`, patch `155`):** `dst_cache`/`dst_cookie` moved outside the `XMIT_DIRECT` union, G3 FIB/DEV/FDB/neigh handlers revoke SW entries before HW retirement, and `ASK_CMD_FLUSH_FLOWS` invokes NAT-preserving `ask_flow_policy_revoke()`. On cold boot: mid-flow `blackhole 10.99.2.113/32` revoked SW+HW (`dump-flows []`, conntrack `[ASSURED]`, GEN2 wire `tcpdump` 0/0 pkts over 2 s, auto-re-offloaded on delete); `ASK_CMD_FLUSH_FLOWS` retired SW+HW (`policy-epoch` +1, `revoke-state=2`, 0 retr); `a14-neigh` v4/v6 PASS (0 stale frames). | A stale HW or SW flowtable entry forwards silently. IRB (FDB moves), multicast (MDB changes) and Suricata revocation all depend on it. | Core G3 route/neigh/MTU/MAC + `ASK_CMD_FLUSH_FLOWS` wire-level revocation verified on cold boot (`943610c1`); request-to-containment leakage measurement, failed-delete fault test, and restart persistence remain under §3.1.1 / G7. | `ask_neigh.c`, `ask_flow_offload.c`, patch `155`, R11 |
+| G4 | **Multi-table dispatch (T-M6-DISPATCH).** More than one key profile and table per port, so L2, routed and ESP classes can coexist. **Historical 2026-10-29 status:** no silicon proof yet; the proposed LCV approach and first rig experiment were superseded by the 2026-11-09 proof below. **Silicon proof 2026-11-09 (§3.3): dispatch works without any LCV change.** A soft-parser routine that writes `$nia = 0x480300 \| scheme` (KeyGen, AC_CC, KG-direct) sends one protocol class to its own scheme; that scheme's CCOBASE selects its own row in the port's 256-byte RCCB scaffold. On `.106` eth3, TCP (routed scheme, row 0), UDP (second scheme, row 1, HIT) and ESP (third scheme, row 2, 38-byte table, MISS to the PCD FQ) ran concurrently; restore left `pcd-snapshot diff` clean. Next: a kernel implementation (§3.3 "Production shape"), then the L2/IRB class. | Prerequisite for full mixed-profile IRB (G5b) and ESP alongside routed traffic (G9); G5a does not need it. The largest classifier change, so the S0 qdrant gate applies. | The routed, VLAN, PPPoE and bridge quick matrix stays 100 % HW on one port with two classes engaged. `pcd-snapshot` S1→S0 is byte-exact. MURAM is at baseline after disengage. | Bridge plan, §4.6 |
+| G5 | **Bridge IRB, routed plus bridged on one port, PPPoE-session bridging** (T-M6-2). **Split 2026-10-29.** G5a (no dispatch needed): routed port → `br0` → member port. The ingress is a ROUTED port, so only the egress side changes. Resolve the neighbour on the L3 device (`br0`) and the egress port from the forward path (`out.hw_ifidx`), then enqueue to the member's TX FQ. The reverse direction stays SW until G4. G5b: the full IRB after G4. **G5a result 2026-10-30 (`.185`, eth4 in `br0`):** no egress code was needed. The kernel's `nf_flow_table_path` already resolves `br0` to the member (`DEV_PATH_BRIDGE`, `xmit DIRECT`, `h_dest` from the FDB), and ask.ko enqueues to the member. unicast-v4 and unicast-v6 eth3 → br0/eth4 are **HW at ~9.4 Gbit/s**; the reverse stays SW (G5b). Added FDB retirement: `ask_bridge_fdb_notifier` calls `ask_flow_fdb_change()`, which retires every routed record whose next-hop MAC moved to another port or was deleted ("bridge FDB change" log). Compiles clean; HW test needs a signed image. **G5a HW-verified 2026-10-30 (0153):** unicast v4/v6 into `br0` HW; FDB delete mid-flow logs `bridge FDB change, removed 8 HW flow(s)` and re-offloads. | The main LAN topology on a VyOS gateway. G5a is proven in one direction; full mixed-profile IRB needs G4. | Bridge plan gates. Routed↔bridged HW hit through `br0`. B7b paired parity. | Bridge plan |
 | G6 | **Multicast** (T-M6-MC): IPv4/IPv6 routed multicast and MDB-owned replication. **Design note 2026-10-29:** the nft flowtable never carries multicast; ipmr forwards it. The control source is therefore the FIB notifier's `RTNL_FAMILY_IPMR`/`IP6MR` MFC and VIF events, which the G3 notifier already receives and ignores. G6a: a single-OIF (S,G) record using the routed key and no replication. G6b: N-OIF replication, which needs an FMan replicator or a fan-out FQ primitive, proven on the rig first. **G6a scoping 2026-10-30: deferred, not a same-day item.** The ehash key is an exact 5-tuple, but an MFC entry is only (S,G) plus an OIF list, so one MFC event cannot become one record. G6a needs (1) per-stream learning from the datapath (a forwarded-multicast hook that sees the ports), (2) its own record table and ageing, since there is no conntrack or flowtable cookie, (3) retirement on MFC delete, OIF change and IGMP/MLD leave, (4) the mapped multicast MAC (`01:00:5e`/`33:33`) as the rewrite destination, and (5) a rig with a PIM or IGMP-proxy config and a multicast source and receiver. | IPTV use case. Routed (S,G) uses the existing routed key; replication into a bridge needs G5's IRB path. | Join/leave/retire tests with a live stream. Replication count matches the MDB/MFC. | T-M6-MC |
-| G7 | **Suricata flow shunting.** Suricata inspects the start of each flow inline (NFQUEUE). At stream depth, or on a `bypass` verdict, it sets a bypass mark. nftables copies the mark to the conntrack mark, and only flows with that mark reach the flowtable. ASK2 then offloads them. Unmarked, alerted or revoked flows stay in SW. | No silicon or key change; it uses G1's generated rule and G3's revocation. Can run in parallel with G4–G6 because it needs no rig silicon time until its stage 6. | `ASK2-SURICATA-OFFLOAD-PLAN.md` stages 1–6, plus the shunting acceptance there. No unmarked flow appears in `fe_ehash_stats`. A Suricata reload or stop revokes all flows to SW. `ask-check` shows the approved, revoked and HW counts. | `ASK2-SURICATA-OFFLOAD-PLAN.md` |
-| G8 | **R9 admission budget.** A tested ceiling (start at 32,768 directions, as the vendor does), enforced in `ask.ko` and reported in `max-flows`. Overflow stays in SW, is counted as a reject, and never evicts. | Small `ask.ko` change. Should land before G9 adds per-SA tables and before capacity claims. | The harness fills the table, overflows by 10 % and checks that overflow flows are SW with 0 HW. No DESTROY of the other direction. MURAM and DDR return to baseline. | `ask.ko`, R9 |
+| G7 | **Suricata inspection and optional flow shunting.** Native passive IDS does not authorize flows; a limited NFQUEUE prototype is not production admission or revocation. Guard named silent-bypass configurations first. Optional prefix shunting requires an explicit owned approval, a proven serialized verdict/admission fence, policy epoch and the withdrawal contract in §3.1.1; elapsed time, stream depth, generic bypass or no alert alone is not approval. | G1 supplies a possible integration point; G3 event retirement alone does not prove policy revocation. Both software and hardware flowtable bypasses matter. | Follow the companion plan's tracks and safety gates; prove identity, both-direction containment and retirement, failure policy, coverage accounting and reload/restart behavior. Until proven, shunting stays disabled; stale retained flows are reported uninspected, not silently called revoked. | `ASK2-SURICATA-OFFLOAD-PLAN.md` |
+| G8 | **R9 admission budget.** Implemented `ask.max_flows` default is 262144 directions since 2026-10-31; 0 means unlimited. The earlier proposed 32,768-direction starting point is historical, not the current default. | Validate the actual configured ceiling before capacity claims; over-budget inserts must remain in SW without evicting established owners. | The harness fills the table, overflows by 10 % and checks that overflow flows are SW with 0 HW. No DESTROY of the other direction. MURAM and DDR return to baseline. | `ask.ko`, R9 |
 | G9 | **IPsec ESP Tier 2.** The FMan→CAAM→FMan path, starting with AES-CBC-SHA256, IPv4/IPv6 tunnel mode, SA lifecycle, ESN/anti-replay, rekey and NAT-T. GCM stays refused (CAAM A24a). | Largest remaining parity item. ESP coexisting with routed traffic needs G4. | IPsec plan Tier 2 gates. Paired throughput against `.70`. Reboot-clean. | IPsec plan, T-M6-4 |
-| G10 | **QoS on offloaded traffic** (T-M6-QOS): rate limits on ASK-forwarded traffic, the ingress policer honoured on engaged ports, DSCP→queue, and an exception-path rate limit. CEETM shaping comes last. | Needs dispatch to coexist with the policer and RSS schemes. | Wire-level rate cap within 5 %. The policer is not bypassed. Disengage is reversible. | T-M6-QOS |
+| G10 | **QoS on offloaded traffic** (T-M6-QOS): first determine how ASK no-confirm TX FQs and ordinary software TX reach the existing tc/CEETM shaper without bypass, double shaping or starvation. Separately scope ingress policer coexistence, DSCP→queue and exception rates. | Preliminary egress scoping may proceed before G4. Retain G4 before implementation where policer, RSS or mixed-class coexistence requires dispatch; establish the dependency before any implementation bypasses that ordering. A shared aggregate rate cap is not per-flow fairness or AQM. | Predeclare rate tolerance (target ±5%); measure wire rates and latency for HW, SW and mixed traffic, both directions and multiple classes; verify changes/removal, exhaustion and reversible teardown. Fairness/AQM requires separate queue-delay, loss and isolation gates. | T-M6-QOS |
 | G11 | **Tunnels 6in4 and 4in6** (T-M6-SP5). Other modes only with vendor datapath proof. | Separate key class, so it needs G4. | Forward, inverse and fallback gates. Paired parity if the vendor offloads them on `.70`. | T-M6-SP5 |
 | G12 | **QinQ / 802.1ad and DSCP→PCP** (T-M6-VLAN2). | Extends the VLAN key after G2 settles the VLAN plus encapsulation path. | Stacked-tag wire capture plus a HW hit. Routed PCP≠0 fallback proven. | T-M6-VLAN2 |
 | G13 | **R7 step 2: degraded mode** (disengage to RSS, settle, re-engage with a rate limit). | Only after F-271 counters show a recoverable sync-timeout class in the field. Step 1 shipped in image 2026.10.29-2253. | Model test, then a live sync timeout recovered without a cold boot. | R7 |
 | G14 | **R6: PPPoE concentrator MAC in the key.** | Deferred: residual risk accepted unless the WAN-segment threat is taken into scope. Uses the last 6 key bytes (56 = KeyGen maximum). | R6 plan in the review §10. S0 qdrant gate. | R6 |
 
 
+### 3.1.1 Safety-first work contracts
+
+1. **Policy revocation and containment.** Define owner, connection incarnation,
+   namespace/zone, NAT mapping, policy epoch, direction and generation. On a
+   policy change, stop new admission and fence REPLACE and deferred replay.
+   Distinguish a request, `CONTAINED` by independently proven bidirectional
+   quarantine, `RETIRED` after both records and in-flight work are settled, and
+   `UNRESOLVED` on failure or uncertainty. Persist the fence, quarantine and
+   unresolved ownership across relevant restarts until reconciliation or a
+   proven reset. A conntrack deletion intentionally terminates a session and
+   loses its NAT mapping; it is not hardware acknowledgement. A flowtable flag,
+   forward-hook rule or asynchronous delete alone does not prove a live FE hit
+   stopped. Specify and measure request-to-containment leakage, failures and
+   concurrent adds/reuse in both directions. **Source + CI host gates (`943610c1`):**
+   patch `155` and `ask_flow_offload.c` implement the global admission fence,
+   NAT-preserving `nf_flow_table_revoke_match`/`all`, `ASK_CMD_FLUSH_FLOWS`
+   revocation, and `policy_epoch`/`revoke_state`/`unresolved_flows` YNL
+   telemetry (never claiming `CONTAINED` without independent quarantine);
+   cold-boot DUT wire-level proof, leakage measurement, and restart persistence
+   remain open. G3's historical route/device retirement observations do not
+   substitute for that board gate; §4.9 T1 owns underlying teardown work.
+2. **Lifecycle and release hold.** Close T1–T4 and relevant T5/T6, including
+   failed deletes, asynchronous retirement, owner/FQ/netdevice and parent DMA
+   lifetimes, global ordering and recovery. Use failing host models first,
+   then independently reviewed, bounded silicon gates. No reclaim or re-admit
+   while ownership is uncertain. A clean snapshot or injected timeout alone
+   cannot prove all hardware paths or natural-timeout recovery.
+3. **IPv6 fragment identity.** Concurrent oversize flows can reuse fragment
+   IDs and corrupt reassembly (§2, PPPoE plan). Preserve the existing default
+   and `ipv6_hw_frag=0` opt-out as facts, not safety approval. Commit
+   `20784423` upgraded `ipv6_hw_frag=0` to synchronous fail-closed withdrawal
+   under `ask_hw_is_ready()` (blocking re-enable with `-EBUSY` until disable
+   settles; host-gated in `tests/ask_nat_frag_kill_switch.py`), but board
+   verification of bidirectional withdrawal and settlement remains open. Before
+   release, decide an operator-visible safe containment or a proven unique-ID
+   design; verify concurrent same-destination flows, both directions,
+   NAT/PPPoE, reassembly, PMTU/PTB, fallback, reuse and teardown, including
+   failed withdrawal. Do not promise an unverified hardware ID allocator or
+   silently change operator policy.
+4. **WireGuard safety.** The companion plan's 2026-11-14 source snapshot says
+   P3, P6 and RX ORP spread are default on; the deployed image is not identified
+   by that fact. Review default exposure before release; any change to known-good
+   configuration requires approval. Investigate the reported global wedge,
+   freeze/bad-page corruption, black-hole and firewall recovery stall. Prove
+   buffer/DMA ownership, outer checksum enforcement, authentication/replay,
+   AllowedIPs, ingress and firewall provenance, rekey/roam, PMTU, ORP ordering,
+   rejection, teardown and management responsiveness. G3 alone missed its
+   rate gate; later G6 rate results are not complete safety acceptance. No new
+   performance datapath before these gates; use the WireGuard plan as owner.
+5. **Telemetry and inspection honesty.** Existing silicon counters, cached YNL
+   snapshots and flowtable stats are partial infrastructure, not an exporter or
+   complete visibility. First validate existing counters and cached stats for
+   direction, reset/reinsert, polling lag, NAT identity and software fallback.
+   Only then scope additional collection if needed. If an exporter is built,
+   validate its coverage before claiming IPFIX accounting. Per-flow replication is not 1-in-N packet sampling; sFlow is
+   blocked pending a demonstrated sampling mechanism. Passive IDS and inline
+   queue coverage must identify exclusions; hardware and, for forward-hook
+   NFQUEUE, software flowtable hits can bypass inspection. Prefix shunting
+   deliberately leaves the approved remainder uninspected; no full-flow or
+   detection-parity claim follows from a mark.
+6. **Shaper and flood safety.** First inventory existing CEETM/tc behavior and
+   trace both software and offload TX FQs into a common policy; compare shaped
+   and unshaped controls, mixed traffic, rates, latency and rollback. Do not
+   equate aggregate shaping with per-flow fairness, FQ-CoDel or AQM: establish
+   separate measurable fairness and queue-delay/loss requirements, or report
+   them unsupported. For flood resilience measure admission pressure,
+   established-flow survival, punt load, queue drops and management latency;
+   bounded tests require an approved recovery plan. The 2026-11-13 UDP
+   elephant/ASSURED result is evidence for that tested churn, not general flood
+   immunity. Never flood-test the ingress policer (§6).
+
 ### 3.2 G3 retirement audit (2026-10-29)
 
 Each row is an event that can make a published HW record wrong, and what
 retires the record. The vendor CMM listens for all of these. "Kernel" means
 the flowtable itself sends `FLOW_CLS_DESTROY`. "ask.ko" means a notifier in
-the module removes the silicon record. After an ask.ko removal the kernel
-flow stays `[HW_OFFLOAD]`, forwards in software, and `flow_offload_refresh()`
-reoffloads it with current state.
+the module removes the silicon record. The 2026-10-29 audit below records
+intended owners, not proof that each event settles or that software forwarding
+and re-offload are safe after failure. T1 (§4.9) identifies later incomplete
+withdrawals; the policy revocation contract in §3.1.1 takes precedence.
 
 | Event | Stale state in the record | Retired by | Status |
 |---|---|---|---|
-| Route add, replace or delete | Egress port, next hop | ask.ko FIB notifier (`ask_fib_event`): removes routed records whose destination or DNAT destination is inside the changed prefix, coalesced over 50 ms. The kernel checks `dst_check()` only on the software fast path (`nf_flow_dst_check()`), which an offloaded flow never reaches, and 6.18 GC has no stale-dst check. | **Added 2026-10-29** |
+| Route add, replace or delete | Egress port, next hop | ask.ko FIB notifier (`ask_fib_event`): revokes matching SW flowtable entries via `nf_flow_table_revoke_match()` before retiring routed HW records, coalesced over 50 ms; patch `155` also retains `dst_cache`/`dst_cookie` on `XMIT_DIRECT` for SW hook and GC `dst_check()` invalidation | **Source + host-gated (`943610c1`, patch `155`); board wire-gate pending** |
 | Policy-rule add or delete | Any routing decision | ask.ko FIB notifier `FIB_EVENT_RULE_*`: removes every routed record | **Added 2026-10-29** |
 | Neighbour MAC change or failure | `next_hop_mac` | ask.ko netevent `NETEVENT_NEIGH_UPDATE` (A14 rebuild) | Covered |
 | Device down or unregister (port, VLAN vif) | Everything | Kernel `nf_flow_table_cleanup()` → DESTROY | Covered |
@@ -238,8 +323,8 @@ reoffloads it with current state.
 | Bridge join or leave, upper change | Port role, VLAN records | ask.ko `ask_bridge_netdev_notifier` (CHANGEUPPER) | Covered |
 | FDB add, move, age-out | Bridge egress port | ask.ko switchdev FDB notifier | Covered |
 | Bridge VLAN, STP, flags | Bridge records | ask.ko switchdev blocking notifier | Covered |
-| Firewall rule add or delete | Already-accepted flow keeps forwarding | Nothing, same as the kernel software flowtable; flows retire on timeout or FIN/RST | Parity (documented) |
-| `pppoe_offload`, `ipv6_hw_frag` kill switches, port disengage | Records of that class | ask.ko flushers | Covered |
+| Firewall / policy change or explicit flush | Already-accepted flow keeps forwarding until revoked | `ASK_CMD_FLUSH_FLOWS` invokes NAT-preserving `ask_flow_policy_revoke()` (global admission fence + `nf_flow_table_revoke_all()` + HW retirement + `policy_epoch`/`revoke_state`/`unresolved_flows` in `ASK_CMD_GET_INFO`); implicit nftables firewall edits still rely on explicit flush or timeout | **Source + host-gated (`943610c1`, patch `155`); board gate pending** |
+| `pppoe_offload`, `nat44/66_offload`, `ipv6_hw_frag` kill switches, port disengage | Records of that class | ask.ko flushers (`20784423` upgraded `nat44_offload`, `nat66_offload`, and `ipv6_hw_frag` to synchronous fail-closed withdrawal blocking re-enable with `-EBUSY` until settled) | **Source + host-gated (`20784423`); board gate pending** |
 
 The new rows still need a HW gate. On `.185`, change the eth3 MTU and then the
 eth4 MAC under a running routed flow. Each change must log `device MTU/MAC
@@ -347,8 +432,10 @@ also did not cover AH frames (same HXS), PPPoE-encapsulated ESP, or eth4.
   arm path and TCP parser attachment were readback-verified. Use real transit
   endpoints on `10.99.1.0/24` and `10.99.2.0/24`; an earlier attempted test
   had no transit traffic, empty ARP and zero flowtable counters, so it did not
-  exercise the feature. Do not use a flood for this gate. Keep the parameter
-  off unless all checks pass. No software idle reaper: it cannot distinguish
+  exercise the feature. Do not use a flood for this gate. Keep the historical
+  2026-10-18 default-off test distinct from the later
+  default-on implementation and passing results below; verify the current image
+  and configuration before any further test. No software idle reaper: it cannot distinguish
   closed and quiet flows.
   **2026-10-18 cold-boot transit test (FAIL, `.185`, `2012`, `6.18.55-vyos`):**
   after the approved hard power-cycle, root `ask-check` passed 36/36 and both
@@ -501,18 +588,13 @@ also did not cover AH frames (same HXS), PPPoE-encapsulated ESP, or eth4.
 Verify each candidate against today's tree before deleting/folding; old
 fixup ranges are not blanket removal instructions.
 
-**2026-10-18 source audit — STOP on `ask_vlan_cc.c` deletion.** The current
-tree still builds this file (`kernel/ask/oot-modules/ask/Kbuild`), routes
-VLAN-edit REPLACE events to `ask_vlan_cc_flow_add()` before
-`ask_fe_flow_insert()` (`ask_flow_offload.c`), reports its aggregate stats
-from generic netlink (`ask_genl.c`), and tears down its CC state from
-`ask_hw.c`. It is therefore an active path in this checkout, not dead code.
-This conflicts with the later inline-FE VLAN silicon notes and the Phase 2
-deletion item. Do not remove or fold it until the code path, deployed image,
-and silicon evidence are reconciled; the former `.106` vendor board now runs VyOS (`.145`), so the
-vendor-ASK live cross-check is unavailable.
+**2026-11-06 source cleanup (`ask_vlan_cc.c`):** `ask_vlan_cc_flow_add()` and
+`ask_vlan_cc_flow_del()` were physically removed; `kernel/ask/oot-modules/ask/ask_vlan_cc.c`
+now contains only `ask_vlan_cc_teardown_port()` and `ask_vlan_cc_agg_stats()`.
+The remaining stub file and Kbuild/genl/debugfs/stat hooks are eligible for
+Phase 2 removal once stats/teardown callers are verified clean.
 
-- Physically remove dead `ask_vlan_cc.c` and Kbuild/genl/debugfs/stat proxies,
+- Physically remove the residual `ask_vlan_cc.c` teardown/stat shims,
   commented frees, duplicate `fe_buffer_setup`, legacy `offload_engage` and
   netdev-TX proxy counters that cannot distinguish HW/SW.
 - Fold production F_199/F_201/F_222/F_224/F_227/F_242 into owning canonical
@@ -542,12 +624,13 @@ the deleted ingest path behind it. Do not displace ehash.
 ### 4.5 VPP zero-copy follow-up
 
 Separate from ASK2 vendor parity; owner `VPP-AFXDP-ZC-FULLSPEED.md`.
-Preserve task IDs: **T-M4-5a** operator install/cold boot of a current libxdp
-image (do not install an old cited ISO blindly); **T-M4-4d** verify DRV mode,
-`xsks_map[0]` and `xsk_zc_rx_redirect>0`; **4e** throughput ≥3.0 Gbit/s;
-**4f** reversibility; **4g** completion only after steered ZC RX.
-Investigate frozen `refill_batches`/pool drain under flood after the path
-works. Image installation is never the agent's task.
+P2 RX correctness (patch `4023`) and P4 TX ZC confirmation + wakeup IPI (patch
+`4024`) passed on DUT2 (`2026.11.12` images: ping 10/10 and 5× attach/detach).
+Remaining open items: P3/P4 residuals (cold-start RX wakeup, pool-drift/ERN
+audit, lockdep, `ask_align.c` coordination); **P5 / T-M4-4e** per-NAPI batched
+flush (D8) and throughput ≥3.0 Gbit/s + TRex S2 NDR; **P6** multi-worker
+decision (D9); **P7 / T-M4-5a/4g** fold into `vyos-1x-010-vpp-platform-bus.patch`
+and cold-boot CI ISO gate. Image installation is never the agent's task.
 
 ### 4.6 Feature implementation and acceptance
 
@@ -593,37 +676,43 @@ runbooks below are subordinate to this plan, not independent task priorities.
 - **T-M6-SP3:** F-266 and TTL gates in §4.1; IKE/NAT-T control packets remain
   visible to the kernel before ESP offload.
 - **T-M6-SP4 / A8:** PPPoE vendor comparison, 10,000 session cycles, pool
-  exhaustion and soak; then implement the missing over-VLAN and relay
-  outcomes. Owner `ASK2-PPPOE-OFFLOAD-PLAN.md`. The 23-cell smoke and the
-  ASK2-side fragmentation run passed (§1.1). No 10,000-cycle runner exists
-  yet, and no vendor board is available.
+  exhaustion and soak; over-VLAN quick hardware proof is in G2, relay remains
+  open. Owner `ASK2-PPPOE-OFFLOAD-PLAN.md`. The 23-cell smoke and the
+  ASK2-side fragmentation run passed (§1.1); the 10,000-cycle runner and
+  earlier exhaustion evidence exist in the PPPoE plan, but do not substitute
+  for complete current-image acceptance. Verify vendor availability at execution.
 - **T-M6-4 / IP1 / IP2 / A9:** build XFRM-owned ESP ehash→OH/SEC→TX with
   AES-CBC-SHA256 first. Tier 1 alone is not full vendor parity. The Tier 1
-  substrate and host-terminated tunnel run passed (§1.1): CAAM wins
-  encrypt 1.4–1.9× but loses decrypt to ARMv8-CE software, which strengthens
-  the Tier 2 case. Remaining Tier 1 gap: reboot-clean.
+  substrate and host-terminated tunnel run passed (§1.1), and Tier 1
+  reboot-clean passed 2026-10-21 (`.185`/0729); CAAM wins encrypt 1.4–1.9× but
+  loses decrypt to ARMv8-CE software, which strengthens the Tier 2 case.
+  Remaining Tier 1 measurements: routed gateway forwarding, IPv6 ESP, and SEC
+  QoS register decode (`ASK2-IPSEC-OFFLOAD-PLAN.md`). CAAM QI T4 parent/DMA-key
+  retention landed in `a94e49f6` (F-318).
   Add/delete/update/lifetime/rekey, tunnel v4/v6, inbound/outbound, ESN,
   anti-replay, NAT-T, PMTU/fragments, peer interoperability, bad-auth/replay,
   reboot and disable fallback all gate `NETIF_F_HW_ESP`, advertised LAST.
   Transport mode is optional breadth, not a vendor requirement.
   Owner `ASK2-IPSEC-OFFLOAD-PLAN.md`.
-- **T-M6-2 / A7:** B7b access↔trunk pop/push is the active bridge task
-  (F-268 + ask.ko code complete 2026-10-19; silicon gate pending);
-  retain learned-MAC, filtering, ageing, move/STP/isolation and clean
+- **T-M6-2 / A7:** B7b access↔trunk pop/push passed its 2026-10-20 silicon
+  and regression gate (§3); current-image capacity, soak and paired parity
+  remain separate. Retain learned-MAC, filtering, ageing, move/STP/isolation and clean
   teardown. Do not reopen B0–B6 implementation. B2 and capacity repeats need
   the debugfs image, now on `.149`. Owner `ASK2-BRIDGE-OFFLOAD-PLAN.md`.
 - **T-M6-DISPATCH:** design/test multi-table per-port classification before
-  IRB, routed+bridge coexistence or routed+ESP; protocol precedence, miss
-  delivery, owner/generation isolation and reversibility are mandatory.
-  **Design direction (2026-10-27, from the vendor `.106` readback in
-  `arch/fman-microcode-210-programming-reference.md` §7.11a and the proven
-  soft parser in `specs/ask2-soft-parser-lcv-scheme-select.md` §6s):** the
+  full mixed-profile IRB (G5b), routed+bridge coexistence or routed+ESP;
+  G5a routed ingress to a bridge member does not require G4. Protocol precedence,
+  miss delivery, owner/generation isolation and reversibility are mandatory.
+  **Historical design direction (2026-10-27, from
+  `arch/fman-microcode-210-programming-reference.md` §7.11a and
+  `specs/ask2-soft-parser-lcv-scheme-select.md` §6s; superseded by the direct KG
+  selection proof in §3.3, not an instruction to implement LCV selection):** the
   vendor does not use one table per port. `FMBM_RCCB` points at a shared
   table of one 16-byte CONT_LOOKUP row per KeyGen scheme, selected by the
   scheme's CCOBASE, and a soft-parser routine picks the scheme per protocol
   (LCV). ASK2 already has the loader (F-266: PEN cycle, `$nia`, per-HXS
   `pmda[].ssa` attach; TCP slot 10, IPv4 slot 5, IPv6 slot 6 proven on
-  silicon). Dispatch is therefore: (1) an ESP HXS routine that sets the LCV
+  silicon). The then-proposed dispatch was: (1) an ESP HXS routine that sets the LCV
   for ESP; (2) one KG scheme per class (routed, L2_DA, ESP) with its own
   EKFC and CCOBASE; (3) one RCCB row per scheme pointing at that class's
   FE_ENTER/ehash; (4) miss-AD to the port's PCD FQ per §7.11. First gate on
@@ -652,10 +741,15 @@ runbooks below are subordinate to this plan, not independent task priorities.
 - **T-M6-SP5 / TN / A11:** 6in4 and 4in6 via kernel tunnel netdev/intent;
   prove encap/decap wire bytes, TTL/hop-limit, route/neighbour changes and
   unsupported nesting fallback. No generic vendor command compatibility.
-- **T-M6-QOS / A12:** ASK-path rate limit and policer coexistence; CEETM
-  shaping/scheduling/weighted/class queues, DSCP→FQ, `QM_FF_RATE` and
-  `QM_EXPT_RATE`. Wire-level rate accuracy target ±15%, plus mixed
-  offload/SW load, queue lifecycle/exhaustion, no routing regression.
+- **T-M6-QOS / A12:** first scope CEETM shaping of both ASK no-confirm TX FQs
+  and software TX under tc ownership (G10, §3.1.1). Preliminary scoping may
+  precede G4, but implementation that requires dispatch for policer, RSS or
+  mixed-class coexistence follows G4; determine this before implementation.
+  Separately test policer coexistence, class queues, DSCP→FQ, `QM_FF_RATE` and `QM_EXPT_RATE`. Target
+  wire-level rate accuracy ±5% with the measurement method declared in advance
+  (the earlier ±15% proposal is superseded), plus mixed offload/SW load, queue
+  lifecycle/exhaustion and no routing regression. Fairness and AQM require
+  independent tests and are not implied by a rate cap.
 - **T-M6-FR / A11:** validate software handling of first/non-first,
   out-of-order, overlap/tiny fragments, IPv6 extensions, timeout/exhaustion
   and firewall/NAT safety. No vendor reassembly gap is established; hardware
@@ -696,14 +790,14 @@ be silently consumed.
 
 ### 4.7 Productization and beyond-vendor work
 
-- **genl per-op policies:** the `get-flow` `-EINVAL` defect (fixed 2026-10-19)
-  came from one family policy shared by every command, where
-  `ASK_FLOW_ATTR_ID` and `ASK_ATTR_INFO` both use type 1. The structural fix
-  is full `genl_ops` with `.policy`/`.maxattr`, ideally generated from
-  `ask.yaml` by ynl-gen-c. Counter semantics to preserve: YNL serves a polled
-  snapshot (up to ~2.3 s behind silicon), `last-seen-ns` is the poll time
-  that saw growth, counters reset when a record is re-created, and
-  `max-flows=0` means no fixed limit.
+- **genl per-op policies (implemented in source, `20784423`):** `ask_genl.c`
+  switched from `genl_small_ops` + shared `ask_top_policy` to per-op
+  `struct genl_ops` policies under strict validation (`GENL_ADMIN_PERM`,
+  `.netnsok = false`; host-gated in `tests/ask_genl_ops_policy.py`). Optional
+  `ynl-gen-c` generation from `ask.yaml` remains a future cleanup. Counter
+  semantics preserved: YNL serves a polled snapshot (up to ~2.3 s behind
+  silicon), `last-seen-ns` is the poll time that saw growth, counters reset
+  when a record is re-created, and `max-flows=0` means no fixed limit.
 - **Preview:** release notes/package plus an external operator validation
   cycle using `ASK-ISO-BUILD-AND-INSTALL.md`. Do not describe the historical
   M8 release as full feature-parity completion.
@@ -712,15 +806,54 @@ be silently consumed.
   integration of test/policy fixes. Audit current branch state before
   cherry-picking the historical `136fc794`/`fad54f15`/`23bb53ce`/`8813a3a7`
   references. KUnit remains opt-in through `kunit`, never a production default.
-- **WireGuard:** current-image eth4 bidirectional RPS A/B, eth3 10 reps,
-  then operator decision on shipping steering; neither stack HW-offloads WG.
-  Owner `ASK2-WIREGUARD-FASTPATH-PLAN.md` (history in `archive/`).
+- **WireGuard:** default-on P3/P6 and RX spread require the release exposure
+  decision and safety gates in §3.1.1 before performance iteration. Neither
+  stack hardware-offloads WireGuard cryptography. Owner
+  `ASK2-WIREGUARD-FASTPATH-PLAN.md` (history in `archive/`).
+- **WGFP + ASK2 composite WAN path (proposed; not implementation-ready):**
+  investigate serial composition of FMan header processing and WireGuard's
+  CPU fast path for `NAT44 + PPPoE over VLAN + WireGuard`. The 2026-11-18
+  best-of-five matrix measured 1.1–1.3 Gbit/s with `hw_pkts=0` and `SW`
+  verdicts; this is the software fallback baseline, not proof of a particular
+  WGFP decline cause. WGFP's current safety, ownership and release gates in
+  `ASK2-WIREGUARD-FASTPATH-PLAN.md` block traffic/code iteration until closed.
+  The candidate pipeline is LAN ingress → optional FMan NAT/rewrite and
+  steering → WGFP encryption → VLAN/PPPoE/IP/UDP outer encapsulation → WAN
+  transmit; in reverse, WAN ingress → outer VLAN/PPPoE match and optional
+  strip/steer → WGFP decrypt → reverse NAT and LAN forwarding. Keep the
+  design choice open between (a) an FMan rewrite/steer stage feeding a WGFP
+  sink before encryption, and (b) WGFP-owned software composition. Neither
+  FE-to-sink action sequencing nor outer VLAN/PPPoE receive handling is
+  established for this path. The receive design must also preserve
+  reverse-NAT, INPUT/firewall, replay, AllowedIPs, conntrack and fallback
+  semantics. Do not assume O/H-port reinjection is available or necessary.
+  **Stages:** (1) document both packet directions and map current hooks,
+  ownership and fallback; (2) resolve feasibility against the FMan reference,
+  key spec, source and three focused qdrant queries before selecting an
+  architecture; (3) define fail-closed record/sink/NAT/peer lifecycle and
+  host-model tests before implementation; (4) prototype TX only, then pass
+  packet-level, teardown and HW-hit gates; (5) add RX outer match/decap and
+  reverse-NAT handling only after an independently reviewed design; (6) on a
+  cold-booted DUT, validate one direction/family at a time, then run a
+  matched best-of-five matrix. Proposed acceptance requires unchanged policy
+  and fallback semantics, no record/buffer/QMan leaks or new WGFP failure counters,
+  explicit HW proof for each claimed FMan stage, and at least 80% of the
+  matched same-boot bare-WireGuard throughput in supported combined cells.
+  **Stop/kill criteria:** reject the FMan-composition option if FMan cannot
+  safely enqueue a rewritten frame to the owned WGFP sink; stop the feature
+  work if packet provenance or NAT identity cannot be proven, if required
+  teardown can free a live owner, or if the path bypasses firewall policy.
+  A shared steer-to-consumer
+  substrate is a dependency only if the selected design needs it; do not
+  preempt the WireGuard close-out to build one.
 - **Beyond parity:** sub-100 ms per-flow engage, port-scoped conntrack
   teardown, non-proxy HW observability, ≥16 Gbit/s VLAN↔port bidirectional.
-- **Suricata:** scheduled as flow shunting, step G7 in §3.1
+- **Suricata:** inspection guard first, optional flow shunting as G7 in §3.1
   (`ASK2-SURICATA-OFFLOAD-PLAN.md`, "Flow shunting"). The native
   VyOS service is AF_PACKET IDS, not inline, so it cannot approve flows.
-  With the factory-default offload it sees only each flow's slow-path prefix.
+  Hardware offload can bypass capture; forward-hook NFQUEUE can also be bypassed
+  by software flowtable hits. The companion plan qualifies passive capture and
+  describes the partial prototype; neither is proof of complete inspection.
   Before any code, complete the plan's
   [decisions and safety contract](ASK2-SURICATA-OFFLOAD-PLAN.md#decisions-and-safety-contract):
   define explicit per-flow approval, tuple/NAT identity, revocation, failure
@@ -731,35 +864,35 @@ be silently consumed.
 
 ### 4.8 Line-rate generalizations (2026-11-02)
 
-Forwarded IPv4/IPv6 flows already run at line rate in silicon (about 9.4 Gbit/s per direction per 10G port, 16–17 Gbit/s bidirectional). Everything that needs the CPUs per packet is capped by four A72 cores: WireGuard sealing tops out at about 500k packets/s (about 5.7 Gbit/s inner at 1420 bytes, crypto-bound; P2a profile), and IPsec without its fast path, Suricata inspection and every slow-path punt sit in the same budget. The remaining gains come from three directions: keep more flows in silicon, strip the per-packet software overhead around the work that cannot move, and move that work to an accelerator (CAAM) or spread it across cores without reordering. The WireGuard fast path (`ASK2-WIREGUARD-FASTPATH-PLAN.md`) built and silicon-proved most of the pieces; this section lists what to generalize and what is left, in priority order. Each item names its owner plan and gate.
+Forwarded IPv4/IPv6 flows have reached about 9.4 Gbit/s per direction per 10G port and 16–17 Gbit/s bidirectional in measured workloads, not a guarantee for every flow. CPU-bound work includes WireGuard, software IPsec, inspection and punts. The WireGuard plan owns the detailed measurements and their qualifications; the generalizations below are proposals after the §3 safety gates, not evidence of production-ready shared consumers or a reason to bypass them. Measured WireGuard P2a sealing reached about 500k packets/s (about 5.7 Gbit/s inner at 1420 bytes, crypto-bound in that profile); it is not a general system ceiling. Each item names its owner and gate.
 
 1. **Shared steer-to-consumer substrate ("tier 2").** `dpaa_wgfp.c` already contains a general mechanism behind a WireGuard-specific API: an ehash record with `rx_fqid` steering one flow to a software sink FQ (per CPU, WQ6 beside the kernel RX FQs, FQ-local tail drop at 512 KiB); a zero-skb drain; a per-port no-confirm TX FQ table (`dpaa_wgfp_egress()`); and in `fastpath.c` the flow learning with a conntrack proof (including the tuple lookup for packets the software flowtable forwarded, which carry no ct), the admission threshold, round-robin placement, silicon-counter aging, a periodic policy re-check hook, punt-to-stack, and netdevice teardown. Refactor into a consumer-neutral layer in `fsl_dpa` (working name `dpaa_steer`) with several consumers registered at once, each owning its records (today one `ops` pointer serves every sink). Consumers: WireGuard TX and RX, IPsec tier 1.5 (item 2), inline (IPS) Suricata delivery. Gate: WireGuard results unchanged, and two consumers active at once with no cross-delivery. Owner: this plan, after the WireGuard close-out.
-2. **IPsec tier 1.5: sink → CAAM QI → egress.** The largest line-rate opportunity left. CAAM does AES-GCM/CBC+HMAC in hardware; the A72s do not have to. WireGuard cannot use it (CAAM Era 8 has no ChaCha20-Poly1305). With the substrate, an ESP flow's frames reach a sink; the CPU builds the ESP header and trailer in the frame's own DPAA buffer and submits it to CAAM through QI (patch `0134` `caam_qi_ext_consumer_register()`, never exercised so far) with the response FQ pointing at a second sink, which transmits through the egress table. No O/H port and no FMan header manipulation, so none of the tier 2 risk. The CPU cost per packet is header work plus two enqueues, against a full software ESP today. Gate: measure tier 1 (crypto API on CAAM) first; it sets the CAAM ceiling this path can approach. Owner: `ASK2-IPSEC-OFFLOAD-PLAN.md` (new tier 1.5 section), sequenced after tier 1 measurement and before tier 2.
+2. **IPsec tier 1.5: sink → CAAM QI → egress.** The largest line-rate opportunity left. CAAM does AES-GCM/CBC+HMAC in hardware; the A72s do not have to. WireGuard cannot use it (CAAM Era 8 has no ChaCha20-Poly1305). With the substrate, an ESP flow's frames reach a sink; the CPU builds the ESP header and trailer in the frame's own DPAA buffer and submits it to CAAM through QI (patch `0134` `caam_qi_ext_consumer_register()`, never exercised so far) with the response FQ pointing at a second sink, which transmits through the egress table. No O/H port or FMan header manipulation is required by this proposal; it still needs independent CAAM, buffer ownership, ordering and lifecycle proof. The CPU cost per packet is header work plus two enqueues, against a full software ESP today. Gate: measure tier 1 (crypto API on CAAM) first; it sets the CAAM ceiling this path can approach. Owner: `ASK2-IPSEC-OFFLOAD-PLAN.md` (new tier 1.5 section), sequenced after tier 1 measurement and before tier 2.
 3. **Zero-copy hand-off from a sink to the stack.** Punts and the WireGuard P3 receive path copy each frame (about 1.5 KB) into a fresh skb. A `dpaa_eth` helper that builds the skb on the DPAA buffer itself (unmap and per-CPU pool accounting as `contig_fd_to_skb()` does) removes that copy for every inbound WireGuard packet and for any substrate consumer that hands frames to the stack. Gate: `bin/testrig-wgfp-soak.sh soak` keeps the pools stable, and P3 `down` improves. Owner: WireGuard plan, then the substrate.
-4. **Order restoration (ORP) as a generic primitive.** Every per-flow CPU consumer is capped at one core per flow: one sink, one CPU (WireGuard about 1.0–1.3 Gbit/s per inner flow; IPsec tier 1.5 will share the limit). `qman_enqueue_orp()` (WireGuard P5) with an ORP input FQ lets one flow spread over several cores while QMan restores the order before egress. Build it once in the substrate, not per consumer. Gate: WireGuard G5 (one flow at least 2.2 Gbit/s, reject rate below 0.1%). Owner: WireGuard plan P5, only on a named single-flow need.
+4. **Order restoration (ORP) as a generic primitive.** A flow-affine single-sink consumer is limited to one CPU for that flow (historical WireGuard measurements about 1.0–1.3 Gbit/s per inner flow). RX ORP spread already exists in the WireGuard source; TX single-flow spread and its ordering remain open. `qman_enqueue_orp()` (WireGuard P5) with an ORP input FQ lets one flow spread over several cores while QMan restores the order before egress. Build it once in the substrate, not per consumer. Gate: WireGuard G5 (one flow at least 2.2 Gbit/s, reject rate below 0.1%). Owner: WireGuard plan P5, only on a named single-flow need.
 5. **Placement by load.** Sinks are assigned round-robin at install. After churn, long-lived elephants can share a core while others idle. The aging pass already reads every record's silicon counter every 2 s; use it to place new flows on the least-loaded sink (moving a live flow is a delete plus add and reorders it, so placement at install is the cheap step). Small effort, gain only with many concurrent heavy flows.
-6. **Every flow in silicon.** For forwarded traffic, line rate is lost only through flows that silently stay in software: collision-chain entries until F-269's cumulative nodes cover every case (§5), PCP-tagged VLAN ingress (no PCP mask yet; `kgse_bmch`/`kgse_bmcl` follow-up), IPv6 needing hardware fragmentation (disabled by policy), and ESP on routed ports (multi-table dispatch). Add per-cause software-fallback counters to YNL so a line-rate claim comes with the share of bytes actually in silicon; this is the "non-proxy HW observability" item of §4.7.
-7. **Telemetry cost at scale.** Patch 145 made the flow-stats path load-bearing for conntrack accounting. The per-key bucket walk (F-264) is in place; measure the stats poll's CPU at 10k+ flows and batch it per epoch if it shows (WireGuard plan open item "O(N^2) flow-stats refresh").
+6. **Hardware coverage, not every flow at any cost.** F-269's cumulative nodes have tested collision-chain coverage (§5); remaining fallback causes require current measurement. Routed PCP-tagged VLAN ingress and ESP coexistence have separate gates; IPv6 hardware fragmentation defaults on with a documented ID risk and an opt-out, not a blanket disabled policy. Add per-cause software-fallback counters to YNL so a line-rate claim comes with the share of bytes actually in silicon; this is the "non-proxy HW observability" item of §4.7.
+7. **Telemetry cost and flow scaling (`ASK2-FLOW-SCALING-PLAN.md`).** F-312, F-314, F-315 (`0114cbc8` batched ehash counter scan) and `720ccfb5` (single pass per poll interval, cheaper port counters) are shipped and board-measured up to 131,072 flows, alongside S5(1) neigh last-MAC caching and S8(3) egress-echo skip (`20784423`). Remaining scaling improvements tracked in `ASK2-FLOW-SCALING-PLAN.md`: S0/S1 wide-variety ladder baseline, S3/S4 lifecycle-lock narrowing and bucket caching, S5(2) in-place 6-byte MAC rewrite, S6 CLI/YNL admission counters (renumber patch above `060`, now taken by `installer-kdump-auto`), S8 fast admission (`PRIME=0`, `-EAGAIN` retry, single per-cookie record), and the 30 s vs 120 s flowtable timeout decision.
 8. **Release engineering.** **Ported 2026-11-08 (pending board install):** the pin moved to `908f67c4f`; patch 027 now orders FMan ports inside `ifname_store.canonical_sort_key`, 047 is deleted, our interface migrations moved to 35-to-36/36-to-37 (36-to-37 replays T3871's hw-id migration for configs already at our old 35/36), and the full stack applies with `--3way` in CI order. Board gate: fresh install and upgrade both give eth0 = left RJ45 (MAC5/e8000), eth3/eth4 = SFP+, no `hw-id` left in config, `/config/interface-mapping.json` present. Previous text: vyos-1x was pinned to `91bf0ef51` (2026-11-02, `bin/ci-setup-vyos1x.sh`) because upstream T3871 removed the interface-naming helper that patches 027/047 hook. No upstream vyos-1x fix (security fixes included) reaches the image until 027/047 are ported to the T3871 naming store and verified on the board (eth0 must stay the management port). Schedule it before the next release.
 
 Rejected or deferred, from the DPAA2 back-port review (2026-11-02): CC-tree or TCAM match-action leaves (210.10.1 has no masked CC walker and FMan has no TCAM; ehash records already give a static graph with dynamic leaves); aligning a software table to a Toeplitz or CRC32 hash (the KeyGen hash is CRC-64, already in the buffer prepend and in `skb->hash`); lock-free control rings (control is YNL plus flowtable callbacks, off the packet path); QMan atomic FQs for handshake ordering (per-flow order already holds through KeyGen hash to FQ plus HOLDACTIVE); mirroring or cloning to user space (corrected 2026-11-07: the microcode does have a per-flow replicator, `REPLICATE_PKT` 0x02, which the vendor uses for multicast, but ASK2 has never exercised it and nothing selects one packet in N, so sFlow packet sampling stays blocked; see `ASK2-SILICON-TELEMETRY-PLAN.md` §1 and §5). Using the CRC-64 from the prepend as the sink lookup hash would save tens of ns against about 8 µs of crypto per packet; only if a profile shows the lookup.
 
-### 4.9 Teardown safety work queue (target: the build after the 2026-11 preview)
+### 4.9 Teardown safety work queue (release safety priority)
 
-The guarantee: when an offloaded flow, port or device is torn down, no memory is freed while FMan, QMan or CAAM may still read or write it, and when the hardware refuses or times out the owner keeps its resources instead of freeing them. The 2026-11 preview ships with containment (pin, log, recover on reboot) and lists the gaps below as known limitations. None of them was observed in normal operation: each needs a refused or timed-out hardware delete, or a driver probe failure.
+The guarantee: when an offloaded flow, port or device is torn down, no memory is freed while FMan, QMan or CAAM may still read or write it, and when the hardware refuses or times out the owner keeps its resources instead of freeing them. The 2026-11 preview containment (pin, log, recover on reboot) is not a complete ownership or policy-containment guarantee. The gaps below remain release safety priorities even where the triggering failure has not been observed in normal operation.
 
-Already in place: the delete SYNC barrier is proven on silicon (F-307 walker probe: in-flight 465 and 733, late 0, single and chained buckets) and every ehash free waits for a completed SYNC; WGFP keeps a failed delete's record and owner (`WGFP_STUCK`); F-294..F-306 contain QMan, CAAM and DPAA failures; F-281 suppresses sysfs unbind; F-291 refuses `fe_recover` and `fe_disengage_full`.
+Already in place: F-307 provided positive-control deletion SYNC evidence on tested single and chained buckets (in-flight 465 and 733, late 0); F-269 gates ehash reclamation on completed SYNC. This does not establish every port-disable, natural-timeout or parent-lifetime case. WGFP keeps a failed delete's record and owner (`WGFP_STUCK`) and `de598f26` replaced WGFP real-BPID TX ownership with normal DPAA skb completion (`F_227.py`, `tests/wgfp_skb_xmit.py`, `bin/test-dpaa-tx-cleanup.py`) and retired `ic_probe`'s unsafe TX buffer pointer (`F_317.py`); F-294..F-306 contain selected QMan, CAAM and DPAA failures; F-281 suppresses sysfs unbind; F-291 refuses `fe_recover` and `fe_disengage_full`.
 
 | # | Gap | Done when | Effort |
 |---|---|---|---|
-| T1 | **FE teardown ownership across features.** **Audit 2026-11-09 (source, 24 paths):** every ask.ko path that removes a hardware record (flowtable DESTROY/REPLACE/rollback, neighbour replay and A14, FIB/MTU/MAC/FDB retirement, PPPoE, bridge records, kill switches, disengage, UNBIND, unload) goes through the identified delete and either settles (0/-ENOENT/-ESTALE) or keeps the owner (orphan list, tombstone, unsettled bridge record); `ask_fe_flow_publish()` refuses an orphaned key. `bin/test-nf-flow-withdrawal.py` now reports 0 uncontained add-status, withdrawal and destruction cases (patch 150), and F-291/F-293 are wired. **Fixed 2026-11-09:** a VLAN vif going down or away never retired its records (`nf_flow_table_cleanup()` matches the physical iifidx); `ask_pppoe_netdev_event()` now queues the vif for the device-change flush (host test in `tests/ask_pending_capability.py`). **Open:** (a) FIB/MTU/MAC/FDB retirement can be lost on a GFP_ATOMIC failure mid-walk (snapshot already consumed, result discarded) and `ipv6_hw_frag=0` has no incomplete flag; (b) egress no-confirm TX FQ and netdev lifetime (no `netdev_hold`, no physical-port unregister handling; with T4); (c) bridge records marked unsettled by -ENODEV in the disengage window stay forever; (d) one unrelated orphan blocks the VLAN/PPPoE withdrawals; (e) `nat44/66_offload=0` withdraws nothing; (f) port disengage and the bridge role switch fail with -EBUSY while any port has flows and are not retried. | Every withdrawal path either settles the delete or retains the owner; host fault-injection covers each case; the flowtable characterization reports 0 uncontained cases | 3–5 d |
-| T2 | **FMan PCD teardown order (F-269 chain).** By 2026-11-09 F-269/F-291/F-293 already made the table drain SYNC before reclaiming records, `fman_pcd_fe_port_del()` free the table before any MURAM and `__fman_pcd_fe_arm_disengage()` and `fman_pcd_release()` retain state on error. **F-310 (2026-11-09) closes the three remaining ordering gaps:** (1) KG disarm cleared `FMBM_RCCB` while the scheme was still AC_CC, so frames dispatched into MURAM offset 0; it now detaches the scheme to RSS, SYNCs, then clears RCCB, and a failed detach/SYNC keeps RCCB and the scaffold; (2) `fman_pcd_fe_port_del()` SYNCs (INV0 + HC) between the `+0x54` workspace unpublish and the mgmt/pool/scaffold frees, which had no barrier when the port had no table; (3) the release-only `fman_pcd_fe_port_drain()` refuses armed or faulted ports instead of freeing their MURAM. Host harness `bin/test-fman-disarm.py --only fman_disarm,fman_workspace_disarm,fman_port_drain` (ordering and failure cases; 2 mutants caught); CI-order replay and W=1 build clean. **Board gate pending:** `bin/testrig-port-loop.sh` eth3/eth4 with traffic during disengage, `pcd-snapshot diff`, MURAM baseline. **Board 2026-11-09 (`.185`, image `2026.11.09-2108-rolling`, F-310 + F-311, smart-plug cold power-on followed by the kdump `crashkernel` kexec): port-loop PASS on eth3 and eth4, 0 failures each.** Idempotent engage, MTU 1280/2500/3600/1500, 3 link flaps and 100 disengage/engage cycles per port with a 5 pps ping: MURAM `used` 58764 at every step, `pcd-snapshot diff` exact, no new kernel errors; whole boot 204 engages and 200 disengages, 0 F-310/F-311 SYNC or arm errors, 0 invalid-enqueue/NO_SCHEME, one first-port SYNC (boot; eth1/eth2 stayed engaged during churn, so F-215 correctly never re-asserted it). An earlier warm-boot run was cut short by a concurrent WireGuard rig whose WGFP record made disengage refuse (`has live or uncertain ehash owners`), which is T1(f), not a T2 fault. **Still open for T2:** disengage under iperf load (needs the shared generators). **F-311 (2026-11-09) closes the engage mirror:** the current-tree audit confirmed `fman_pcd_kg_port_arm_fe()` programmed the AC_CC scheme before `fman_port_set_cc_base()` wrote RCCB (frames in between dispatched through RCCB 0 into MURAM offset 0), and a failed RX lookup returned with the scheme AC_CC and RCCB 0. Order is now RX port and scheme lookup (nothing touched on failure), node miss FQID, RCCB + first-port SYNC + CC_EN with the scheme still RSS (the F-310 intermediate state), then the AC_CC scheme (SDK `FM_PORT_SetPCD` order). A set_cc_base failure, vanished scheme or changed base FQID clears RCCB again; a failed scheme write keeps RCCB at the node (the AR commit may have landed) and the caller faults the port. Host harness `bin/test-fman-disarm.py --only fman_kg_arm_order` models RCCB/CC_EN/committed scheme mode and asserts "never AC_CC with RCCB 0" after every write; it catches the unpatched original and 3 mutants. Same board gate as F-310 (engage under traffic is part of the port-loop). | Drain with SYNC before any dependent MURAM release; errors propagate through per-port delete, global clear and PCD release; on failure the owner (MURAM, DMA, PCD) is deliberately retained, not freed; caller fault-injection tests | 2–3 d |
-| T3 | **QMan portal shutdown protocol.** The strict host model still reports 2 management-command and 5 shutdown cases. Needs full-transaction command ownership, identity-aware FQRN/FQRL handling, MR/DQRR/SDQCR ownership during shutdown and owner retention on busy or timeout results. Upstream `qman.c` (Tier C, review on every bump). | Strict model reports 0 cases; `bin/test-qman-mc-timeout.py` and the shutdown checks pass | 3–5 d |
-| T4 | **DPAA and CAAM parent lifetime.** Probe unwind and `dpaa_remove()` still free CGRs, BMan pools and the netdev after a failed `dpaa_fq_free()`; CAAM QI `caam_drv_ctx_rel()`/`kill_fq()` free the descriptor and FQ and the transform's DMA key after retire/OOS failure. Reachable only on probe failure or removal. | Retention design for both (reserve or independently own the key backing; keep CGR/pool/netdev while an FQ is unresolved); `bin/test-dpaa-lifetime.py` and `bin/test-caam-qi-ownership.py --check-release` report 0 uncontained cases | 2–3 d |
+| T1 | **FE teardown ownership across features.** **Audit 2026-11-09 (source, 24 paths):** every ask.ko path that removes a hardware record goes through the identified delete and either settles (0/-ENOENT/-ESTALE) or keeps the owner (orphan list, tombstone, unsettled bridge record); `ask_fe_flow_publish()` refuses an orphaned key. `bin/test-nf-flow-withdrawal.py` and `bin/test-nf-flow-revocation.py` report 0 uncontained cases (patches `150` + `155`). **Closed in source + host gates (2026-11-20..21):** `(a)` `a94e49f6` requeues/retries dev/FDB/FIB walkers on GFP_ATOMIC `-ENOMEM` without HW-error retry storms, and `20784423` upgraded `ipv6_hw_frag=0` to synchronous fail-closed withdrawal; `(c)` `a94e49f6` defers bridge deletes with `-EAGAIN` during clean L2_DA disengage handoff and `de598f26` serialized bridge role transitions under RTNL; `(d)` `a94e49f6` scopes FE orphan capability blocks by `cap_mask`; `(e)` `20784423` upgraded `nat44_offload=0` and `nat66_offload=0` to synchronous fail-closed withdrawal + NAT44 pending-queue epoch invalidation. **Still open in source:** `(b)` `ask.ko` egress no-confirm TX FQ / netdev lifetime (`netdev_hold`, physical-port unregister handling; DPAA parent side closed by F-320); `(f)` port disengage `-EBUSY` while any port has flows (not retried; bridge role switch closed in `de598f26`). Cold-boot board gate pending. | Every withdrawal path either settles the delete or retains the owner; host fault-injection covers each case; flowtable characterization reports 0 uncontained cases; board soak passes | 1–2 d left |
+| T2 | **FMan PCD teardown order (F-269 chain).** By 2026-11-09 F-269/F-291/F-293 already made the table drain SYNC before reclaiming records, `fman_pcd_fe_port_del()` free the table before any MURAM and `__fman_pcd_fe_arm_disengage()` and `fman_pcd_release()` retain state on error. **F-310 (2026-11-09) closes the three remaining ordering gaps:** (1) KG disarm cleared `FMBM_RCCB` while the scheme was still AC_CC, so frames dispatched into MURAM offset 0; it now detaches the scheme to RSS, SYNCs, then clears RCCB, and a failed detach/SYNC keeps RCCB and the scaffold; (2) `fman_pcd_fe_port_del()` SYNCs (INV0 + HC) between the `+0x54` workspace unpublish and the mgmt/pool/scaffold frees, which had no barrier when the port had no table; (3) the release-only `fman_pcd_fe_port_drain()` refuses armed or faulted ports instead of freeing their MURAM. Host harness `bin/test-fman-disarm.py --only fman_disarm,fman_workspace_disarm,fman_port_drain` (ordering and failure cases; 2 mutants caught); CI-order replay and W=1 build clean. **Board 2026-11-09 (`.185`, image `2026.11.09-2108-rolling`, F-310 + F-311, smart-plug cold power-on followed by the kdump `crashkernel` kexec): port-loop PASS on eth3 and eth4, 0 failures each.** Idempotent engage, MTU 1280/2500/3600/1500, 3 link flaps and 100 disengage/engage cycles per port with a 5 pps ping: MURAM `used` 58764 at every step, `pcd-snapshot diff` exact, no new kernel errors; whole boot 204 engages and 200 disengages, 0 F-310/F-311 SYNC or arm errors, 0 invalid-enqueue/NO_SCHEME, one first-port SYNC (boot; eth1/eth2 stayed engaged during churn, so F-215 correctly never re-asserted it). An earlier warm-boot run was cut short by a concurrent WireGuard rig whose WGFP record made disengage refuse (`has live or uncertain ehash owners`), which is T1(f), not a T2 fault. **Still open for T2:** disengage under iperf load (needs the shared generators). **F-311 (2026-11-09) closes the engage mirror:** the current-tree audit confirmed `fman_pcd_kg_port_arm_fe()` programmed the AC_CC scheme before `fman_port_set_cc_base()` wrote RCCB (frames in between dispatched through RCCB 0 into MURAM offset 0), and a failed RX lookup returned with the scheme AC_CC and RCCB 0. Order is now RX port and scheme lookup (nothing touched on failure), node miss FQID, RCCB + first-port SYNC + CC_EN with the scheme still RSS (the F-310 intermediate state), then the AC_CC scheme (SDK `FM_PORT_SetPCD` order). A set_cc_base failure, vanished scheme or changed base FQID clears RCCB again; a failed scheme write keeps RCCB at the node (the AR commit may have landed) and the caller faults the port. Host harness `bin/test-fman-disarm.py --only fman_kg_arm_order` models RCCB/CC_EN/committed scheme mode and asserts "never AC_CC with RCCB 0" after every write; it catches the unpatched original and 3 mutants. Same board gate as F-310 (engage under traffic is part of the port-loop). | Drain with SYNC before any dependent MURAM release; errors propagate through per-port delete, global clear and PCD release; on failure the owner (MURAM, DMA, PCD) is deliberately retained, not freed; caller fault-injection tests + disengage under iperf load | board gate |
+| T3 | **QMan portal shutdown protocol.** **Closed in source + CI gates (`a94e49f6`, F-319):** per-portal `raw_spinlock_t mc.lock` and permanent timeout wedge fence across all 11 MC-issuing functions, CSCI IRQ storm guard on wedged portals, INITFQ DMA unmap on wedged/rejected commands, live-portal ring-hijack refusal in `qman_shutdown_fq()`, and `(verb, fqid)` matching for FQRN/FQRL with FQRN `fqs` capture and bounded waits. Upstream `qman.c` (Tier C, review on every bump). | ~~Strict model reports 0 cases; `bin/test-qman-mc-timeout.py` and `bin/test-f319-fixup.py` pass~~ done in CI (`a94e49f6`); cold-boot board soak pending | board gate |
+| T4 | **DPAA and CAAM parent lifetime.** **Closed in source + CI gates (`a94e49f6`, F-318 + F-320):** CAAM QI F-318 retains unsettled FQs, descriptor DMA, heap-allocated DMA key backing, job-ring handles, and shutdown parent resources when `kill_fq()`/`qman_oos_fq()` fails; DPAA F-320 retains unsettled FQs in `dpaa_fq_free_entry()`, moves FQ-backing parent allocations off `devm_*`, and retains parent resources on probe unwind and `dpaa_remove()` (coercing `-EPROBE_DEFER`); F-316 also moved offload egress tail-drop onto shared frame-mode `priv->offload_cgr`. | ~~`bin/test-dpaa-lifetime.py --verify-fq-lifetime`, `bin/test-caam-qi-ownership.py --check-release`, `bin/test-f318-fixup.py`, `bin/test-f320-fixup.py` report 0 uncontained cases~~ done in CI (`a94e49f6`); cold-boot board soak pending | board gate |
 | T5 | **First-port SYNC counter accounting.** Serialized per-port transition accounting and checked timeout handling. **Current tree (2026-11-09):** F-292 holds `cc_port_lock` across the first-port check, SYNC and counter update and counts only real per-port transitions (an idle port's disarm no longer decrements a sibling); F-293 routes the SYNC through the fail-closed `fman_fpm_extc_sync()` and returns before any accounting or CC_EN change on failure; F-311's caller then clears RCCB. The 2026-11-06 qdrant findings (unlocked check, log-and-continue timeout) describe the pre-F-292/F-293 code. Host harness `bin/test-fman-cc-sync-gate.py` now also runs on the final F-293 form: SYNC timeout leaves count, per-port flag and CC_EN unchanged and releases the lock; 3-thread RX/RX/OH arm/disarm churn (20k each, with and without an anchored port) keeps count == engaged ports and every SYNC is under the lock with no port engaged (4 mutants caught). | ~~Host test for concurrent first-port arm/disarm~~ done; board engage/disengage churn unchanged (with the T2 port-loop) | ~1 d |
-| T6 | **Natural SYNC timeout.** The F-269 timeout quarantine is proven only by injection (F-282); a real silicon timeout has never occurred and cannot be forced safely. | Decision: accept injected-only proof, or design a safe positive control (see §4.1 walker plan step 4) | decision |
+| T6 | **Natural SYNC timeout.** F-282 proves injected containment only, not a real hardware timeout; a historical real pending INV0 occurred before F-269/F-271, without proving current recovery. Do not force a timeout unsafely. | Decision: accept injected-only proof with explicit limitation, or design a safe positive control under the WireGuard safety plan | decision |
 
-Order: T1 first (most reachable), then T2, T3, T4, T5. After the code lands: one CI image, cold boot, `bin/testrig-port-loop.sh` on eth3 and eth4, `bin/testrig-wgfp-soak.sh soak`, PPPoE and bridge churn, and `pcd-snapshot` diffs. Release notes drop the teardown limitation only when T1–T4 are closed and validated on the board.
+Order: T1 first (most reachable), then T2, T3, T4, T5. After the code lands: one CI image, cold boot, `bin/testrig-port-loop.sh` on eth3 and eth4, `bin/testrig-wgfp-soak.sh soak`, PPPoE and bridge churn, and `pcd-snapshot` diffs. Release notes drop the teardown limitation only when T1–T4 and relevant T5/T6 gates are closed and validated, including board evidence where applicable; an explicit injected-only T6 decision retains its natural-timeout limitation.
 
 **Status of earlier review findings (checked against the 2026-11-09 tree).** The T1–T6 rows above are the open items; they are known limitations, not new failures. Two findings from earlier reviews no longer describe the current source and must not be repeated as current defects:
 
@@ -774,12 +907,12 @@ Qdrant entries are dated evidence, not proof of current state: several older rev
 |---|---|
 | F-308 margin 260 vs jumbo frames (2026-11-08, DUT1/2054) | While ask.ko's adaptive alignment holds a port at RX start margin 260 (VLAN↔untagged offloaded traffic), every frame needing a second RX buffer (> ~3.5 KB) is lost on that port, all paths, v4/v6; margin 256 carried selected MTU 9000 traffic. Fix in `ask_align.c`: `ask_align_gate()` keeps 256 when the port MTU exceeds `ASK_ALIGN_B_MAX_MTU` (3000, measured) and pulls a 260 port back after an MTU increase; host test `tests/ask_align.py`. Workaround in the 2026-11 release notes: `ask.align_adaptive=0`. | **Partial board evidence 2026-11-09** (DUT1, image `2026.11.08-2332-rolling`, `4e212843`; cold/warm boot not recorded): MTU 1500 vlan-port switched to 260 and raising MTU to 9000 pulled both ports back to 256 within 2 s; full-size DF pings passed at configured MTUs 3600 and 9000 on routed, vlan-vlan and vlan-port, v4/v6, before and after vlan-port traffic. Reported vlan-port rates were 9.87–9.89 Gbit/s one way and 14.032–14.474 Gbit/s aggregate bidirectional at margin 256. CSV writes failed and the hardware classifier returned PARTIAL using a 1448-byte packet-size estimate, making that verdict unreliable for jumbo. Retained iperf JSON reports MSS 8948 and PMTU 9000, but actual packet sizes and full-HW forwarding were not independently established. Repeat with verified packet sizes, hardware attribution and CSV. Keep the workaround decision open pending qualified validation. |
 | IPv6 ND under forwarded traffic (2026-10-23, `.185`/`2044`) | RESOLVED, not an ASK2 bug. eth3/eth4 have no fe80 link-local address (`addrgenmode none`), so for forwarded packets `ndisc_send_ns` cannot pick a source for the multicast NS (`ipv6_dev_get_saddr` fails) and no NS is sent; identical with offload disengaged; `ping -I eth3` works because its source is explicit. Adding `fe80::185/64` to eth3 made forwarded ping and the neighbour resolve. Fix applied: `set interfaces ethernet eth3|eth4 address fe80::185/64` committed+saved on `.185`. | Rig config only: give test ports a link-local when testing forwarded IPv6. No kernel change. |
-| P4 MTU>1500 wedge (2026-10-22) | **FIXED** F-270 (ehash ENQUEUE mtu 0xffff on plain routed records), HW-verified 2026-10-23; subsequent guards allow 1280–9000, but current jumbo acceptance remains open (`ASK2-JUMBO-MTU-PLAN.md`). |
+| P4 MTU>1500 wedge (2026-10-22) & 9k BBR ACK lock-out (2026-11-20) | **FIXED** F-270 (ehash ENQUEUE mtu 0xffff on plain routed records), HW-verified 2026-10-23; 9k BBR bidirectional ACK lock-out fixed by 16-FQ per-flow egress sets (`ca0e4321`) + F-316 `ICS_CRED=0x4000` (`c0c84907`, cold-boot validated `667c9cbb`: 18.5 Gbit/s, 0 zero-s), then upgraded in `a94e49f6` to shared frame-mode `priv->offload_cgr` (1,624 frames @ 1500 / 276 @ 9000, preserving `PREFERINCACHE`). **Cold-boot verified 2026-11-21** (`.185`, `2026.11.21-1724-rolling`, `943610c1`): MTU-1500 8/8 HW (`9.415`/`9.286` Gbit/s unicast, `17.490`/`17.282` bidir) and dynamic MTU CGR scaling (`1624→984→684→1624` across 1280/2500/3600/1500); MTU-9000 shared-CGR matrix and full jumbo acceptance remain open (`ASK2-JUMBO-MTU-PLAN.md`). |
 | PPPoE 10k churn gate (2026-10-20) | Stopped at cycle 3482 on `BUG: Invalid wait context` (`ask_vlan_cc_agg_stats` took a mutex under `rcu_read_lock`); fixed lockless in `be246329`; relaunched 2026-10-23 on `.164`, must pass cycle 3482 and reach 10,000 with no kernel BUG | **2026-10-28 `.185`/`0209` (6.18.59-vyos):** `CYCLES=30 MODE=mix` PASS: 30 session changes incl. server kills at 5/10/15/20/25/30 (old stop points), hardware hits after every reconnect, drains 0, MURAM 58764 baseline, pcd-snapshot clean, 0 kernel errors. The earlier session-flap stops (deferred-replay) are fixed by `55f26a73`; 10k run still to complete.
 | Ehash collision chain (2026-10-20) | Hardware never hits a non-head chained record: routed `.156`/0326 shows heads 472/472 hit and entries behind them 472/472 miss; bridge capacity fails the same way. These flows silently stay in software. Root cause: the 210.10.1 walker follows links only through vendor cumulative nodes (byte0 0x80), never from a regular record. Fix F-269 rebuilds each bucket of two or more flows as cumulative nodes (copy-on-write: switch the head, SYNC, then free). **FIXED** in image `2026.10.20-1310` (commit `73b8189d`): on cold-booted `.158`, chain A/B gave 944/944 shared-bucket records hit with 0 misses, and bridge capacity N=8192 hit on 3/3 probes. B2, F-266, A14 v4/v6 and a 10-cycle PPPoE churn all pass on the same boot (bridge plan §6.2). Chains spanning several nodes are also proven: L2_DA 16-byte keys at depth 25 (3 nodes), and routed IPv4/IPv6 50-byte keys at depth 13 (5 nodes). All hit, including after deletes at node edges. Key sizes 14 and 38 are dormant (no producer). Bridge soak PASS 100/100 (2026-10-20) |
 | WGFP spread + P6 FMan wedge (2026-11-10, `.106`) | Under saturated WireGuard spread + P6 (`wgfp_rx_fast=2`) about 1 run in 57 wedges FMan globally: INV0 stuck at `fmfp_extc=0x80000000`, `ehash_sync_wedged`, all ports dead; only a cold power-cycle recovers. About 1 run in 56 also black-holes one stream. Evidence `/mnt/builds/wgfp/plan/wedge-106/`, `soak2/`. | **Blocks default-on spread + P6.** Next: soak with `sercap.py` serial capture (FPM state) before every power-cycle; research doc §16. |
-| F-266 / conntrack close | Default-off; parser arm/readback proven, transit and NAT closure untested; §4.1 blocks scale acceptance |
-| IPv6 fragment-ID reuse | Concurrent oversize flows can corrupt reassembly; keep limitation and `ipv6_hw_frag=0` opt-out visible; PPPoE plan |
+| F-266 / conntrack close | **Cold-boot PASS 2026-11-21** (`.185`, `2026.11.21-1724-rolling`, `943610c1`): `REUSE=2` v4/v6 (N=100) and **NAT44 FIN (`NAT=1`, N=100)** all passed with 0 `HW_OFFLOAD`, 0 ehash, MURAM 58764, and 0 kernel errors (`bin/testrig-a14.sh f266`). |
+| IPv6 fragment-ID reuse | Concurrent oversize flows can corrupt reassembly; keep limitation and `ipv6_hw_frag=0` opt-out visible, but do not claim containment until affected records are verified withdrawn or independently contained (§3.1.1, T1); PPPoE plan |
 | Short non-IP bridge frames | Historical FE hit-path freeze; restrict bridge to v4/v6 until a new cold-boot de-risk gate passes |
 | 10G link-down invalidation | Bridge remote-carrier test is limited by the known carrier gap; do not claim it passed |
 | F-076 / eth4 debugfs direct arm | Unsupported `hit-engage`/`hit-disengage` can leave RX deaf; production YNL did not reproduce; diagnostic-only investigation, no reopened M3 gate |
@@ -831,10 +964,13 @@ archived 40-second dual-client baseline with the current 30-second
 | `ASK2-BRIDGE-OFFLOAD-PLAN.md` | Remaining bridge design and runbook |
 | `ASK2-PPPOE-OFFLOAD-PLAN.md` | Remaining PPPoE acceptance and feature gaps |
 | `ASK2-IPSEC-OFFLOAD-PLAN.md` | Tier 1/2 runbook (Tier 1 substrate verified 2026-10-16); must satisfy this plan's current scope/architecture |
-| `ASK2-SURICATA-OFFLOAD-PLAN.md` | Suricata inspection-driven offload design and safety contract (no code) |
-| `ASK2-SILICON-TELEMETRY-PLAN.md` | IPFIX-from-ehash-counters design and the sFlow capability gate (per-flow replicator exists, no 1-in-N packet selection; design only) |
-| `ASK2-FLOW-SCALING-PLAN.md` | R9 capacity evidence and pressure-aware elephant admission (volume x FMan/BMan/QMan pressure; no code) |
-| `ASK2-PERF-MATRIX-PLAN.md` | ASK2-only six-number capability matrix (Upload/Download/Bidir x v4/v6) and system-metric battery (NDR, IMIX, MTU, flow scale, CPS, latency/jitter); no vendor columns (design only) |
+| `ASK2-SURICATA-OFFLOAD-PLAN.md` | Inspection modes, limited runtime NFQUEUE prototype and proposed offload safety contract; no production authorization |
+| `ASK2-SILICON-TELEMETRY-PLAN.md` | Existing counters and cached YNL/flowtable stats, proposed IPFIX accounting and the sFlow capability gate (per-flow replicator exists, no proven 1-in-N packet selection; exporter design only) |
+| `ASK2-FLOW-SCALING-PLAN.md` | R9 capacity evidence, shipped scaling fixes (F-312..F-315, S5(1) neigh cache, S7, S8(3) echo skip), and remaining S0/S1/S3–S8 fast-admission/pressure items |
+| `ASK2-PERF-MATRIX-PLAN.md` | ASK2-only six-number capability matrix (Layer A drivers shipped with opt-in live gates + resumable pairs) and Layer B system-metric battery (`M01–M13`, catalogue integration) |
+| `TREX-NDR-PERF-PLAN.md` | TRex NDR runner (`bin/testrig-trex-ndr.sh`, `trex-ndr-table.py`), S1 ASK2 measurements, and matched S0/S1/S2 NDR matrix |
+| `ASK2-JUMBO-MTU-PLAN.md` | MTU 1280–9000 enablement, F-308 margin guard, F-316 shared offload CGR, and current-build jumbo acceptance gates |
+| `VPP-AFXDP-ZC-FULLSPEED.md` | VPP AF_XDP zero-copy follow-up (P2/P4 verified on DUT2; P5–P7 throughput/integration open) |
 | `archive/ASK2-BRIDGE-OFFLOAD-ARCHITECTURE-ANALYSIS.md` | Completed vendor topology/reference analysis |
 | `OFFLOAD-CAPABILITY-PLAN.md` | Vendor vs ASK2 mechanism for each remaining capability |
 | `CC-ACL-OFFLOAD-PLAN.md` | Static ACL backend (open Phase 2 drop ACL; not a parity blocker) |
