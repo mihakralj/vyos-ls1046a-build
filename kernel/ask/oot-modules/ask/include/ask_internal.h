@@ -1135,6 +1135,8 @@ int ask_flow_walk(struct ask_flow_table *t, ask_flow_walk_fn fn, void *arg);
 
 /* Flush legacy flows; return an error if identified FE owners remain. */
 int ask_flow_flush(struct ask_flow_table *t);
+int ask_flow_policy_revoke(void);
+void ask_policy_get_telemetry(u64 *epoch, u8 *state, u32 *unresolved);
 
 /*
  * PR14j direction-aware FLOW_BLOCK_BIND.

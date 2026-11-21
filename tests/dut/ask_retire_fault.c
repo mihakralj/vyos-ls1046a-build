@@ -221,6 +221,40 @@ static int ask_flow_withdraw_owned(struct ask_flow_table *t, u64 cookie,
 
 static void ask_flow_gen_release(struct ask_flow_table *t, u64 cookie, u64 gen) { }
 
+enum ask_g3_subsys { ASK_G3_FIB = 0, ASK_G3_DEV = 1, ASK_G3_FDB = 2 };
+struct net { int id; };
+struct flow_offload { int unused; };
+static struct net init_net = { 1 };
+static unsigned int sw_revoke_calls;
+static u64 g3_dirty_calls, g3_settled_calls, unresolved_notes;
+static bool ask_devchg_sw_match(const struct flow_offload *flow, void *data) { (void)flow; (void)data; return true; }
+static bool ask_fdbchg_sw_match(const struct flow_offload *flow, void *data) { (void)flow; (void)data; return true; }
+static bool ask_fibchg_sw_match(const struct flow_offload *flow, void *data) { (void)flow; (void)data; return true; }
+static int nf_flow_table_revoke_match(struct net *net,
+				      bool (*match)(const struct flow_offload *, void *),
+				      void *data, bool wait_hw,
+				      unsigned int *unresolved_out)
+{
+	(void)net; (void)match; (void)data; (void)wait_hw; (void)unresolved_out;
+	sw_revoke_calls++;
+	return 0;
+}
+static u64 ask_policy_mark_g3_dirty(enum ask_g3_subsys subsys)
+{
+	(void)subsys;
+	return ++g3_dirty_calls;
+}
+static void ask_policy_mark_g3_settled(enum ask_g3_subsys subsys, u64 epoch)
+{
+	(void)subsys; (void)epoch;
+	g3_settled_calls++;
+}
+static void ask_policy_note_unresolved(u32 count, bool identity_lost)
+{
+	(void)identity_lost;
+	unresolved_notes += count;
+}
+
 #include "ask_retire_flush_body.h"
 #include "ask_retire_workers_body.h"
 
@@ -298,8 +332,11 @@ int main(void)
 	add_flow(1, 2, 10, 20, mac_a, 2);
 	add_flow(2, 3, 10, 20, mac_a, 3);
 	ask_devchg_queue(10);
+	assert(scheduled_delayed_count == 1 && last_delayed == &ask_devchg_flush_work);
+	scheduled_delayed_count = 0;
 	alloc_fail_after = 1; /* flow 0 collected, flow 1 hits -ENOMEM */
 	ask_devchg_flush_fn(&ask_devchg_flush_work.work);
+	assert(sw_revoke_calls > 0);
 	assert(live_flow_count() == 2); /* flow 0 retired; flows 1 and 2 still need retry */
 	assert(ask_devchg_n == 1 && ask_devchg_ifx[0] == 10);
 	assert(scheduled_delayed_count == 1 && last_delayed == &ask_devchg_flush_work);

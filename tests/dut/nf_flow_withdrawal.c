@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef uint8_t u8;
 typedef uint16_t __be16;
 typedef uint32_t u32;
 enum flow_offload_tuple_dir {
@@ -32,10 +33,12 @@ enum {
 #define pr_info_ratelimited(...) do { } while (0)
 #define pr_warn_ratelimited(...) do { } while (0)
 #define pr_warn(...) do { } while (0)
+#define ask_pr_dbg(...) do { } while (0)
 #define rcu_read_lock() do { } while (0)
 #define rcu_read_unlock() do { } while (0)
 #define READ_ONCE(value) (value)
 #define GFP_KERNEL 0
+#define smp_mb() ((void)0)
 #define smp_mb__before_atomic() ((void)0)
 #define WARN_ON_ONCE(condition) assert(!(condition))
 #define read_pnet(p) (*(p))
@@ -64,7 +67,33 @@ struct flow_block_cb {
 	struct list_head list;
 };
 struct nf_flow_rule { void *rule; };
-struct flow_offload_tuple { int dir; u32 iifidx; };
+enum flow_offload_xmit_type {
+	FLOW_OFFLOAD_XMIT_UNSPEC = 0,
+	FLOW_OFFLOAD_XMIT_NEIGH,
+	FLOW_OFFLOAD_XMIT_XFRM,
+	FLOW_OFFLOAD_XMIT_DIRECT,
+};
+struct net_device;
+struct dst_entry { struct net_device *dev; };
+static struct net_device *dst_dev_rcu(const struct dst_entry *dst)
+{
+	return dst ? dst->dev : NULL;
+}
+struct flow_offload_tuple {
+	int dir;
+	u32 iifidx;
+	u8 xmit_type;
+	struct dst_entry *dst_cache;
+	union {
+		struct { u32 ifidx; };
+		struct { u32 ifidx; u32 hw_ifidx; } out;
+	};
+};
+static bool nf_flow_dst_check(struct flow_offload_tuple *t)
+{
+	(void)t;
+	return true;
+}
 struct rhash_head { int unused; };
 struct flow_offload_tuple_rhash {
 	struct rhash_head node;
@@ -286,7 +315,15 @@ struct xarray {
 };
 static struct xarray ask_offload_first_seen;
 static unsigned int ask_offload_delay_ms;
+static unsigned int ask_offload_flood_rate;
 static unsigned long jiffies;
+static void ask_offload_rate_note(void) { }
+static unsigned int ask_offload_gate_ms(unsigned int ms) { return ms; }
+static bool ask_offload_too_small(unsigned long cookie)
+{
+	(void)cookie;
+	return false;
+}
 static void *xa_mk_value(unsigned long value)
 {
 	return (void *)((value << 1) | 1);

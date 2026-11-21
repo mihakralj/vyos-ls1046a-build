@@ -52,7 +52,7 @@ def main():
                 "static int nf_flow_table_block_setup("),
         section(rhashtable, "void rhashtable_destroy(",
                 "EXPORT_SYMBOL_GPL(rhashtable_destroy);"),
-        section(core, "static void nf_flow_table_do_cleanup(",
+        section(core, "static bool nf_flow_tuple_uses_dev(",
                 "void nf_flow_table_gc_cleanup("),
         section(core, "static void flow_offload_quarantine_rcu(",
                 "EXPORT_SYMBOL_GPL(nf_flow_table_free);"),
@@ -72,7 +72,7 @@ def main():
                         "\n\t/*\n\t * T-M6-A3: claim ownership")
         (work / "ask_dedup_body.h").write_text(dedup)
         delay = section(ask, "static bool ask_offload_too_young(",
-                        "\n/* KUnit drives REPLACE")
+                        "\n/*\n * S6 static volume gate")
         (work / "ask_delay_body.h").write_text(delay)
         replace = section(ask, "static int ask_flow_offload_replace(",
                           "\nstatic int ask_flow_offload_destroy(")

@@ -284,6 +284,22 @@ static int ask_flow_remove_owned_identified(struct ask_flow_table *table,
 	sw_live = false;
 	return 0;
 }
+static bool ask_policy_epoch_is_current(u64 epoch)
+{
+	return epoch != 0;
+}
+static bool ask_flow_gen_tombstone_if_current(struct ask_flow_table *table,
+					      u64 cookie, u64 generation)
+{
+	return true;
+}
+static void ask_flow_gen_release(struct ask_flow_table *table, u64 cookie,
+				 u64 generation)
+{
+}
+static void ask_policy_note_unresolved(u32 count, bool identity_lost)
+{
+}
 static int ask_flow_withdraw_owned(struct ask_flow_table *table, u64 cookie,
 		u64 generation, u64 token, const struct ask_flow_key *key,
 		bool hw_backed, const char *what, bool *superseded)
@@ -498,13 +514,13 @@ static int test_direct_and_replay_publication(void)
 		CHECK(ask_flow_fe_install(&key, 1, NULL, 11, 12) == 0);
 		CHECK(last_action.vlan_flags == flags[i]);
 		CHECK(ask_neigh_republish(&table, 11, &replay, 7, 0,
-					  ASK_HW_DIR_FWD, 1) == 0);
+					  ASK_HW_DIR_FWD, 1, 1) == 0);
 		before = publications;
 		previous_withdrawals = withdrawals;
 		path_live = false;
 		CHECK(ask_flow_fe_install(&key, 1, NULL, 11, 12) == -EOPNOTSUPP);
 		CHECK(ask_neigh_republish(&table, 11, &replay, 7, 0,
-					  ASK_HW_DIR_FWD, 1) == -EOPNOTSUPP);
+					  ASK_HW_DIR_FWD, 1, 1) == -EOPNOTSUPP);
 		CHECK(publications == before && withdrawals == previous_withdrawals + 1);
 		CHECK(!sw_live);
 		path_live = true;

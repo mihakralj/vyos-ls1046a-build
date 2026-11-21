@@ -850,6 +850,16 @@ else
     echo "ERROR: $NF_FLOW_OWNER_PATCH missing"; exit 1
 fi
 
+# Priority 1: retain dst_cache on XMIT_DIRECT for route/GC invalidation and add
+# fenced NAT-preserving SW+HW flowtable revocation. Applies after 150.
+NF_FLOW_REVOKE_PATCH="$COMMON_FIXES_DIR/155-nf-flow-offload-direct-dst-and-revoke.patch"
+if [ -f "$NF_FLOW_REVOKE_PATCH" ]; then
+    echo "### Staging $(basename "$NF_FLOW_REVOKE_PATCH") (XMIT_DIRECT dst_check and fenced revocation)"
+    cp "$NF_FLOW_REVOKE_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "ERROR: $NF_FLOW_REVOKE_PATCH missing"; exit 1
+fi
+
 ### ASK2 in-tree kernel patches: none.
 #
 # There is no flavor-gated patch bucket any more. This block used to stage
@@ -3142,7 +3152,9 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-fq-lifetime 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-offload-fq.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-containment.py" "$(pwd)" --require-offload-cgr 2>&1
-    echo "### dpaa_eth.c: F-295/F-316/F-320 offload FQ, shared CGR, and parent/FQ retention verified"
+    python3 "${GITHUB_WORKSPACE}/bin/test-nf-flow-withdrawal.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-nf-flow-revocation.py" "$(pwd)" 2>&1
+    echo "### dpaa_eth.c / nf_flow_table: F-295/F-316/F-320 and P1 flowtable revocation verified"
     echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"
     echo "### fman_pcd.c: F-230 FE-VM NAT/PAT opcode emitter (T-M6-7.1, dormant unless nat->flags)"
     # T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26, plans/ASK2-VLAN-REARCH.md):

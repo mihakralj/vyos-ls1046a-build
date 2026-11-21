@@ -40,6 +40,9 @@ const struct nla_policy ask_info_policy[ASK_INFO_ATTR_MAX + 1] = {
 [ASK_INFO_ATTR_NUM_FMAN]       = { .type = NLA_U32 },
 [ASK_INFO_ATTR_NUM_FLOWS]      = { .type = NLA_U32 },
 [ASK_INFO_ATTR_MAX_FLOWS]      = { .type = NLA_U32 },
+[ASK_INFO_ATTR_POLICY_EPOCH]   = { .type = NLA_U64 },
+[ASK_INFO_ATTR_REVOKE_STATE]   = { .type = NLA_U8 },
+[ASK_INFO_ATTR_UNRESOLVED_FLOWS] = { .type = NLA_U32 },
 };
 EXPORT_SYMBOL_GPL(ask_info_policy);
 

@@ -663,12 +663,28 @@ struct ask_flow_pending {
 	u64                     pppoe_epoch;
 	u64                     nat44_epoch;
 	u64                     pppoe_session_epoch;
+	u64                     policy_epoch;
 };
+
+enum ask_g3_subsys {
+	ASK_G3_FIB = 0,
+	ASK_G3_DEV = 1,
+	ASK_G3_FDB = 2,
+};
+
+static int ask_policy_epoch_snapshot(u64 *epoch_out);
+static bool ask_policy_epoch_is_current(u64 epoch);
+static void ask_policy_bump_epoch(void);
+static u64 ask_policy_mark_g3_dirty(enum ask_g3_subsys subsys);
+static void ask_policy_mark_g3_settled(enum ask_g3_subsys subsys, u64 epoch);
+static void ask_policy_note_unresolved(u32 count, bool identity_lost);
+static void ask_policy_revoke_exit(void);
+static void ask_flow_revoke_neigh_sw(int ifindex, const u8 *new_mac);
 
 static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 			       const struct ask_flow_key *key, u32 oif,
 			       u32 action_flags, enum ask_hw_dir dir,
-			       u64 generation);
+			       u64 generation, u64 policy_epoch);
 static bool ask_pppoe_port_armed(int ifindex, u8 l3_proto);
 
 static LIST_HEAD(ask_flow_pending_list);
@@ -756,6 +772,8 @@ static bool ask_flow_pending_eligible(const struct ask_flow_pending *p)
 
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
 	if (!ask_hw_flow_policy_current(&p->key))
+		return false;
+	if (!ask_policy_epoch_is_current(p->policy_epoch))
 		return false;
 	if ((flags & (ASK_VLANF_POP | ASK_VLANF_PUSH)) &&
 	    (!ask_hw_vlan_offload_armed() ||
@@ -886,7 +904,9 @@ static int ask_flow_pending_enqueue(u64 cookie,
 				    __be32 dst_ip,
 				    enum ask_hw_dir dir,
 				    u64 generation,
-				    int pppoe_session_ifindex, u64 pppoe_session_epoch)
+				    int pppoe_session_ifindex,
+				    u64 pppoe_session_epoch,
+				    u64 policy_epoch)
 {
 	struct ask_flow_pending *p, *iter;
 
@@ -910,6 +930,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 	p->pppoe_epoch      = ask_pppoe_pending_epoch;
 	p->nat44_epoch      = ask_nat44_pending_epoch;
 	p->pppoe_session_epoch = pppoe_session_epoch;
+	p->policy_epoch     = policy_epoch;
 
 	spin_lock_bh(&ask_flow_pending_lock);
 	/*
@@ -941,6 +962,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 			iter->pppoe_epoch      = p->pppoe_epoch;
 			iter->nat44_epoch      = p->nat44_epoch;
 			iter->pppoe_session_epoch = pppoe_session_epoch;
+			iter->policy_epoch     = policy_epoch;
 			spin_unlock_bh(&ask_flow_pending_lock);
 			kfree(p);
 			return 0;
@@ -1043,7 +1065,8 @@ static int ask_flow_pending_enqueue(u64 cookie,
 						     p->dst_ip, p->dir,
 						     p->generation,
 						     p->pppoe_session_ifindex,
-						     p->pppoe_session_epoch) == 0)
+						     p->pppoe_session_epoch,
+						     p->policy_epoch) == 0)
 				pr_info_ratelimited("ask: flow_offload: PR14y re-park cookie=0x%llx dev=%s\n",
 						    p->cookie, netdev_name(dev));
 			goto resolved_next;
@@ -1072,7 +1095,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
 		rc = ask_neigh_republish(t, p->cookie, &p->key, p->oif,
 					 p->action_flags, p->dir,
-					 p->generation);
+					 p->generation, p->policy_epoch);
 		if (rc == -EEXIST)
 			rc = 0;
 		if (rc == 0) {
@@ -1274,7 +1297,7 @@ static int ask_flow_withdraw_owned(struct ask_flow_table *t, u64 cookie,
 static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 			       const struct ask_flow_key *key, u32 oif,
 			       u32 action_flags, enum ask_hw_dir dir,
-			       u64 generation)
+			       u64 generation, u64 policy_epoch)
 {
 	struct ask_flow *cur;
 	bool hw_backed = false;
@@ -1283,6 +1306,8 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 	int rc;
 
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
+	if (!ask_policy_epoch_is_current(policy_epoch))
+		return -EAGAIN;
 	rc = ask_flow_insert_owned_identified(t, cookie, key, oif,
 					      action_flags, dir, generation,
 					      &hw_id, &fe_token);
@@ -1301,10 +1326,11 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 	if (!hw_backed)
 		return 0;
 
-	if (!ask_flow_gen_is_current(t, cookie, generation)) {
+	if (!ask_flow_gen_is_current(t, cookie, generation) ||
+	    !ask_policy_epoch_is_current(policy_epoch)) {
 		(void)ask_flow_remove_owned_identified(t, cookie, generation,
 						       fe_token);
-		return -ESTALE;
+		return -EAGAIN;
 	}
 	rc = ask_flow_fe_install(key, hw_id, NULL, cookie, fe_token);
 	if (rc) {
@@ -1325,6 +1351,25 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 		if (rc && rc != -ENOENT && rc != -ESTALE)
 			return rc;
 		return -ESTALE;
+	}
+	if (!ask_policy_epoch_is_current(policy_epoch)) {
+		bool superseded = false;
+
+		if (!ask_flow_gen_tombstone_if_current(t, cookie, generation)) {
+			ask_policy_note_unresolved(1, true);
+			return -EINPROGRESS;
+		}
+		rc = ask_flow_withdraw_owned(t, cookie, generation, fe_token,
+					     key, true, "policy-race republish",
+					     &superseded);
+		if (rc || superseded) {
+			ask_policy_note_unresolved(1, superseded ||
+						   rc == -ESTALE ||
+						   rc == -ENOENT);
+			return -EINPROGRESS;
+		}
+		ask_flow_gen_release(t, cookie, generation);
+		return -EAGAIN;
 	}
 	return 0;
 }
@@ -1347,6 +1392,9 @@ bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 	struct ask_neigh_mac_fixup *fx, *tmp;
 	struct ask_neigh_mac_ctx ctx;
 	bool complete = true;
+	bool need_sw_revoke = false;
+	bool can_republish;
+	u64 policy_epoch = 0;
 	int rc;
 
 	if (!t || !dev || !dst_ip || !new_mac)
@@ -1354,6 +1402,9 @@ bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 	/* A multicast/zero lladdr is never an offloadable next-hop. */
 	if (is_zero_ether_addr(new_mac) || is_multicast_ether_addr(new_mac))
 		return false;
+
+	ask_policy_bump_epoch();
+	can_republish = ask_policy_epoch_snapshot(&policy_epoch) == 0;
 
 	ctx.ifindex      = dev->ifindex;
 	ctx.dst_ip       = dst_ip;
@@ -1420,9 +1471,13 @@ bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 		rcu_read_unlock();
 		if (replaced)
 			goto neigh_next;
+		if (!can_republish) {
+			need_sw_revoke = true;
+			goto neigh_next;
+		}
 		rc = ask_neigh_republish(t, fx->cookie, &fx->key, fx->oif,
 					 fx->action_flags, fx->dir,
-					 fx->generation);
+					 fx->generation, policy_epoch);
 		if (rc == -EEXIST)
 			rc = 0;
 		if (rc == -ESTALE) {
@@ -1432,8 +1487,11 @@ bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 		} else if (rc) {
 			/* Do not republish the old key: it carries the stale
 			 * MAC and would re-blackhole the flow. Leave it
-			 * removed; the kernel slow path carries it and the
-			 * next REPLACE re-offloads with the fresh MAC. */
+			 * removed and tear down the XMIT_DIRECT SW flowtable
+			 * entry so it cannot forward to the stale out.h_dest. */
+			if (rc == -EINPROGRESS)
+				complete = false;
+			need_sw_revoke = true;
 			pr_warn_ratelimited("ask: neigh: rebuild failed, flow left in software cookie=0x%llx rc=%d\n",
 					    fx->cookie, rc);
 		}
@@ -1450,6 +1508,8 @@ neigh_next:
 		list_del(&fx->node);
 		kfree(fx);
 	}
+	if (need_sw_revoke)
+		ask_flow_revoke_neigh_sw(dev->ifindex, new_mac);
 	return complete && !ctx.incomplete;
 }
 EXPORT_SYMBOL_GPL(ask_flow_neigh_mac_changed);
@@ -1602,7 +1662,7 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
 		rc = ask_neigh_republish(t, p->cookie, &p->key, p->oif,
 					 p->action_flags, p->dir,
-					 p->generation);
+					 p->generation, p->policy_epoch);
 		if (rc == -EEXIST)
 			rc = 0;
 		if (rc == 0) {
@@ -3895,6 +3955,10 @@ static bool ask_pppoe_port_armed(int ifindex, u8 l3_proto)
  * then forwards in software and flow_offload_refresh() reoffloads it with
  * the new values. Bridge records carry neither and are left alone.
  */
+static bool ask_devchg_sw_match(const struct flow_offload *flow, void *data);
+static bool ask_fdbchg_sw_match(const struct flow_offload *flow, void *data);
+static bool ask_fibchg_sw_match(const struct flow_offload *flow, void *data);
+
 #define ASK_DEVCHG_MAX		16
 #define ASK_RETIRE_RETRY_MS	100
 static atomic_t ask_retire_incomplete = ATOMIC_INIT(0);
@@ -3903,10 +3967,12 @@ static int ask_devchg_ifx[ASK_DEVCHG_MAX];
 static unsigned int ask_devchg_n;
 static bool ask_devchg_all;
 static bool ask_devchg_live;
+static u64 ask_devchg_g3_epoch;
 /* Snapshot the collector reads; only the (non-reentrant) work item writes it. */
 static int ask_devchg_snap[ASK_DEVCHG_MAX];
 static unsigned int ask_devchg_snap_n;
 static bool ask_devchg_snap_all;
+static u64 ask_devchg_snap_g3_epoch;
 
 static bool ask_devchg_hit(u32 ifindex)
 {
@@ -3954,11 +4020,14 @@ static void ask_devchg_flush_fn(struct work_struct *w)
 	memcpy(ask_devchg_snap, ask_devchg_ifx, sizeof(ask_devchg_snap));
 	ask_devchg_snap_n = ask_devchg_n;
 	ask_devchg_snap_all = ask_devchg_all;
+	ask_devchg_snap_g3_epoch = ask_devchg_g3_epoch;
 	ask_devchg_n = 0;
 	ask_devchg_all = false;
 	spin_unlock_bh(&ask_devchg_lock);
 	if (!ask_devchg_snap_n && !ask_devchg_snap_all)
 		return;
+	(void)nf_flow_table_revoke_match(&init_net, ask_devchg_sw_match, NULL,
+					 false, NULL);
 	rc = __ask_flow_flush_matching_status(ask_devchg_collect,
 					      "device MTU/MAC change",
 					      false, NULL, &walk_rc);
@@ -3977,15 +4046,24 @@ static void ask_devchg_flush_fn(struct work_struct *w)
 		spin_unlock_bh(&ask_devchg_lock);
 	} else if (rc) {
 		atomic_inc(&ask_retire_incomplete);
+		ask_policy_note_unresolved(1, rc == -ESTALE);
 		pr_err_ratelimited("ask: flow_offload: device MTU/MAC change retirement incomplete rc=%d; stale hardware record(s) may remain\n",
 				   rc);
+	} else {
+		ask_policy_mark_g3_settled(ASK_G3_DEV, ask_devchg_snap_g3_epoch);
 	}
 }
 
 static void ask_devchg_queue(int ifindex)
 {
 	spin_lock_bh(&ask_devchg_lock);
+	if (!ask_devchg_live) {
+		spin_unlock_bh(&ask_devchg_lock);
+		return;
+	}
 	ask_devchg_queue_locked(ifindex);
+	ask_devchg_g3_epoch = ask_policy_mark_g3_dirty(ASK_G3_DEV);
+	schedule_delayed_work(&ask_devchg_flush_work, 0);
 	spin_unlock_bh(&ask_devchg_lock);
 }
 
@@ -4007,9 +4085,11 @@ static DEFINE_SPINLOCK(ask_fdbchg_lock);
 static struct ask_fdbchg ask_fdbchg_q[ASK_FDBCHG_MAX];
 static unsigned int ask_fdbchg_n;
 static bool ask_fdbchg_all;
+static u64 ask_fdbchg_g3_epoch;
 static struct ask_fdbchg ask_fdbchg_snap[ASK_FDBCHG_MAX];
 static unsigned int ask_fdbchg_snap_n;
 static bool ask_fdbchg_snap_all;
+static u64 ask_fdbchg_snap_g3_epoch;
 static bool ask_fdb_live;
 
 static int ask_fdbchg_collect(struct ask_flow *f, void *arg)
@@ -4060,11 +4140,14 @@ static void ask_fdbchg_flush_fn(struct work_struct *w)
 	memcpy(ask_fdbchg_snap, ask_fdbchg_q, sizeof(ask_fdbchg_snap));
 	ask_fdbchg_snap_n = ask_fdbchg_n;
 	ask_fdbchg_snap_all = ask_fdbchg_all;
+	ask_fdbchg_snap_g3_epoch = ask_fdbchg_g3_epoch;
 	ask_fdbchg_n = 0;
 	ask_fdbchg_all = false;
 	spin_unlock_bh(&ask_fdbchg_lock);
 	if (!ask_fdbchg_snap_n && !ask_fdbchg_snap_all)
 		return;
+	(void)nf_flow_table_revoke_match(&init_net, ask_fdbchg_sw_match, NULL,
+					 false, NULL);
 	rc = __ask_flow_flush_matching_status(ask_fdbchg_collect,
 					      "bridge FDB change",
 					      false, NULL, &walk_rc);
@@ -4083,8 +4166,11 @@ static void ask_fdbchg_flush_fn(struct work_struct *w)
 		spin_unlock_bh(&ask_fdbchg_lock);
 	} else if (rc) {
 		atomic_inc(&ask_retire_incomplete);
+		ask_policy_note_unresolved(1, rc == -ESTALE);
 		pr_err_ratelimited("ask: flow_offload: bridge FDB change retirement incomplete rc=%d; stale hardware record(s) may remain\n",
 				   rc);
+	} else {
+		ask_policy_mark_g3_settled(ASK_G3_FDB, ask_fdbchg_snap_g3_epoch);
 	}
 }
 
@@ -4114,6 +4200,7 @@ void ask_flow_fdb_change(const u8 *addr, int ifindex)
 	} else {
 		ask_fdbchg_all = true;
 	}
+	ask_fdbchg_g3_epoch = ask_policy_mark_g3_dirty(ASK_G3_FDB);
 	schedule_delayed_work(&ask_fdbchg_flush_work, 0);
 	spin_unlock_bh(&ask_fdbchg_lock);
 }
@@ -4140,9 +4227,11 @@ static DEFINE_SPINLOCK(ask_fibchg_lock);
 static struct ask_fibchg_pfx ask_fibchg_q[ASK_FIBCHG_MAX];
 static unsigned int ask_fibchg_n;
 static bool ask_fibchg_all;
+static u64 ask_fibchg_g3_epoch;
 static struct ask_fibchg_pfx ask_fibchg_snap[ASK_FIBCHG_MAX];
 static unsigned int ask_fibchg_snap_n;
 static bool ask_fibchg_snap_all;
+static u64 ask_fibchg_snap_g3_epoch;
 static bool ask_fib_nb_ok;
 static bool ask_fib_live;
 
@@ -4208,11 +4297,14 @@ static void ask_fibchg_flush_fn(struct work_struct *w)
 	memcpy(ask_fibchg_snap, ask_fibchg_q, sizeof(ask_fibchg_snap));
 	ask_fibchg_snap_n = ask_fibchg_n;
 	ask_fibchg_snap_all = ask_fibchg_all;
+	ask_fibchg_snap_g3_epoch = ask_fibchg_g3_epoch;
 	ask_fibchg_n = 0;
 	ask_fibchg_all = false;
 	spin_unlock_bh(&ask_fibchg_lock);
 	if (!ask_fibchg_snap_n && !ask_fibchg_snap_all)
 		return;
+	(void)nf_flow_table_revoke_match(&init_net, ask_fibchg_sw_match, NULL,
+					 false, NULL);
 	rc = __ask_flow_flush_matching_status(ask_fibchg_collect,
 					      "route change",
 					      false, NULL, &walk_rc);
@@ -4231,8 +4323,11 @@ static void ask_fibchg_flush_fn(struct work_struct *w)
 		spin_unlock_bh(&ask_fibchg_lock);
 	} else if (rc) {
 		atomic_inc(&ask_retire_incomplete);
+		ask_policy_note_unresolved(1, rc == -ESTALE);
 		pr_err_ratelimited("ask: flow_offload: route change retirement incomplete rc=%d; stale hardware record(s) may remain\n",
 				   rc);
+	} else {
+		ask_policy_mark_g3_settled(ASK_G3_FIB, ask_fibchg_snap_g3_epoch);
 	}
 }
 
@@ -4254,6 +4349,7 @@ static void ask_fibchg_queue(u8 l3, const void *addr, unsigned int alen,
 		ask_fibchg_all = true;
 	else
 		ask_fibchg_queue_pfx_locked(&p);
+	ask_fibchg_g3_epoch = ask_policy_mark_g3_dirty(ASK_G3_FIB);
 	schedule_delayed_work(&ask_fibchg_flush_work,
 			      msecs_to_jiffies(ASK_FIBCHG_DELAY_MS));
 	spin_unlock_bh(&ask_fibchg_lock);
@@ -4321,7 +4417,6 @@ static int ask_pppoe_netdev_event(struct notifier_block *nb,
 		ask_devchg_queue(dev->ifindex);
 		if (is_vlan_dev(dev))
 			ask_devchg_queue(vlan_dev_real_dev(dev)->ifindex);
-		schedule_delayed_work(&ask_devchg_flush_work, 0);
 	}
 	/*
 	 * T1: a VLAN vif going down or away. nf_flow_table_cleanup() matches
@@ -4332,10 +4427,8 @@ static int ask_pppoe_netdev_event(struct notifier_block *nb,
 	 * vif; only the vif, not its real device, whose other flows are fine.
 	 */
 	if ((event == NETDEV_DOWN || event == NETDEV_UNREGISTER) &&
-	    is_vlan_dev(dev) && ask_flow_default_table()) {
+	    is_vlan_dev(dev) && ask_flow_default_table())
 		ask_devchg_queue(dev->ifindex);
-		schedule_delayed_work(&ask_devchg_flush_work, 0);
-	}
 	return NOTIFY_DONE;
 }
 
@@ -4384,6 +4477,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	u8 direct_src_mac[ETH_ALEN] = {};
 	u64 fe_token = 0;
 	u64 family_policy_seq;
+	u64 policy_epoch;
 	u64 pppoe_session_epoch;
 	bool direct_mac = false;
 	bool is_v6;
@@ -4414,6 +4508,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		return -EAGAIN;
 
 	rc = ask_hw_flow_policy_snapshot(&family_policy_seq);
+	if (rc)
+		return rc;
+	rc = ask_policy_epoch_snapshot(&policy_epoch);
 	if (rc)
 		return rc;
 	pppoe_session_epoch = ask_pppoe_session_snapshot();
@@ -5239,6 +5336,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			return -EOPNOTSUPP;
 		if (!ask_hw_flow_policy_current(&key))
 			return -ESTALE;
+		if (!ask_policy_epoch_is_current(policy_epoch))
+			return -EAGAIN;
 
 		/*
 		 * Next hop unresolved: park the cookie, but only now that the
@@ -5255,7 +5354,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 							   __dir, generation,
 							   pppoe > 0 ?
 							   pppoe_info.ifindex : 0,
-							   pppoe_session_epoch);
+							   pppoe_session_epoch,
+							   policy_epoch);
 
 			if (qrc == 0) {
 				pr_info_ratelimited("ask: flow_offload: PR14z10 defer cookie=0x%lx oif=%u eg_if=%d in_if=%d dst=%pI4 (neigh unresolved, ARP probed)\n",
@@ -5346,6 +5446,27 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx destroyed during FE install — %s\n",
 				    f->cookie, rc ? "owner superseded" : "FE record removed");
 		return 0;
+	}
+	if (!ask_policy_epoch_is_current(policy_epoch)) {
+		bool superseded = false;
+
+		if (!ask_flow_gen_tombstone_if_current(t, (u64)f->cookie,
+						      generation)) {
+			ask_policy_note_unresolved(1, true);
+			return -EINPROGRESS;
+		}
+		rc = ask_flow_withdraw_owned(t, (u64)f->cookie, generation,
+					     fe_token, &key, true,
+					     "policy-race REPLACE",
+					     &superseded);
+		if (rc || superseded) {
+			ask_policy_note_unresolved(1, superseded ||
+						   rc == -ESTALE ||
+						   rc == -ENOENT);
+			return -EINPROGRESS;
+		}
+		ask_flow_gen_release(t, (u64)f->cookie, generation);
+		return -EAGAIN;
 	}
 
 	return 0;
@@ -6040,6 +6161,480 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 EXPORT_SYMBOL_GPL(ask_flow_offload_setup_tc_block_cb);
 
 /* ------------------------------------------------------------------------- */
+/* Priority 1: SW flowtable match helpers + policy revocation state machine   */
+/* ------------------------------------------------------------------------- */
+
+static bool ask_devchg_sw_match(const struct flow_offload *flow, void *data)
+{
+	unsigned int dir;
+
+	if (ask_devchg_snap_all)
+		return true;
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
+		const struct flow_offload_tuple *t = &flow->tuplehash[dir].tuple;
+		struct dst_entry *dst;
+
+		if (ask_devchg_hit((u32)t->iifidx))
+			return true;
+		if (t->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
+		    (ask_devchg_hit(t->out.ifidx) ||
+		     ask_devchg_hit(t->out.hw_ifidx)))
+			return true;
+		if ((t->xmit_type == FLOW_OFFLOAD_XMIT_NEIGH ||
+		     t->xmit_type == FLOW_OFFLOAD_XMIT_XFRM) &&
+		    ask_devchg_hit(t->ifidx))
+			return true;
+		dst = READ_ONCE(t->dst_cache);
+		if (dst) {
+			struct net_device *d = dst_dev_rcu(dst);
+
+			if (d && ask_devchg_hit((u32)d->ifindex))
+				return true;
+		}
+	}
+	return false;
+}
+
+static bool ask_fdbchg_sw_match(const struct flow_offload *flow, void *data)
+{
+	unsigned int dir, i;
+
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
+		const struct flow_offload_tuple *t = &flow->tuplehash[dir].tuple;
+
+		if (t->xmit_type != FLOW_OFFLOAD_XMIT_DIRECT)
+			continue;
+		if (ask_fdbchg_snap_all && !is_zero_ether_addr(t->out.h_dest))
+			return true;
+		for (i = 0; i < ask_fdbchg_snap_n; i++) {
+			const struct ask_fdbchg *c = &ask_fdbchg_snap[i];
+
+			if (ether_addr_equal(c->addr, t->out.h_dest) &&
+			    (!c->ifindex || (u32)c->ifindex != t->out.hw_ifidx))
+				return true;
+		}
+	}
+	return false;
+}
+
+static bool ask_fibchg_sw_match(const struct flow_offload *flow, void *data)
+{
+	unsigned int dir, i;
+
+	if (ask_fibchg_snap_all)
+		return true;
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
+		struct flow_offload_tuple *t =
+			(struct flow_offload_tuple *)&flow->tuplehash[dir].tuple;
+		u8 l3;
+		const u8 *src, *dst;
+
+		if (!nf_flow_dst_check(t))
+			return true;
+		if (t->l3proto == NFPROTO_IPV4) {
+			l3 = ASK_FLOW_L3_IPV4;
+			src = (const u8 *)&t->src_v4;
+			dst = (const u8 *)&t->dst_v4;
+		} else if (t->l3proto == NFPROTO_IPV6) {
+			l3 = ASK_FLOW_L3_IPV6;
+			src = (const u8 *)&t->src_v6;
+			dst = (const u8 *)&t->dst_v6;
+		} else {
+			continue;
+		}
+		for (i = 0; i < ask_fibchg_snap_n; i++) {
+			const struct ask_fibchg_pfx *p = &ask_fibchg_snap[i];
+
+			if (ask_fibchg_pfx_match(p, l3, dst) ||
+			    ask_fibchg_pfx_match(p, l3, src))
+				return true;
+		}
+	}
+	return false;
+}
+
+struct ask_neigh_sw_ctx {
+	int ifindex;
+	const u8 *new_mac;
+};
+
+static bool ask_neigh_sw_match(const struct flow_offload *flow, void *data)
+{
+	const struct ask_neigh_sw_ctx *ctx = data;
+	unsigned int dir;
+
+	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
+		const struct flow_offload_tuple *t = &flow->tuplehash[dir].tuple;
+		struct dst_entry *dst;
+		bool dev_hit = false;
+
+		if (t->xmit_type != FLOW_OFFLOAD_XMIT_DIRECT)
+			continue;
+		if (ether_addr_equal(t->out.h_dest, ctx->new_mac))
+			continue;
+		if (ctx->ifindex > 0 &&
+		    (t->out.ifidx == (u32)ctx->ifindex ||
+		     t->out.hw_ifidx == (u32)ctx->ifindex))
+			dev_hit = true;
+		if (!dev_hit) {
+			dst = READ_ONCE(t->dst_cache);
+			if (dst) {
+				struct net_device *d = dst_dev_rcu(dst);
+
+				if (d && d->ifindex == ctx->ifindex)
+					dev_hit = true;
+			}
+		}
+		if (dev_hit)
+			return true;
+	}
+	return false;
+}
+
+static void ask_flow_revoke_neigh_sw(int ifindex, const u8 *new_mac)
+{
+	struct ask_neigh_sw_ctx ctx = {
+		.ifindex = ifindex,
+		.new_mac = new_mac,
+	};
+
+	(void)nf_flow_table_revoke_match(&init_net, ask_neigh_sw_match, &ctx,
+					 false, NULL);
+}
+
+static void ask_flow_pending_drain_all(void)
+{
+	struct ask_flow_pending *p, *tmp;
+
+	spin_lock_bh(&ask_flow_pending_lock);
+	list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
+		list_del(&p->node);
+		ask_flow_pending_count--;
+		kfree(p);
+	}
+	spin_unlock_bh(&ask_flow_pending_lock);
+}
+
+static unsigned int ask_fe_orphan_count_get(void)
+{
+	unsigned int n;
+
+	mutex_lock(&ask_fe_orphan_lock);
+	n = ask_fe_orphan_count;
+	mutex_unlock(&ask_fe_orphan_lock);
+	return n;
+}
+
+static int ask_policy_all_collect(struct ask_flow *f, void *arg)
+{
+	return ask_collect_flush_victim(f, arg);
+}
+
+static int ask_flow_policy_sweep_hw(bool *identity_lost)
+{
+	unsigned long cookie;
+	void *entry;
+	int rc;
+
+	mutex_lock(&ask_flow_lifecycle_lock);
+	rc = __ask_flow_flush_matching(ask_policy_all_collect,
+				       "policy revocation", true,
+				       identity_lost);
+	xa_for_each(&ask_flow_owner_block, cookie, entry)
+		ask_flow_owner_forget_settled((u64)cookie);
+	mutex_unlock(&ask_flow_lifecycle_lock);
+	return rc;
+}
+
+/* Policy revocation and G3 admission fence state (Priority 1, §3.1.1). */
+static DEFINE_MUTEX(ask_policy_revoke_mutex);
+static DEFINE_SPINLOCK(ask_policy_lock);
+static u64 ask_policy_epoch = 1;
+static bool ask_policy_epoch_exhausted;
+static unsigned int ask_policy_fence_depth;
+static u8 ask_policy_revoke_state = ASK_REVOKE_IDLE;
+static u32 ask_policy_unresolved_count;
+static u64 ask_policy_unresolved_seq;
+static bool ask_policy_identity_lost;
+static bool ask_policy_nf_fence_held;
+static bool ask_policy_self_fence_held;
+static u64 ask_g3_fib_epoch;
+static u64 ask_g3_fib_settled;
+static u64 ask_g3_dev_epoch;
+static u64 ask_g3_dev_settled;
+static u64 ask_g3_fdb_epoch;
+static u64 ask_g3_fdb_settled;
+
+static u32 ask_u32_sat_add(u32 a, u32 b)
+{
+	return (U32_MAX - a < b) ? U32_MAX : (a + b);
+}
+
+static void ask_policy_bump_epoch_locked(void)
+{
+	if (ask_policy_epoch == U64_MAX)
+		ask_policy_epoch_exhausted = true;
+	else
+		ask_policy_epoch++;
+}
+
+static void ask_policy_bump_epoch(void)
+{
+	spin_lock_bh(&ask_policy_lock);
+	ask_policy_bump_epoch_locked();
+	spin_unlock_bh(&ask_policy_lock);
+}
+
+static u64 ask_policy_mark_g3_dirty(enum ask_g3_subsys subsys)
+{
+	u64 ep = 0;
+
+	spin_lock_bh(&ask_policy_lock);
+	ask_policy_bump_epoch_locked();
+	switch (subsys) {
+	case ASK_G3_FIB:
+		if (ask_g3_fib_epoch == U64_MAX)
+			ask_policy_epoch_exhausted = true;
+		else
+			ask_g3_fib_epoch++;
+		ep = ask_g3_fib_epoch;
+		break;
+	case ASK_G3_DEV:
+		if (ask_g3_dev_epoch == U64_MAX)
+			ask_policy_epoch_exhausted = true;
+		else
+			ask_g3_dev_epoch++;
+		ep = ask_g3_dev_epoch;
+		break;
+	case ASK_G3_FDB:
+		if (ask_g3_fdb_epoch == U64_MAX)
+			ask_policy_epoch_exhausted = true;
+		else
+			ask_g3_fdb_epoch++;
+		ep = ask_g3_fdb_epoch;
+		break;
+	}
+	spin_unlock_bh(&ask_policy_lock);
+	return ep;
+}
+
+static void ask_policy_mark_g3_settled(enum ask_g3_subsys subsys, u64 epoch)
+{
+	spin_lock_bh(&ask_policy_lock);
+	switch (subsys) {
+	case ASK_G3_FIB:
+		if (epoch > ask_g3_fib_settled)
+			ask_g3_fib_settled = epoch;
+		break;
+	case ASK_G3_DEV:
+		if (epoch > ask_g3_dev_settled)
+			ask_g3_dev_settled = epoch;
+		break;
+	case ASK_G3_FDB:
+		if (epoch > ask_g3_fdb_settled)
+			ask_g3_fdb_settled = epoch;
+		break;
+	}
+	spin_unlock_bh(&ask_policy_lock);
+}
+
+static void ask_policy_note_unresolved(u32 count, bool identity_lost)
+{
+	spin_lock_bh(&ask_policy_lock);
+	ask_policy_unresolved_seq++;
+	if (identity_lost)
+		ask_policy_identity_lost = true;
+	if (count)
+		ask_policy_unresolved_count =
+			ask_u32_sat_add(ask_policy_unresolved_count, count);
+	else if (!ask_policy_unresolved_count)
+		ask_policy_unresolved_count = 1;
+	ask_policy_revoke_state = ASK_REVOKE_UNRESOLVED;
+	spin_unlock_bh(&ask_policy_lock);
+}
+
+static bool ask_policy_g3_dirty_locked(void)
+{
+	return ask_g3_fib_settled != ask_g3_fib_epoch ||
+	       ask_g3_dev_settled != ask_g3_dev_epoch ||
+	       ask_g3_fdb_settled != ask_g3_fdb_epoch;
+}
+
+static int ask_policy_epoch_snapshot(u64 *epoch_out)
+{
+	int rc = 0;
+
+	spin_lock_bh(&ask_policy_lock);
+	if (ask_policy_epoch_exhausted)
+		rc = -EOVERFLOW;
+	else if (ask_policy_revoke_state == ASK_REVOKE_UNRESOLVED ||
+		 ask_policy_unresolved_count || ask_policy_identity_lost)
+		rc = -EBUSY;
+	else if (ask_policy_fence_depth || ask_policy_g3_dirty_locked())
+		rc = -EAGAIN;
+	else if (epoch_out)
+		*epoch_out = ask_policy_epoch;
+	spin_unlock_bh(&ask_policy_lock);
+	return rc;
+}
+
+static bool ask_policy_epoch_is_current(u64 epoch)
+{
+	bool ok;
+
+	if (!epoch)
+		return false;
+	spin_lock_bh(&ask_policy_lock);
+	ok = !ask_policy_epoch_exhausted &&
+	     ask_policy_revoke_state != ASK_REVOKE_UNRESOLVED &&
+	     !ask_policy_unresolved_count &&
+	     !ask_policy_identity_lost &&
+	     !ask_policy_fence_depth &&
+	     !ask_policy_g3_dirty_locked() &&
+	     epoch == ask_policy_epoch;
+	spin_unlock_bh(&ask_policy_lock);
+	return ok;
+}
+
+void ask_policy_get_telemetry(u64 *epoch, u8 *state, u32 *unresolved)
+{
+	spin_lock_bh(&ask_policy_lock);
+	if (epoch)
+		*epoch = ask_policy_epoch;
+	if (state)
+		*state = ask_policy_revoke_state;
+	if (unresolved)
+		*unresolved = ask_policy_unresolved_count;
+	spin_unlock_bh(&ask_policy_lock);
+}
+EXPORT_SYMBOL_GPL(ask_policy_get_telemetry);
+
+/*
+ * Explicit NAT-preserving L3 policy revocation (ASK_CMD_FLUSH_FLOWS).
+ * Fences SW+HW admission, drains deferred replay, tears down all flowtable
+ * entries (preserving conntrack + NAT), sweeps remaining routed ASK owners,
+ * and reports RETIRED only when both directions and all in-flight work have
+ * settled with zero orphans. Any failure or unrecoverable orphan transitions
+ * to sticky UNRESOLVED with admission kept fenced (never falsely claims
+ * CONTAINED). L2 bridge FDB records in ask_bridge.c are outside L3 flowtable
+ * scope.
+ */
+int ask_flow_policy_revoke(void)
+{
+	struct ask_flow_table *t = ask_flow_default_table();
+	unsigned int ft_unresolved = 0, orphans;
+	u64 fib_ep, dev_ep, fdb_ep, unres_seq;
+	int hw_cnt;
+	u32 rem_hw, unresolved;
+	bool sweep_identity_lost = false, exhausted, sticky_id_lost;
+	bool concurrent_unresolved;
+	int ft_rc, sweep_rc;
+
+	mutex_lock(&ask_policy_revoke_mutex);
+
+	spin_lock_bh(&ask_policy_lock);
+	ask_policy_bump_epoch_locked();
+	if (ask_policy_revoke_state != ASK_REVOKE_UNRESOLVED)
+		ask_policy_revoke_state = ASK_REVOKE_FENCED;
+	if (!ask_policy_self_fence_held) {
+		ask_policy_fence_depth++;
+		ask_policy_self_fence_held = true;
+	}
+	fib_ep = ask_g3_fib_epoch;
+	dev_ep = ask_g3_dev_epoch;
+	fdb_ep = ask_g3_fdb_epoch;
+	unres_seq = ask_policy_unresolved_seq;
+	spin_unlock_bh(&ask_policy_lock);
+
+	if (!ask_policy_nf_fence_held) {
+		nf_flow_table_fence_begin();
+		ask_policy_nf_fence_held = true;
+	}
+
+	/* Drain any in-flight nft_flow_offload_eval() -> flow_offload_add(). */
+	synchronize_rcu();
+	ask_flow_pending_drain_all();
+
+	ft_rc = nf_flow_table_revoke_all(&init_net, true, &ft_unresolved);
+	sweep_rc = ask_flow_policy_sweep_hw(&sweep_identity_lost);
+	orphans = ask_fe_orphan_count_get();
+	hw_cnt = t ? atomic_read(&t->num_hw_backed) : 0;
+	rem_hw = hw_cnt > 0 ? (u32)hw_cnt : 0;
+
+	spin_lock_bh(&ask_policy_lock);
+	if (sweep_identity_lost || sweep_rc == -ESTALE || sweep_rc == -ENOENT)
+		ask_policy_identity_lost = true;
+	exhausted = ask_policy_epoch_exhausted;
+	sticky_id_lost = ask_policy_identity_lost;
+	concurrent_unresolved = (ask_policy_unresolved_seq != unres_seq);
+
+	unresolved = ask_u32_sat_add((u32)ft_unresolved, rem_hw);
+	unresolved = ask_u32_sat_add(unresolved, (u32)orphans);
+	if (ft_rc && !ft_unresolved)
+		unresolved = ask_u32_sat_add(unresolved, 1);
+	if (sweep_rc && !rem_hw)
+		unresolved = ask_u32_sat_add(unresolved, 1);
+	if ((sticky_id_lost || exhausted || concurrent_unresolved) && !unresolved)
+		unresolved = 1;
+
+	if (!unresolved && !sticky_id_lost && !exhausted &&
+	    !concurrent_unresolved) {
+		/* A clean full SW+HW revocation supersedes any prior G3
+		 * non-OOM failure up to the snapshotted epochs, without
+		 * masking any newer G3 event that fired during the sweep.
+		 */
+		if (fib_ep > ask_g3_fib_settled)
+			ask_g3_fib_settled = fib_ep;
+		if (dev_ep > ask_g3_dev_settled)
+			ask_g3_dev_settled = dev_ep;
+		if (fdb_ep > ask_g3_fdb_settled)
+			ask_g3_fdb_settled = fdb_ep;
+		ask_policy_unresolved_count = 0;
+		ask_policy_revoke_state = ASK_REVOKE_RETIRED;
+		if (ask_policy_self_fence_held) {
+			ask_policy_fence_depth--;
+			ask_policy_self_fence_held = false;
+		}
+		spin_unlock_bh(&ask_policy_lock);
+		if (ask_policy_nf_fence_held) {
+			nf_flow_table_fence_end();
+			ask_policy_nf_fence_held = false;
+		}
+		mutex_unlock(&ask_policy_revoke_mutex);
+		return 0;
+	}
+
+	if (concurrent_unresolved && ask_policy_unresolved_count > unresolved)
+		unresolved = ask_policy_unresolved_count;
+	ask_policy_unresolved_count = unresolved;
+	ask_policy_revoke_state = ASK_REVOKE_UNRESOLVED;
+	spin_unlock_bh(&ask_policy_lock);
+	pr_err("ask: policy revocation UNRESOLVED (ft=%u hw=%u orphans=%u ft_rc=%d sweep_rc=%d id_lost=%u exhausted=%u race=%u); admission stays fenced\n",
+	       ft_unresolved, rem_hw, orphans, ft_rc, sweep_rc,
+	       sticky_id_lost, exhausted, concurrent_unresolved);
+	mutex_unlock(&ask_policy_revoke_mutex);
+	return -EBUSY;
+}
+EXPORT_SYMBOL_GPL(ask_flow_policy_revoke);
+
+static void ask_policy_revoke_exit(void)
+{
+	mutex_lock(&ask_policy_revoke_mutex);
+	spin_lock_bh(&ask_policy_lock);
+	if (ask_policy_self_fence_held) {
+		ask_policy_fence_depth--;
+		ask_policy_self_fence_held = false;
+	}
+	spin_unlock_bh(&ask_policy_lock);
+	if (ask_policy_nf_fence_held) {
+		nf_flow_table_fence_end();
+		ask_policy_nf_fence_held = false;
+	}
+	mutex_unlock(&ask_policy_revoke_mutex);
+}
+/* End of policy revocation state machine. */
+
+/* ------------------------------------------------------------------------- */
 /* Public block-bind helper                                                   */
 /*                                                                            */
 /* PR14j change: no longer calls ask_hw_port_bind() here.  We register the    */
@@ -6436,6 +7031,7 @@ void ask_flow_offload_exit(void)
 		ask_flow_offload_registered = false;
 	}
 	ask_fe_orphan_exit();
+	ask_policy_revoke_exit();
 	xa_destroy(&ask_offload_first_seen);
 	xa_destroy(&ask_flow_owner_block);
 	/* T-M6-3: netevent notifier unregistration moved to ask_neigh_exit(). */

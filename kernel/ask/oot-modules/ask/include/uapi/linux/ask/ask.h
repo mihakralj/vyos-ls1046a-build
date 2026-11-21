@@ -105,10 +105,22 @@ enum ask_info_attr {
     ASK_INFO_ATTR_NUM_FMAN,         /* u32 */
     ASK_INFO_ATTR_NUM_FLOWS,        /* u32 currently installed */
     ASK_INFO_ATTR_MAX_FLOWS,        /* u32 budget */
+    ASK_INFO_ATTR_POLICY_EPOCH,     /* u64 monotonic policy/revocation epoch */
+    ASK_INFO_ATTR_REVOKE_STATE,     /* u8 enum ask_revoke_state */
+    ASK_INFO_ATTR_UNRESOLVED_FLOWS, /* u32 unsettled HW/orphan count */
 
     __ASK_INFO_ATTR_MAX,
 };
 #define ASK_INFO_ATTR_MAX (__ASK_INFO_ATTR_MAX - 1)
+
+/* Policy revocation completion state (ASK_INFO_ATTR_REVOKE_STATE, §3.1.1). */
+enum ask_revoke_state {
+    ASK_REVOKE_IDLE = 0,        /* no revocation in progress, no unresolved state */
+    ASK_REVOKE_FENCED = 1,      /* admission fenced, withdrawal in progress */
+    ASK_REVOKE_RETIRED = 2,     /* both directions and in-flight work settled */
+    ASK_REVOKE_CONTAINED = 3,   /* reserved: independently proven quarantine */
+    ASK_REVOKE_UNRESOLVED = 4,  /* unsettled HW/orphan state; admission fenced */
+};
 
 /* ASK_ATTR_MURAM nested attributes */
 enum ask_muram_attr {

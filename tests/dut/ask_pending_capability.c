@@ -213,13 +213,17 @@ static atomic_bool live_pppoe;
 static bool first_resolution_empty, pause_resolution, resolution_entered;
 static bool release_resolution, pause_publication, publication_entered;
 static bool release_publication;
+static bool ask_policy_epoch_is_current(u64 epoch)
+{
+	return epoch != 0;
+}
 static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 			       const struct ask_flow_key *key, u32 oif,
 			       u32 action_flags, enum ask_hw_dir dir,
-			       u64 generation)
+			       u64 generation, u64 policy_epoch)
 {
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
-	assert(t == &table && cookie && generation);
+	assert(t == &table && cookie && generation && policy_epoch);
 	if (pause_publication) {
 		assert(!pthread_mutex_lock(&event_lock));
 		publication_entered = true;
@@ -260,6 +264,7 @@ static void ask_devchg_queue(int ifindex)
 {
 	if (devchg_n < 4)
 		devchg_queued[devchg_n++] = ifindex;
+	scheduled_work++;
 }
 #define NUD_VALID 1
 #define rcu_read_lock() ((void)0)
@@ -436,7 +441,7 @@ static void enqueue(u64 cookie, u64 generation, u8 flags)
 	key.family_policy_seq = seq;
 	assert(!ask_flow_pending_enqueue(cookie, &key, 1, 0, device.ifindex,
 					 device.ifindex, 42, ASK_DIR_FWD, generation,
-					 device.ifindex, ask_pppoe_session_snapshot()));
+					 device.ifindex, ask_pppoe_session_snapshot(), 1));
 	mutex_unlock(&ask_flow_lifecycle_lock);
 }
 
@@ -818,7 +823,7 @@ static void test_queue_and_failure(void)
 	mutex_lock(&ask_flow_lifecycle_lock);
 	assert(!ask_flow_pending_enqueue(10, &key, 1, 0, device.ifindex,
 					 device.ifindex, 42, ASK_DIR_FWD, 1,
-					 device.ifindex, old_session_epoch));
+					 device.ifindex, old_session_epoch, 1));
 	mutex_unlock(&ask_flow_lifecycle_lock);
 	ask_flow_pending_poll_fn(NULL);
 	assert(!atomic_load(&publications) && !ask_flow_pending_count);
@@ -829,7 +834,7 @@ static void test_queue_and_failure(void)
 	mutex_lock(&ask_flow_lifecycle_lock);
 	assert(!ask_flow_pending_enqueue(11, &key, 1, 0, device.ifindex,
 					 device.ifindex, 42, ASK_DIR_FWD, 1,
-					 8, ask_pppoe_session_snapshot()));
+					 8, ask_pppoe_session_snapshot(), 1));
 	mutex_unlock(&ask_flow_lifecycle_lock);
 	ask_flow_pending_poll_fn(NULL);
 	assert(!atomic_load(&publications) && !ask_flow_pending_count);
