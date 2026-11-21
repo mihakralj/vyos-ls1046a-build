@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -87,10 +88,13 @@ static bool wgfp_ern_fq_ready;
 static u32 wgfp_eg_fqid[WGFP_MAX_EGRESS];
 static int wgfp_eg_ifindex[WGFP_MAX_EGRESS], wgfp_neg, wgfp_lock;
 static atomic64_t wgfp_xmit_ok, wgfp_xmit_fail, wgfp_xmit_ern;
+static atomic64_t wgfp_xmit_frame_wait_fail, wgfp_xmit_poll_wait_fail;
+static atomic64_t wgfp_xmit_invalid_egress, wgfp_xmit_orp_wait_fail;
 static atomic64_t wgfp_rx_ern __attribute__((unused));
 static int portal_refs, irq_depth, full_attempts, starts, commits;
 static int ci_updates, relaxes, dma_syncs, releases, allocations, registrations;
-static int create_error;
+static int create_error, clock_reads;
+static long long fake_now, first_enqueue_delay_ns;
 static struct qm_fd released_fd;
 
 static struct qman_portal *get_affine_portal(void)
@@ -107,6 +111,8 @@ static void put_affine_portal(void)
 static struct qm_eqcr_entry *start_entry(struct qm_portal *p)
 {
 	starts++;
+	if (starts == 1)
+		fake_now += first_enqueue_delay_ns;
 	if (full_attempts) {
 		full_attempts--;
 		return NULL;
@@ -207,10 +213,15 @@ static void dma_sync_single_for_device(struct device *dev, u64 addr,
 #ifndef likely
 #define likely(x) (x)
 #endif
-#define WGFP_XMIT_WAIT_NS 100000LL
+#define NSEC_PER_USEC 1000LL
+#define NSEC_PER_MSEC 1000000LL
 typedef long long ktime_t;
-static long long fake_now;
-static ktime_t ktime_get(void) { fake_now += 25000; return fake_now; }
+static ktime_t ktime_get(void)
+{
+	clock_reads++;
+	fake_now += 25000;
+	return fake_now;
+}
 static ktime_t ktime_add_ns(ktime_t t, long long ns) { return t + ns; }
 static int ktime_before(ktime_t a, ktime_t b) { return a < b; }
 static void cpu_relax(void)
@@ -226,6 +237,45 @@ static bool wgfp_orp_xmit(struct dpaa_wgfp_frame *f, int egress,
 
 #define DEFINE_PER_CPU(type, name) type name
 #define this_cpu_ptr(p) (p)
+#define READ_ONCE(v) (v)
+#define min_t(type, a, b) ((type)(a) < (type)(b) ? (type)(a) : (type)(b))
+#define container_of(p, type, member) ((type *)((char *)(p) - offsetof(type, member)))
+#define QM_PIRQ_DQRI 1
+
+struct napi_struct { int unused; };
+struct wgfp_cpu_napi {
+	struct napi_struct napi;
+	struct qman_portal *portal;
+};
+static bool wgfp_threaded;
+static struct dpaa_wgfp_frame poll_frame;
+static int poll_frames, poll_completed, poll_irq_rearmed;
+static long long poll_work_ns;
+
+void dpaa_wgfp_xmit(struct dpaa_wgfp_frame *f, int egress, u32 off, u32 len);
+
+static int qman_p_poll_dqrr(struct qman_portal *p, int budget)
+{
+	int i;
+
+	assert(p == &portal && poll_frames <= budget);
+	fake_now += poll_work_ns;
+	for (i = 0; i < poll_frames; i++)
+		dpaa_wgfp_xmit(&poll_frame, 0, 64, 1000 + i);
+	return poll_frames;
+}
+
+static void napi_complete_done(struct napi_struct *napi, int cleaned)
+{
+	assert(cleaned == poll_frames);
+	poll_completed++;
+}
+
+static void qman_p_irqsource_add(struct qman_portal *p, int source)
+{
+	assert(p == &portal && source == QM_PIRQ_DQRI);
+	poll_irq_rearmed++;
+}
 
 #include "qman_wgfp_body.h"
 
@@ -238,10 +288,24 @@ static void reset(void)
 	memset(wgfp_eg_ifindex, 0, sizeof(wgfp_eg_ifindex));
 	memset(&released_fd, 0, sizeof(released_fd));
 	wgfp_neg = wgfp_xmit_ok = wgfp_xmit_fail = wgfp_xmit_ern = 0;
+	wgfp_xmit_frame_wait_fail = wgfp_xmit_poll_wait_fail = 0;
+	wgfp_xmit_invalid_egress = wgfp_xmit_orp_wait_fail = 0;
 	portal_refs = irq_depth = full_attempts = starts = commits = 0;
 	ci_updates = relaxes = dma_syncs = releases = allocations = registrations = 0;
-	create_error = 0;
+	create_error = clock_reads = 0;
+	fake_now = first_enqueue_delay_ns = 0;
+	wgfp_threaded = false;
+	wgfp_tx_batch = 32;
+	poll_frames = poll_completed = poll_irq_rearmed = 0;
+	poll_work_ns = 0;
 	memset(&wgfp_txb, 0, sizeof(wgfp_txb));
+}
+
+static void check_failure_causes(void)
+{
+	assert(wgfp_xmit_fail == wgfp_xmit_frame_wait_fail +
+	       wgfp_xmit_poll_wait_fail + wgfp_xmit_invalid_egress +
+	       wgfp_xmit_orp_wait_fail + wgfp_xmit_ern);
 }
 
 static void test_ring(bool stash)
@@ -297,6 +361,9 @@ static void test_egress_and_xmit(bool stash)
 	ern.ern.fd = portal.p.entry.fd;
 	fq->cb.ern(&portal, fq, &ern);
 	assert(wgfp_xmit_ok == 1 && wgfp_xmit_fail == 1 && wgfp_xmit_ern == 1);
+	assert(wgfp_xmit_frame_wait_fail == 0 && wgfp_xmit_poll_wait_fail == 0);
+	assert(wgfp_xmit_invalid_egress == 0 && wgfp_xmit_orp_wait_fail == 0);
+	check_failure_causes();
 	assert(releases == 1 && released_fd.bpid == fd.bpid);
 	assert(released_fd.addr == fd.addr);
 
@@ -313,6 +380,9 @@ static void test_egress_and_xmit(bool stash)
 	/* 100 us at 25 us per clock read: 1 + 4 attempts, 4 relaxes, then drop */
 	assert(starts == 5 && commits == 0 && relaxes == 4);
 	assert(wgfp_xmit_ok == 0 && wgfp_xmit_fail == 1 && wgfp_xmit_ern == 0);
+	assert(wgfp_xmit_frame_wait_fail == 1 && wgfp_xmit_poll_wait_fail == 0);
+	assert(wgfp_xmit_invalid_egress == 0);
+	check_failure_causes();
 	assert(releases == 1 && released_fd.addr == fd.addr);
 	assert(portal_refs == 0 && irq_depth == 0);
 
@@ -320,6 +390,9 @@ static void test_egress_and_xmit(bool stash)
 	dpaa_wgfp_xmit(&frame, 0, 64, 1200);
 	assert(starts == 0 && dma_syncs == 0 && releases == 1);
 	assert(wgfp_xmit_fail == 1 && wgfp_xmit_ok == 0);
+	assert(wgfp_xmit_invalid_egress == 1 && wgfp_xmit_frame_wait_fail == 0);
+	assert(wgfp_xmit_poll_wait_fail == 0);
+	check_failure_causes();
 
 	reset();
 	create_error = -EINVAL;
@@ -358,11 +431,114 @@ static void test_tx_batch(void)
 	full_attempts = 8;
 	wgfp_txb_flush(&wgfp_txb);
 	assert(wgfp_xmit_fail == 1 && releases == 1 && released_fd.addr == fd.addr);
+	assert(wgfp_xmit_frame_wait_fail == 1 && wgfp_xmit_poll_wait_fail == 0);
+	check_failure_causes();
 	assert(wgfp_txb.n == 0);
 	wgfp_txb.active = false;
 	full_attempts = 0;
 	dpaa_wgfp_xmit(&frame, 0, 64, 1005);
 	assert(commits == 5 && wgfp_txb.n == 0 && wgfp_xmit_ok == 5);
+
+	reset();
+	assert(dpaa_wgfp_egress(&netdev) == 0);
+	wgfp_txb.active = true;
+	wgfp_txb.threaded = true;
+	wgfp_txb.lim = 2;
+	wgfp_txb.end = fake_now - 1;
+	full_attempts = 8;
+	dpaa_wgfp_xmit(&frame, 0, 64, 1000);
+	assert(wgfp_xmit_fail == 0 && releases == 0 && wgfp_txb.n == 1);
+	dpaa_wgfp_xmit(&frame, 0, 64, 1001);
+	assert(wgfp_xmit_fail == 2 && releases == 2 && wgfp_txb.n == 0);
+	assert(wgfp_xmit_poll_wait_fail == 2 && wgfp_xmit_frame_wait_fail == 0);
+	assert(wgfp_xmit_invalid_egress == 0);
+	check_failure_causes();
+
+	reset();
+	assert(dpaa_wgfp_egress(&netdev) == 0);
+	wgfp_txb.active = true;
+	wgfp_txb.threaded = true;
+	wgfp_txb.lim = 2;
+	wgfp_txb.end = 5000000;
+	full_attempts = 1000;
+	dpaa_wgfp_xmit(&frame, 0, 64, 1000);
+	dpaa_wgfp_xmit(&frame, 0, 64, 1001);
+	assert(starts == 203 && relaxes == 201 && clock_reads == 201);
+	assert(wgfp_xmit_fail == 2 && wgfp_xmit_poll_wait_fail == 2);
+	assert(wgfp_xmit_frame_wait_fail == 0 && releases == 2);
+	check_failure_causes();
+}
+
+static void test_nonthreaded_retry_window(void)
+{
+	struct net_device netdev = { .ifindex = 3, .name = "eth3", .dpaa = true };
+	struct device dev = { 0 };
+	struct qm_fd fd = { .bpid = 4, .addr = 0x4000 };
+	struct dpaa_wgfp_frame frame = { .fd = &fd, .dev = &dev, .addr = fd.addr };
+
+	reset();
+	assert(dpaa_wgfp_egress(&netdev) == 0);
+	first_enqueue_delay_ns = 200000;
+	full_attempts = 8;
+	dpaa_wgfp_xmit(&frame, 0, 64, 1000);
+	assert(starts == 5 && relaxes == 4 && clock_reads == 5);
+	assert(wgfp_xmit_frame_wait_fail == 1 && wgfp_xmit_fail == 1);
+	assert(releases == 1 && released_fd.addr == fd.addr);
+	check_failure_causes();
+
+	reset();
+	assert(dpaa_wgfp_egress(&netdev) == 0);
+	dpaa_wgfp_xmit(&frame, 0, 64, 1000);
+	assert(starts == 1 && commits == 1 && clock_reads == 0);
+}
+
+static void test_poll_deadline_after_callback_work(void)
+{
+	struct net_device netdev = { .ifindex = 3, .name = "eth3", .dpaa = true };
+	struct device dev = { 0 };
+	struct qm_fd fd = { .bpid = 4, .addr = 0x4000 };
+	struct wgfp_cpu_napi cpu = { .portal = &portal };
+	struct dpaa_wgfp_frame frame = { .fd = &fd, .dev = &dev, .addr = fd.addr };
+
+	reset();
+	assert(dpaa_wgfp_egress(&netdev) == 0);
+	wgfp_threaded = true;
+	wgfp_tx_batch = 3;
+	poll_frame = frame;
+	poll_frames = 2;
+	poll_work_ns = 5 * NSEC_PER_MSEC + 1;
+	full_attempts = 1000;
+	assert(wgfp_cpu_poll(&cpu.napi, 64) == 2);
+	assert(starts == 4 && relaxes == 2 && clock_reads == 3);
+	assert(wgfp_xmit_poll_wait_fail == 2 && wgfp_xmit_fail == 2);
+	assert(releases == 2 && !wgfp_txb.active);
+	assert(poll_completed == 1 && poll_irq_rearmed == 1);
+	check_failure_causes();
+
+	reset();
+	assert(dpaa_wgfp_egress(&netdev) == 0);
+	wgfp_threaded = true;
+	wgfp_tx_batch = 3;
+	poll_frame = frame;
+	poll_frames = 2;
+	poll_work_ns = 5 * NSEC_PER_MSEC + 1;
+	assert(wgfp_cpu_poll(&cpu.napi, 64) == 2);
+	assert(starts == 2 && commits == 2 && clock_reads == 1);
+	assert(wgfp_xmit_ok == 2 && wgfp_xmit_fail == 0 && releases == 0);
+
+	reset();
+	assert(dpaa_wgfp_egress(&netdev) == 0);
+	wgfp_threaded = true;
+	wgfp_tx_batch = 1;
+	poll_frame = frame;
+	poll_frames = 2;
+	poll_work_ns = 5 * NSEC_PER_MSEC + 1;
+	full_attempts = 1000;
+	assert(wgfp_cpu_poll(&cpu.napi, 64) == 2);
+	assert(starts == 10 && relaxes == 8 && clock_reads == 11);
+	assert(wgfp_xmit_frame_wait_fail == 2 && wgfp_xmit_poll_wait_fail == 0);
+	assert(wgfp_xmit_fail == 2 && releases == 2);
+	check_failure_causes();
 }
 
 int main(void)
@@ -372,6 +548,8 @@ int main(void)
 	test_egress_and_xmit(false);
 	test_egress_and_xmit(true);
 	test_tx_batch();
+	test_nonthreaded_retry_window();
+	test_poll_deadline_after_callback_work();
 	puts("QMan backpressure and WGFP egress ownership: OK");
 	return 0;
 }

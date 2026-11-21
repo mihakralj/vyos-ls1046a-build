@@ -1,0 +1,239 @@
+// SPDX-License-Identifier: GPL-2.0
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef int64_t atomic64_t;
+
+#define ETH_HLEN 14
+#define VLAN_HLEN 4
+#define VLAN_ETH_HLEN 18
+#define CHECKSUM_NONE 0
+#define ETH_P_IP 0x0800
+#define ETH_P_IPV6 0x86dd
+#define ETH_P_8021Q 0x8100
+#define ETH_P_8021AD 0x88a8
+#define DMA_FROM_DEVICE 2
+#define WGFP_MAX_EGRESS 8
+#define unlikely(x) (x)
+#define likely(x) (x)
+#define atomic64_inc(p) (++*(p))
+#define dpaa_wgfp_stat_inc(p) atomic64_inc(p)
+#define rcu_read_lock() ((void)0)
+#define rcu_read_unlock() ((void)0)
+#define rcu_dereference(p) (p)
+#define smp_load_acquire(p) (*(p))
+#define ntohs(x) __builtin_bswap16(x)
+
+struct device { int unused; };
+struct net_device {
+	const char *name;
+	bool running;
+};
+struct ethhdr {
+	u8 h_dest[6], h_source[6];
+	u16 h_proto;
+};
+struct vlan_hdr {
+	u16 h_vlan_TCI;
+	u16 h_vlan_encapsulated_proto;
+};
+struct iphdr {
+	u8 version_ihl;
+	u8 unused[19];
+} __attribute__((packed));
+#define ihl version_ihl
+struct ipv6hdr {
+	u8 bytes[40];
+};
+struct sk_buff {
+	struct net_device *dev;
+	u8 *data;
+	u8 *mac;
+	int network_header, transport_header;
+	unsigned int len;
+	u16 protocol;
+	u8 ip_summed;
+	u8 storage[4096];
+};
+struct dpaa_wgfp_frame {
+	u8 *buf;
+	unsigned long addr;
+	struct device *dev;
+	u32 buf_size;
+	const void *fd;
+};
+
+static struct net_device *wgfp_eg_dev[WGFP_MAX_EGRESS];
+static int wgfp_neg;
+static atomic64_t wgfp_xmit_ok, wgfp_xmit_fail;
+static atomic64_t wgfp_xmit_invalid_egress, wgfp_xmit_frame_wait_fail;
+static atomic64_t wgfp_xmit_poll_wait_fail, wgfp_xmit_orp_wait_fail;
+static atomic64_t wgfp_xmit_ern;
+static int releases, submissions, consumes, alloc_fail, queue_result;
+static bool release_before_submit;
+static int dma_syncs;
+
+static void dpaa_wgfp_fd_release(const void *fd)
+{
+	(void)fd;
+	releases++;
+}
+
+static struct sk_buff *netdev_alloc_skb(struct net_device *dev, u32 len)
+{
+	static struct sk_buff skb;
+
+	if (alloc_fail)
+		return NULL;
+	assert(len <= sizeof(skb.storage));
+	memset(&skb, 0, sizeof(skb));
+	skb.dev = dev;
+	skb.data = skb.storage + 64;
+	skb.mac = skb.data;
+	return &skb;
+}
+
+static void skb_put_data(struct sk_buff *skb, const void *src, u32 len)
+{
+	memcpy(skb->data, src, len);
+	skb->len = len;
+}
+
+static void skb_reset_mac_header(struct sk_buff *skb)
+{
+	skb->mac = skb->data;
+}
+
+static void skb_set_network_header(struct sk_buff *skb, int off)
+{
+	skb->network_header = off;
+}
+
+static void skb_set_transport_header(struct sk_buff *skb, int off)
+{
+	skb->transport_header = off;
+}
+
+static const struct ethhdr *eth_hdr(const struct sk_buff *skb)
+{
+	return (const struct ethhdr *)skb->mac;
+}
+
+static void dma_sync_single_for_device(struct device *dev, unsigned long addr,
+				       u32 len, int direction)
+{
+	assert(dev && addr && len == 256 && direction == DMA_FROM_DEVICE);
+	dma_syncs++;
+}
+
+static bool netif_running(const struct net_device *dev)
+{
+	return dev->running;
+}
+
+static int dev_queue_xmit(struct sk_buff *skb)
+{
+	assert(skb->dev);
+	release_before_submit = releases == 1;
+	submissions++;
+	consumes++;
+	return queue_result;
+}
+
+static int settles;
+static void wgfp_orp_settle_after_skb(void)
+{
+	settles++;
+}
+
+#include "wgfp_xmit_body.h"
+
+static void reset(void)
+{
+	memset(wgfp_eg_dev, 0, sizeof(wgfp_eg_dev));
+	wgfp_neg = releases = submissions = consumes = alloc_fail = queue_result = 0;
+	release_before_submit = false;
+	settles = 0;
+	dma_syncs = 0;
+	wgfp_xmit_ok = wgfp_xmit_fail = wgfp_xmit_invalid_egress = 0;
+	wgfp_xmit_frame_wait_fail = wgfp_xmit_poll_wait_fail = 0;
+	wgfp_xmit_orp_wait_fail = wgfp_xmit_ern = 0;
+}
+
+static void prepare_frame(struct dpaa_wgfp_frame *frame, u8 *buffer)
+{
+	struct ethhdr *eth = (struct ethhdr *)buffer;
+
+	memset(buffer, 0xa5, 256);
+	memset(eth->h_dest, 1, 6);
+	memset(eth->h_source, 2, 6);
+	eth->h_proto = ntohs(ETH_P_IP);
+	frame->buf = buffer;
+	frame->addr = (unsigned long)buffer;
+	frame->dev = (struct device *)(buffer + 128);
+	frame->buf_size = 256;
+	frame->fd = buffer;
+}
+
+int main(void)
+{
+	struct net_device dev = { .name = "eth3", .running = true };
+	struct dpaa_wgfp_frame frame;
+	u8 buffer[256];
+
+	reset();
+	prepare_frame(&frame, buffer);
+	wgfp_eg_dev[0] = &dev;
+	wgfp_neg = 1;
+	dpaa_wgfp_xmit(&frame, 0, 0, 64);
+	assert(releases == 1 && submissions == 1 && consumes == 1);
+	assert(release_before_submit && wgfp_xmit_ok == 1 && settles == 1);
+	assert(dma_syncs == 1);
+
+	reset();
+	prepare_frame(&frame, buffer);
+	wgfp_eg_dev[0] = &dev;
+	wgfp_neg = 1;
+	alloc_fail = 1;
+	dpaa_wgfp_xmit(&frame, 0, 0, 64);
+	assert(releases == 1 && submissions == 0 && consumes == 0);
+	assert(wgfp_xmit_fail == 1 && settles == 1);
+	assert(dma_syncs == 1);
+
+	reset();
+	prepare_frame(&frame, buffer);
+	wgfp_eg_dev[0] = &dev;
+	wgfp_neg = 1;
+	dev.running = false;
+	dpaa_wgfp_xmit(&frame, 0, 0, 64);
+	assert(releases == 1 && submissions == 0 && wgfp_xmit_fail == 1);
+	dev.running = true;
+
+	reset();
+	prepare_frame(&frame, buffer);
+	dpaa_wgfp_xmit(&frame, 0, 0, 64);
+	assert(releases == 1 && submissions == 0 && wgfp_xmit_invalid_egress == 1);
+
+	reset();
+	prepare_frame(&frame, buffer);
+	dpaa_wgfp_xmit(&frame, 0, 255, 2);
+	assert(releases == 1 && submissions == 0 && wgfp_xmit_invalid_egress == 1);
+
+	reset();
+	prepare_frame(&frame, buffer);
+	wgfp_eg_dev[0] = &dev;
+	wgfp_neg = 1;
+	queue_result = 1;
+	dpaa_wgfp_xmit(&frame, 0, 0, 64);
+	assert(releases == 1 && submissions == 1 && consumes == 1);
+	assert(wgfp_xmit_ok == 0 && wgfp_xmit_fail == 1);
+
+	puts("WGFP skb TX ownership: OK");
+	return 0;
+}

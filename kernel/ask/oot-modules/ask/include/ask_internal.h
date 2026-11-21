@@ -119,10 +119,19 @@ void ask_hw_exit(void);
 int  ask_hw_offload_engage(u8 hw_port_id);
 int  ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
 				bool if_engaged, u8 family_mask);
+int ask_hw_offload_role_prepare(u8 hw_port_id,
+				enum fman_pcd_fe_profile profile,
+				bool if_engaged, u8 *family_mask,
+				bool *detached, u64 *policy_seq,
+				u64 expected_policy_seq);
+int ask_hw_offload_role_commit(u8 hw_port_id,
+			       enum fman_pcd_fe_profile profile,
+			       u8 family_mask, u64 policy_seq);
 int  ask_hw_b2_l2_engage(const char *ifname);
 int  ask_hw_b2_l2_record(const char *iifname, const u8 *key,
 			 const char *oifname, bool add);
 int ask_hw_offload_disengage(u8 hw_port_id);
+int ask_hw_offload_disengage_admin(u8 hw_port_id);
 void ask_hw_offload_set_family(u8 hw_port_id, u8 family_mask);
 unsigned long ask_hw_get_enq_fe_off(void);
 /* T-M6-2 B3a bridge helpers (ask_hw.c). */
@@ -462,6 +471,7 @@ bool ask_hw_nat66_offload_armed(void);
  * serve callers with no ingress port in hand (capability advertise, intent-lower
  * pre-check, bridge observer log).
  */
+bool ask_hw_is_ready(void);
 bool ask_hw_vlan_offload_armed_port(u8 hw_port_id);
 bool ask_hw_bridge_vlan_armed_port(u8 hw_port_id);
 bool ask_vlan_push_only_enabled(void);
@@ -471,6 +481,8 @@ bool ask_hw_pppoe_offload_armed(void);
 bool ask_hw_pppoe_offload_armed_port(u8 hw_port_id);
 int  ask_flow_vlan_flush(void);
 int  ask_flow_pppoe_flush_sync(void);
+int  ask_flow_nat44_flush(void);
+int  ask_flow_nat66_flush(void);
 int  ask_bridge_vlan_flush(void);
 int  ask_bridge_flush_all(void);
 void ask_bridge_vlan_pause(void);
@@ -499,6 +511,11 @@ extern const struct nla_policy ask_flow_policy[];
 extern const struct nla_policy ask_sa_policy[];
 extern const struct nla_policy ask_event_policy[];
 extern const struct nla_policy ask_policer_policy[];
+extern const struct nla_policy ask_no_attr_policy[];
+extern const struct nla_policy ask_get_flow_op_policy[];
+extern const struct nla_policy ask_set_policer_op_policy[];
+extern const struct nla_policy ask_engage_op_policy[];
+extern const struct nla_policy ask_disengage_op_policy[];
 
 /* ------------------------------------------------------------------------- */
 /* ask_flow.c — software flow table (rhashtable + RCU)                        */
@@ -1269,7 +1286,7 @@ void ask_fe_build_key_dual(const struct ask_flow_key *key,
 			   u8 k[ASK_FE_KEY_SIZE_DUAL]);
 
 void ask_flow_neigh_resolved(struct net_device *dev, __be32 dst_ip);
-void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
+bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
        u8 l3_proto, const u8 *new_mac);
 
 /* ------------------------------------------------------------------------- */

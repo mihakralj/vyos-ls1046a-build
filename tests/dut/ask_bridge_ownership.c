@@ -401,6 +401,7 @@ static void ask_bridge_admit(const struct ask_bridge_cand *candidate)
 {
 	candidate_admits++;
 }
+static void ask_bridge_reconcile_roles(void) {}
 
 #include "bridge_work.h"
 #include "bridge_age.h"

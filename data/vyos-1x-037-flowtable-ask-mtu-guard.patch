@@ -1,22 +1,17 @@
 
 diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
-index cc58ead..da385b0 100755
+index 45837ba8b7f1128a5d543ff25bf9cdfebcfb0f38..05e7de9fcfe2d09598456213e6387c537cd3b15e 100644
 --- a/src/conf_mode/firewall.py
 +++ b/src/conf_mode/firewall.py
-@@ -511,6 +511,32 @@ def verify_hardware_offload(ifname):
+@@ -525,6 +525,27 @@ def verify_hardware_offload(ifname):
      if not enabled and fixed:
          raise ConfigError(f'Interface "{ifname}" does not support hardware offload')
  
-+    # LS1046A ASK2 (2026-08-21): a hardware flowtable engages FMan FE
-+    # forwarding, bounded to the order-0 RX buffer's conservative MTU range
-+    # (1280..3600). The DPAA1 RX pool is one contiguous 4 KiB order-0 page
-+    # (F-222); frames above the ceiling overrun the one-buffer FMan RX contract
-+    # (cold-boot-only recovery), and below the floor is untested. Arming a
-+    # hardware flowtable on an interface whose MTU is outside this range can
-+    # brick connectivity remotely. Read the authoritative live MTU from sysfs
-+    # and fail closed outside [ASK_FT_MTU_MIN, ASK_FT_MTU_MAX]. The default
-+    # 1500 is inside the range, so standard interfaces pass. Widen once a
-+    # larger range is validated on the FMan RX pool.
++    # The hardware flowtable guard permits live MTUs 1280..9000. Selected
++    # routed FE tests at MTU 9000 passed, but not all jumbo scenarios have
++    # been verified; WireGuard fastpath scatter-gather frames can be dropped.
++    # CPU RX scatter-gather assembly and FE forwarding are separate paths.
++    # An unreadable or invalid sysfs MTU skips this check (fail open).
 +    ASK_FT_MTU_MIN = 1280
 +    ASK_FT_MTU_MAX = 9000
 +    mtu_path = f'/sys/class/net/{ifname}/mtu'
@@ -29,7 +24,7 @@ index cc58ead..da385b0 100755
 +        raise ConfigError(
 +            f'Interface "{ifname}" hardware flowtable offload requires MTU '
 +            f'between {ASK_FT_MTU_MIN} and {ASK_FT_MTU_MAX} (live MTU {mtu} '
-+            f'is outside the validated range and can wedge the FMan RX path). '
++            f'is outside the configured range). '
 +            f'Set a supported MTU before enabling "offload hardware".'
 +        )
 +

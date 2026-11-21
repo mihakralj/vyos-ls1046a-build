@@ -111,7 +111,7 @@ int main(void)
 def test_unregister_excludes_register_until_grace_period_ends(tmp_path):
     source = SOURCE.read_text()
     start = source.index("int dpaa_wgfp_register(")
-    end = source.index("\nstatic void wgfp_egress_ern(", start)
+    end = source.index("\nstatic void wgfp_rx_ern_cb(", start)
     (tmp_path / "wgfp_register_body.h").write_text(source[start:end])
     harness = tmp_path / "harness.c"
     harness.write_text(REGISTER_HARNESS)

@@ -93,105 +93,100 @@ int            err;
 int ask_genl_dump_one_cb(struct ask_flow *f, void *arg);
 
 /* ------------------------------------------------------------------------- */
-/* small_ops table                                                            */
+/* Per-op generic-netlink dispatch table (ASK2-MASTER-PLAN §4.7).            */
 /*                                                                            */
-/* PR5 (M1.1) wires every UAPI command. ASK_CMD_GET_INFO is the only one     */
-/* with a real handler; the other seven dispatch to ask_genl_eopnotsupp_*    */
-/* which logs "command N not yet supported" once per cmd via printk          */
-/* ratelimit and returns -EOPNOTSUPP. Benefit over leaving them out of       */
-/* small_ops (and letting genl core return -EOPNOTSUPP silently) is twofold: */
-/*   1. `genl ctrl-list -f ask` enumerates all 8 ops, so userspace tooling   */
-/*      (askd, ask-cli) can introspect what this driver build claims to      */
-/*      support without trial-and-error round-trips.                         */
-/*   2. dmesg gets a one-shot breadcrumb the first time askd asks for an     */
-/*      unsupported command — the diagnostic surface a developer wants when  */
-/*      bringing up a partial build.                                         */
-/*                                                                          */
-/* Each later PR replaces the eopnotsupp doit/dumpit pointers with real      */
-/* handlers as the corresponding subsystem lands (PR7: DUMP_FLOWS /          */
-/* GET_FLOW / FLUSH_FLOWS, PR16a: DUMP_SAS / FLUSH_SAS, the policer PR:      */
-/* SET_POLICER, the muram PR: GET_MURAM).                                   */
+/* Full genl_ops with per-op .policy / .maxattr under strict validation      */
+/* (.validate = 0) so each command validates against its own attribute set   */
+/* rather than sharing one family policy.                                    */
 /* ------------------------------------------------------------------------- */
-static const struct genl_small_ops ask_genl_small_ops[] = {
-{
-.cmd      = ASK_CMD_GET_INFO,
-.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_ADMIN_PERM,
-.doit     = ask_genl_get_info_doit,
-},
-{
-.cmd      = ASK_CMD_GET_MURAM,
-.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_ADMIN_PERM,
-.doit     = ask_genl_get_muram_doit,
-},
-{
-.cmd      = ASK_CMD_DUMP_FLOWS,
-.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_ADMIN_PERM,
-.dumpit   = ask_genl_dump_flows_dumpit,
-},
-{
-.cmd      = ASK_CMD_GET_FLOW,
-.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_ADMIN_PERM,
-.doit     = ask_genl_get_flow_doit,
-},
-{
-.cmd      = ASK_CMD_DUMP_SAS,
-.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_ADMIN_PERM,
-.dumpit   = ask_genl_eopnotsupp_dumpit,
-},
-{
-.cmd      = ASK_CMD_FLUSH_FLOWS,
-.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_ADMIN_PERM,
-.doit     = ask_genl_flush_flows_doit,
-},
-{
-.cmd      = ASK_CMD_FLUSH_SAS,
-.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_ADMIN_PERM,
-.doit     = ask_genl_eopnotsupp_doit,
-},
-{
-.cmd      = ASK_CMD_SET_POLICER,
-.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_ADMIN_PERM,
-.doit     = ask_genl_set_policer_doit,
-},
-{
-.cmd      = ASK_CMD_ENGAGE,
-.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_ADMIN_PERM,
-.doit     = ask_genl_engage_doit,
-},
-{
-.cmd      = ASK_CMD_DISENGAGE,
-.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
-.flags    = GENL_ADMIN_PERM,
-.doit     = ask_genl_disengage_doit,
-},
+static const struct genl_ops ask_genl_ops[] = {
+	{
+		.cmd     = ASK_CMD_GET_INFO,
+		.flags   = GENL_ADMIN_PERM,
+		.policy  = ask_no_attr_policy,
+		.maxattr = 1,
+		.doit    = ask_genl_get_info_doit,
+	},
+	{
+		.cmd     = ASK_CMD_GET_MURAM,
+		.flags   = GENL_ADMIN_PERM,
+		.policy  = ask_no_attr_policy,
+		.maxattr = 1,
+		.doit    = ask_genl_get_muram_doit,
+	},
+	{
+		.cmd     = ASK_CMD_DUMP_FLOWS,
+		.flags   = GENL_ADMIN_PERM,
+		.policy  = ask_no_attr_policy,
+		.maxattr = 1,
+		.dumpit  = ask_genl_dump_flows_dumpit,
+	},
+	{
+		.cmd     = ASK_CMD_GET_FLOW,
+		.flags   = GENL_ADMIN_PERM,
+		.policy  = ask_get_flow_op_policy,
+		.maxattr = ASK_ATTR_FLOW,
+		.doit    = ask_genl_get_flow_doit,
+	},
+	{
+		.cmd     = ASK_CMD_DUMP_SAS,
+		.flags   = GENL_ADMIN_PERM,
+		.policy  = ask_no_attr_policy,
+		.maxattr = 1,
+		.dumpit  = ask_genl_eopnotsupp_dumpit,
+	},
+	{
+		.cmd     = ASK_CMD_FLUSH_FLOWS,
+		.flags   = GENL_ADMIN_PERM,
+		.policy  = ask_no_attr_policy,
+		.maxattr = 1,
+		.doit    = ask_genl_flush_flows_doit,
+	},
+	{
+		.cmd     = ASK_CMD_FLUSH_SAS,
+		.flags   = GENL_ADMIN_PERM,
+		.policy  = ask_no_attr_policy,
+		.maxattr = 1,
+		.doit    = ask_genl_eopnotsupp_doit,
+	},
+	{
+		.cmd     = ASK_CMD_SET_POLICER,
+		.flags   = GENL_ADMIN_PERM,
+		.policy  = ask_set_policer_op_policy,
+		.maxattr = ASK_ATTR_POLICER,
+		.doit    = ask_genl_set_policer_doit,
+	},
+	{
+		.cmd     = ASK_CMD_ENGAGE,
+		.flags   = GENL_ADMIN_PERM,
+		.policy  = ask_engage_op_policy,
+		.maxattr = ASK_ATTR_FAMILY_MASK,
+		.doit    = ask_genl_engage_doit,
+	},
+	{
+		.cmd     = ASK_CMD_DISENGAGE,
+		.flags   = GENL_ADMIN_PERM,
+		.policy  = ask_disengage_op_policy,
+		.maxattr = ASK_ATTR_PORT_ID,
+		.doit    = ask_genl_disengage_doit,
+	},
 };
 
 /* ------------------------------------------------------------------------- */
 /* genl_family                                                                */
 /* ------------------------------------------------------------------------- */
 static struct genl_family ask_genl_family __ro_after_init = {
-.hdrsize       = 0,
-.name          = ASK_GENL_NAME,
-.version       = ASK_GENL_VERSION,
-.maxattr       = ASK_ATTR_MAX,
-.policy        = ask_top_policy,
-.netnsok       = false,
-.parallel_ops  = false,
-.module        = THIS_MODULE,
-.small_ops     = ask_genl_small_ops,
-.n_small_ops   = ARRAY_SIZE(ask_genl_small_ops),
-.resv_start_op = ASK_CMD_DISENGAGE + 1,
-.mcgrps        = ask_mcgrps,
-.n_mcgrps      = ARRAY_SIZE(ask_mcgrps),
+	.hdrsize       = 0,
+	.name          = ASK_GENL_NAME,
+	.version       = ASK_GENL_VERSION,
+	.netnsok       = false,
+	.parallel_ops  = false,
+	.module        = THIS_MODULE,
+	.ops           = ask_genl_ops,
+	.n_ops         = ARRAY_SIZE(ask_genl_ops),
+	.resv_start_op = ASK_CMD_DISENGAGE + 1,
+	.mcgrps        = ask_mcgrps,
+	.n_mcgrps      = ARRAY_SIZE(ask_mcgrps),
 };
 
 /* ------------------------------------------------------------------------- */
@@ -435,28 +430,31 @@ static int ask_genl_set_policer_doit(struct sk_buff *skb, struct genl_info *info
 	struct fman_pcd *pcd;
 	struct nlattr *nest;
 	struct nlattr *tb[ASK_POLICER_ATTR_MAX + 1];
+	struct nlattr **attrs;
 	u8 port_id;
 	u32 rate_bps;
 	u32 burst_bytes;
 	int rc;
 
 	nest = info->attrs[ASK_ATTR_POLICER];
-	if (!nest)
+	if (nest) {
+		rc = nla_parse_nested(tb, ASK_POLICER_ATTR_MAX, nest,
+				      ask_policer_policy, info->extack);
+		if (rc)
+			return rc;
+		attrs = tb;
+	} else {
+		attrs = info->attrs;
+	}
+
+	if (!attrs[ASK_POLICER_ATTR_PORT_ID] ||
+	    !attrs[ASK_POLICER_ATTR_RATE_BPS] ||
+	    !attrs[ASK_POLICER_ATTR_BURST_BYTES])
 		return -EINVAL;
 
-	rc = nla_parse_nested(tb, ASK_POLICER_ATTR_MAX, nest, ask_policer_policy,
-			      info->extack);
-	if (rc)
-		return rc;
-
-	if (!tb[ASK_POLICER_ATTR_PORT_ID] ||
-	    !tb[ASK_POLICER_ATTR_RATE_BPS] ||
-	    !tb[ASK_POLICER_ATTR_BURST_BYTES])
-		return -EINVAL;
-
-	port_id   = nla_get_u8(tb[ASK_POLICER_ATTR_PORT_ID]);
-	rate_bps  = nla_get_u32(tb[ASK_POLICER_ATTR_RATE_BPS]);
-	burst_bytes = nla_get_u32(tb[ASK_POLICER_ATTR_BURST_BYTES]);
+	port_id     = nla_get_u8(attrs[ASK_POLICER_ATTR_PORT_ID]);
+	rate_bps    = nla_get_u32(attrs[ASK_POLICER_ATTR_RATE_BPS]);
+	burst_bytes = nla_get_u32(attrs[ASK_POLICER_ATTR_BURST_BYTES]);
 
 	fman = ask_hw_get_fman();
 	pcd = fman ? fman_get_pcd(fman) : NULL;
@@ -768,6 +766,10 @@ int ask_genl_get_flow_cookie(const struct nlmsghdr *nlh, struct nlattr **attrs,
 	if (!nlh || !attrs || !cookie)
 		return -EINVAL;
 
+	if (attrs[ASK_FLOW_ATTR_ID] && attrs[ASK_ATTR_FLOW]) {
+		NL_SET_ERR_MSG(extack, "get-flow accepts either id or nested flow, not both");
+		return -EINVAL;
+	}
 	if (attrs[ASK_FLOW_ATTR_ID]) {
 		rc = nlmsg_parse_deprecated(nlh, GENL_HDRLEN, flow_tb,
 					    ASK_FLOW_ATTR_MAX,
@@ -929,7 +931,9 @@ return -EINVAL;
 
 port_id = nla_get_u8(port_attr);
 
-rc = ask_hw_offload_disengage(port_id);
+rtnl_lock();
+rc = ask_hw_offload_disengage_admin(port_id);
+rtnl_unlock();
 if (rc)
 return rc;
 

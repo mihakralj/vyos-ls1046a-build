@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch pending VyOS status LED reconciliation
+
+[Path]
+PathChanged=/run/vyos-led-pending
+Unit=vyos-led-reconcile.service
+
+[Install]
+WantedBy=multi-user.target

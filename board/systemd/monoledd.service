@@ -11,6 +11,7 @@ ConditionPathExists=/proc/device-tree/compatible
 
 [Service]
 Type=simple
+ExecCondition=/usr/bin/python3 /usr/libexec/vyos/conf_mode/system_hardware_led.py --auto-allowed
 ExecStart=/usr/local/bin/monoledd
 Restart=on-failure
 RestartSec=5

@@ -158,6 +158,21 @@ static bool ask_bridge_blocking_registered;
 static bool ask_bridge_netdev_registered;
 static bool ask_bridge_hook_registered;
 
+struct ask_bridge_role_state {
+	bool pending;
+	bool linking;
+	int dev_ifindex;
+	int upper_ifindex;
+	u64 generation;
+	u64 policy_seq;
+	u8 family_mask;
+	enum fman_pcd_fe_profile profile;
+};
+
+static struct ask_bridge_role_state ask_bridge_role[256];
+static u64 ask_bridge_role_generation;
+static void ask_bridge_reconcile_roles(void);
+
 /* F-255 L2 key: DA(6) | SA(6) | TCI(2) | EtherType(2), MSB-first (plan
  * §13.32). @tci is the frame's first VLAN TCI, 0 when untagged. */
 void ask_bridge_key(u8 *key, const u8 *da, const u8 *sa, u16 tci,
@@ -267,7 +282,7 @@ enum fman_pcd_fe_profile ask_bridge_port_profile(struct net_device *dev)
 static bool ask_bridge_member_ok(struct net_device *dev,
 				 struct net_device *br, u8 *port)
 {
-	return netif_is_bridge_port(dev) &&
+	return READ_ONCE(ask_bridge_ready) && netif_is_bridge_port(dev) &&
 	       netdev_master_upper_dev_get(dev) == br &&
 	       !ask_hw_dev_port(dev, port) && ask_hw_port_is_l2(*port) &&
 	       br_port_get_stp_state(dev) == BR_STATE_FORWARDING &&
@@ -334,7 +349,7 @@ static bool ask_bridge_flow_ok(int br_ifindex, int in_ifindex, int out_ifindex,
 	bool vif = false;
 	u8 eport;
 
-	if (!ask_hw_bridge_offload_armed() ||
+	if (!READ_ONCE(ask_bridge_ready) || !ask_hw_bridge_offload_armed() ||
 	    !br || !in || !out || in == out || !netif_is_bridge_master(br) ||
 	    br_vlan_enabled(br) != filtering ||
 	    !ask_bridge_member_ok(in, br, iport) ||
@@ -702,6 +717,7 @@ static void ask_bridge_work_fn(struct work_struct *w)
 
 	rtnl_lock();
 	mutex_lock(&ask_bridge_lock);
+	ask_bridge_reconcile_roles();
 	if (!ask_bridge_vlan_paused) {
 		spin_lock_bh(&ask_bridge_cand_lock);
 		n = ask_bridge_n_cand;
@@ -911,31 +927,160 @@ static struct notifier_block ask_bridge_blocking_nb = {
 };
 
 /*
+ * Withdraw records for one ingress before its FE profile is detached.  A
+ * failed delete stays listed and vetoes the upper-device change: asking FMan
+ * to switch profiles with an uncertain bridge owner is never safe.
+ */
+static int ask_bridge_port_quiesce(u8 hw_port_id)
+{
+	struct ask_bridge_rec *r, *tmp;
+	int rc = 0;
+
+	ASSERT_RTNL();
+	mutex_lock(&ask_bridge_lock);
+	list_for_each_entry(r, &ask_bridge_recs, node) {
+		if (r->port == hw_port_id && r->unsettled && !r->dead) {
+			rc = -EBUSY;
+			goto out;
+		}
+	}
+	list_for_each_entry_safe(r, tmp, &ask_bridge_recs, node) {
+		if (r->port != hw_port_id)
+			continue;
+		rc = ask_bridge_rec_del(r);
+		if (rc)
+			break;
+	}
+out:
+	mutex_unlock(&ask_bridge_lock);
+	return rc;
+}
+
+/*
+ * Reconcile a generated PRECHANGEUPPER detachment.  If another notifier
+ * vetoed the topology change, this restores the profile of the live
+ * membership; otherwise it completes the requested profile.  A commit
+ * failure leaves the generation pending and admission closed.
+ */
+static void ask_bridge_reconcile_roles(void)
+{
+	unsigned int port_id;
+
+	ASSERT_RTNL();
+	for (port_id = 0; port_id < ARRAY_SIZE(ask_bridge_role); port_id++) {
+		struct ask_bridge_role_state *state = &ask_bridge_role[port_id];
+		struct net_device *dev;
+		enum fman_pcd_fe_profile profile;
+		int rc;
+
+		if (!state->pending)
+			continue;
+		dev = __dev_get_by_index(&init_net, state->dev_ifindex);
+		if (!dev) {
+			ask_pr_err("bridge: role generation %llu port 0x%02x has no device; admission remains closed\n",
+				   state->generation, port_id);
+			continue;
+		}
+		profile = ask_bridge_port_profile(dev);
+		rc = ask_hw_offload_role_commit(port_id, profile,
+						state->family_mask,
+						state->policy_seq);
+		if (rc) {
+			ask_pr_err("bridge: role generation %llu port 0x%02x reconcile failed: %d\n",
+				   state->generation, port_id, rc);
+			continue;
+		}
+		ask_pr_info("bridge: role generation %llu port 0x%02x reconciled to profile %d\n",
+			    state->generation, port_id, profile);
+		state->pending = false;
+	}
+}
+
+/*
  * netdevice chain (rtnl held): a bridge join or leave switches an engaged
  * port's role (D1); any upper change (VLAN vifs included) can change which
  * records are valid.
  */
+static int ask_bridge_role_prechange(struct net_device *dev,
+				     struct netdev_notifier_changeupper_info *info)
+{
+	struct ask_bridge_role_state *state;
+	enum fman_pcd_fe_profile profile;
+	u8 port, family = 0;
+	u64 policy_seq;
+	bool detached = false;
+	int rc;
+
+	if (!info->upper_dev || !netif_is_bridge_master(info->upper_dev) ||
+	    ask_hw_dev_port(dev, &port))
+		return NOTIFY_OK;
+	profile = ask_bridge_profile_for(info->linking ?
+					 info->upper_dev : NULL);
+
+	/*
+	 * Leaving while L2-owned records exist requires identified withdrawal
+	 * before FMan can prove the FE detached.  Join has no bridge records yet.
+	 */
+	if (!info->linking) {
+		rc = ask_bridge_port_quiesce(port);
+		if (rc)
+			goto veto;
+	}
+	rc = ask_hw_offload_role_prepare(port, profile, true, &family,
+					 &detached, &policy_seq, 0);
+	if (rc)
+		goto veto;
+	if (!detached)
+		return NOTIFY_OK;
+
+	state = &ask_bridge_role[port];
+	state->pending = true;
+	state->linking = info->linking;
+	state->dev_ifindex = dev->ifindex;
+	state->upper_ifindex = info->upper_dev->ifindex;
+	state->family_mask = family;
+	state->profile = profile;
+	state->policy_seq = policy_seq;
+	state->generation = ++ask_bridge_role_generation;
+	ask_bridge_kick();
+	return NOTIFY_OK;
+
+veto:
+	ask_pr_err("bridge: veto %s %s %s: FE role prechange failed: %d\n",
+		   netdev_name(dev), info->linking ? "join" : "leave",
+		   netdev_name(info->upper_dev), rc);
+	return notifier_from_errno(rc);
+}
+
 static int ask_bridge_netdev_notifier(struct notifier_block *nb,
 				      unsigned long event, void *ptr)
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	struct netdev_notifier_changeupper_info *info = ptr;
+	struct ask_bridge_role_state *state;
 	u8 port;
 	int rc;
 
+	if (event == NETDEV_PRECHANGEUPPER)
+		return ask_bridge_role_prechange(dev, info);
 	if (event != NETDEV_CHANGEUPPER)
 		return NOTIFY_DONE;
 	if (info->upper_dev && netif_is_bridge_master(info->upper_dev) &&
 	    !ask_hw_dev_port(dev, &port)) {
-		rc = ask_hw_offload_engage_role(port,
-				ask_bridge_profile_for(info->linking ?
-						       info->upper_dev : NULL),
-				true, 0);
-		if (rc)
-			ask_pr_err("bridge: %s %s %s: re-engage failed: %d\n",
-				   netdev_name(dev),
-				   info->linking ? "joined" : "left",
-				   netdev_name(info->upper_dev), rc);
+		state = &ask_bridge_role[port];
+		if (state->pending &&
+		    state->dev_ifindex == dev->ifindex &&
+		    state->upper_ifindex == info->upper_dev->ifindex &&
+		    state->linking == info->linking) {
+			rc = ask_hw_offload_role_commit(port, state->profile,
+							state->family_mask,
+							state->policy_seq);
+			if (rc)
+				ask_pr_err("bridge: role generation %llu port 0x%02x commit failed: %d; reconciliation pending\n",
+					   state->generation, port, rc);
+			else
+				state->pending = false;
+		}
 	}
 	ask_bridge_kick();
 	return NOTIFY_DONE;

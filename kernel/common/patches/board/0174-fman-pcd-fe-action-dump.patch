@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS kernel patch preparation <ask20@vyos-ls1046a-build>
+Date: Thu, 19 Nov 2026 06:43:43 +0000
+Subject: [PATCH] fman_pcd: dump FE action records in debugfs
+
+Extend fe_flow with a bounded read-only record dump and decoded opcode offsets so jumbo-stall captures can inspect the live action and destination FQID. The existing fe_lock protects record lifetime; the 160-byte bound stays before hardware-written stats at +256.
+
+Patch-Name: 0174-fman-pcd-fe-action-dump.patch
+
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK]
+
+Risk-Tier: B
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 4e42c1f64..129310a7f 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2838,11 +2838,14 @@ static void fman_pcd_ehash_flow_clear_all(struct fman_pcd *pcd)
+ 
+ static int fman_pcd_fe_flow_show(struct seq_file *s, void *unused)
+ {
++	enum { FMAN_EHASH_FLOW_DUMP_LEN = 160 };
++	/* F-316: bounded FE record action dump; counters start at +256. */
+ 	struct fman_pcd *pcd = s->private;
+ 	struct fman_pcd_ehash_table *t;
+ 	struct fman_pcd_ehash_flow *flow;
+ 	unsigned int ti = 0, total = 0;
+ 
++	BUILD_BUG_ON(FMAN_EHASH_FLOW_DUMP_LEN > FMAN_EHASH_FLOW_REC_SIZE);
+ 	mutex_lock(&pcd->fe_lock);
+ 	if (list_empty(&pcd->fe_ehash_tables)) {
+ 		seq_puts(s, "no ehash tables (set one via fe_ehash first)\n");
+@@ -2856,7 +2859,10 @@ static int fman_pcd_fe_flow_show(struct seq_file *s, void *unused)
+ 			u64 rec_phys = (u64)flow->record_dma;
+ 			const u8 *r = flow->record;
+ 			const u8 *key = r + FMAN_EHASH_FLOW_KEY_OFF;
+-			unsigned int i;
++			unsigned int i, j;
++			u16 flags = be16_to_cpu(*(const __be16 *)r);
++			unsigned int opc_off = ((flags & 0x07c0) >> 6) << 2;
++			unsigned int param_off = (flags & 0x003f) << 2;
+ 
+ 			seq_printf(s,
+ 				   "tbl[%u] flow[%u] bucket=0x%04x rec=0x%llx ",
+@@ -2864,6 +2870,14 @@ static int fman_pcd_fe_flow_show(struct seq_file *s, void *unused)
+ 				   (unsigned long long)rec_phys);
+ 			for (i = 0; i < flow->key_size; i++)
+ 				seq_printf(s, "%02x", key[i]);
++			seq_printf(s,
++				   " flags=0x%04x opc_off=%u param_off=%u opcodes=",
++				   (unsigned int)flags, opc_off, param_off);
++			for (i = 0; i < 16; i++)
++				seq_printf(s, "%02x", r[opc_off + i]);
++			seq_puts(s, " record160=");
++			for (j = 0; j < FMAN_EHASH_FLOW_DUMP_LEN; j++)
++				seq_printf(s, "%02x", r[j]);
+ 			seq_puts(s, "\n");
+ 			total++;
+ 		}

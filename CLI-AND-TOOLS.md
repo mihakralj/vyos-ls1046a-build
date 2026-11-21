@@ -35,7 +35,7 @@ set interfaces ethernet eth<n> offload ipv6
 | Ports | `eth0`–`eth4` (eth0 is management by convention; avoid it). |
 | Automatic parts | VLAN, NAT44/NAT66/PAT, PPPoE (on the PPPoE source port) and bridge offload follow an engaged port. There are **no** `offload vlan` / `offload pppoe` leaves (removed by patch `054`), and no `ask` keyword. |
 | Side effects | Forces RPS on the port and enables `hw-tc-offload`. |
-| Validation | Commit fails if the helper `/usr/local/bin/vyos-offload-ask` is missing/errors, or if the MTU is outside **1280–3600**. |
+| Validation | Commit fails if the helper `/usr/local/bin/vyos-offload-ask` is missing/errors, or if a configured MTU is outside **1280–9000**. This is an admission range, not validation of every MTU and traffic combination. |
 
 The ISO's factory default config (`board/vyos-config/config.boot.dhcp`, installed as
 `/opt/vyatta/etc/config.boot.default`) ships with `offload ipv4` and `offload ipv6`
@@ -76,7 +76,7 @@ set firewall global-options hardware-offload-delay 500
 * `action offload` is non-terminal: an earlier `accept` rule matching established
   traffic in the same chain shadows it (commit warns for global state-policy accepts, patch `038`).
 * `hardware-offload-delay` (patch `055`): minimum flow age in ms, `0–60000`, default `0` (offload at once). It writes `/sys/module/ask/parameters/offload_delay_ms`.
-* Flowtable MTU guard (`037`) mirrors the 1280–3600 range; VLAN sub-interfaces are handled when the parent is listed (`043`).
+* Flowtable MTU guard (`037`) checks the live physical-interface MTU against 1280–9000 when readable; VLAN sub-interfaces are handled when the parent is listed (`043`).
 * Add the same flowtable rule for `ipv6` for IPv6 flows.
 
 #### Bridge offload
@@ -180,7 +180,7 @@ with "MCP is not enabled" until `api mcp` is configured).
 * `set system console device ttyS0 speed 115200` — console is `ttyS0` (patch `001`).
 * `set interfaces ethernet eth<n> hw-id <mac>` — pins a port name; always wins over the DT-based ordering (patch `027`/`047`).
 * Hidden: LRO/TSO ethtool offload leaves are not offered (hardware-impossible, patch `034`). Supported: `gro gso sg rps`.
-* Jumbo frames: kernel parameter `fsl_dpaa_fman.fsl_fm_max_frm=9600` (RJ45 MTU up to 9578).
+* Jumbo frames: kernel parameter `fsl_dpaa_fman.fsl_fm_max_frm=9600` (RJ45 MTU up to 9578); this hardware ceiling is distinct from the ASK admission range. DPAA uses order-0 RX buffers and scatter-gather for larger frames. Selected 9000-MTU ASK tests passed, but intermittent bidirectional 9k collapse was observed on a later image; the full range is not validated for all workloads. WireGuard fast-path MTU and scatter-gather handling differ: its sink currently releases non-contiguous frames rather than processing them, so ASK jumbo results do not establish WireGuard jumbo support.
 
 ### 1.6 Image management (behaviour changes, same commands)
 

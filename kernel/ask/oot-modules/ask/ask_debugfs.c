@@ -59,8 +59,12 @@ static ssize_t ask_offload_write(struct file *file, const char __user *ubuf,
 		unsigned int tci, ethertype;
 		int n;
 
-		if (sscanf(buf, "l2engage %15s", iif) == 1)
-			return ask_hw_b2_l2_engage(iif) ?: len;
+		if (sscanf(buf, "l2engage %15s", iif) == 1) {
+			rtnl_lock();
+			rc = ask_hw_b2_l2_engage(iif);
+			rtnl_unlock();
+			return rc ? rc : len;
+		}
 		n = sscanf(buf, "l2add %15s %17s %17s %x %x %15s",
 			   iif, dmac, smac, &tci, &ethertype, oif);
 		if (n != 6)
@@ -81,7 +85,11 @@ static ssize_t ask_offload_write(struct file *file, const char __user *ubuf,
 		return -EINVAL;
 
 	if (!strcmp(verb, "engage")) {
-		rc = ask_hw_offload_engage((u8)port);
+		rtnl_lock();
+		rc = ask_hw_offload_engage_role((u8)port,
+						FMAN_PCD_FE_PROFILE_ROUTED,
+						false, 0);
+		rtnl_unlock();
 		if (rc)
 			return rc;
 		/* CR-012: safe here -- plain debugfs write process context,
@@ -90,7 +98,9 @@ static ssize_t ask_offload_write(struct file *file, const char __user *ubuf,
 		 * ask_hw_prewarm_egress_fq()). */
 		ask_hw_prewarm_egress_fq((u8)port);
 	} else if (!strcmp(verb, "disengage")) {
-		rc = ask_hw_offload_disengage((u8)port);
+		rtnl_lock();
+		rc = ask_hw_offload_disengage_admin((u8)port);
+		rtnl_unlock();
 		if (rc)
 			return rc;
 	} else {

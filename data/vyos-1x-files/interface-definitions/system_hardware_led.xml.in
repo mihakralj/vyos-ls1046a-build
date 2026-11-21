@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="system">
+    <children>
+      <node name="hardware">
+        <properties><help>Hardware settings</help></properties>
+        <children>
+          <node name="led" owner="${vyos_conf_scripts_dir}/system_hardware_led.py">
+            <properties><help>Status LED settings</help><priority>990</priority></properties>
+            <children>
+              <leafNode name="mode">
+                <properties>
+                  <help>Status LED mode</help>
+                  <completionHelp><list>auto fixed off</list></completionHelp>
+                  <constraint><regex>^(auto|fixed|off)$</regex></constraint>
+                </properties>
+              </leafNode>
+              <leafNode name="color">
+                <properties>
+                  <help>Stored color for fixed mode as eight hexadecimal digits RRGGBBWW</help>
+                  <constraint><regex>^[0-9a-fA-F]{8}$</regex></constraint>
+                </properties>
+              </leafNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>

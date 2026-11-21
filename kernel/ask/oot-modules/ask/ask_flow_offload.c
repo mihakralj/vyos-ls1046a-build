@@ -144,15 +144,33 @@ bool ask_vlan_push_only_enabled(void)
 }
 
 static bool ask_ipv6_hw_frag = true;
-static void ask_flow_v6_frag_flush(void);
+static bool ask_ipv6_hw_frag_disable_incomplete;
+static int ask_flow_v6_frag_flush_sync(void);
 
 static int ask_ipv6_hw_frag_set(const char *val, const struct kernel_param *kp)
 {
-	bool old = READ_ONCE(ask_ipv6_hw_frag);
-	int rc = param_set_bool(val, kp);
+	bool enabled;
+	int rc;
 
-	if (!rc && old && !READ_ONCE(ask_ipv6_hw_frag))
-		ask_flow_v6_frag_flush();
+	if (!try_module_get(THIS_MODULE))
+		return -ENODEV;
+	rc = kstrtobool(val ? val : "1", &enabled);
+	if (rc)
+		goto out;
+	if (enabled && ask_ipv6_hw_frag_disable_incomplete) {
+		rc = -EBUSY;
+		goto out;
+	}
+	WRITE_ONCE(ask_ipv6_hw_frag, enabled);
+	if (ask_hw_is_ready() && !enabled) {
+		rc = ask_flow_v6_frag_flush_sync();
+		ask_ipv6_hw_frag_disable_incomplete = rc != 0;
+		if (rc)
+			pr_err("ask: flow_offload: IPv6 HW frag disable incomplete (%d); hardware records may remain, resolve retained owners or cold boot before enabling\n",
+			       rc);
+	}
+out:
+	module_put(THIS_MODULE);
 	return rc;
 }
 
@@ -643,6 +661,7 @@ struct ask_flow_pending {
 	u64                     generation; /* A3: owner stamp for replay guard */
 	u64                     vlan_epoch;
 	u64                     pppoe_epoch;
+	u64                     nat44_epoch;
 	u64                     pppoe_session_epoch;
 };
 
@@ -658,6 +677,7 @@ static DEFINE_SPINLOCK(ask_flow_pending_lock);
 static DEFINE_MUTEX(ask_flow_lifecycle_lock);
 static u64 ask_vlan_pending_epoch;
 static u64 ask_pppoe_pending_epoch;
+static u64 ask_nat44_pending_epoch;
 /* Session events may arrive under RTNL, independently of the lifecycle lock. */
 static u64 ask_pppoe_session_epoch;
 static bool ask_pppoe_session_epoch_exhausted;
@@ -747,7 +767,36 @@ static bool ask_flow_pending_eligible(const struct ask_flow_pending *p)
 	     !ask_pppoe_session_is_current(p->pppoe_session_epoch) ||
 	     !ask_pppoe_port_armed(p->pppoe_session_ifindex, p->key.l3_proto)))
 		return false;
+	if (p->key.l3_proto == ASK_FLOW_L3_IPV4 && p->key.nat_flags &&
+	    (!ask_hw_nat44_offload_armed() ||
+	     p->nat44_epoch != ask_nat44_pending_epoch))
+		return false;
 	return true;
+}
+
+static int ask_flow_pending_invalidate_nat44(void)
+{
+	struct ask_flow_pending *p, *tmp;
+	unsigned int removed = 0;
+
+	lockdep_assert_held(&ask_flow_lifecycle_lock);
+	if (ask_nat44_pending_epoch == U64_MAX)
+		return -EOVERFLOW;
+	++ask_nat44_pending_epoch;
+	spin_lock_bh(&ask_flow_pending_lock);
+	list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
+		if (p->key.l3_proto != ASK_FLOW_L3_IPV4 || !p->key.nat_flags)
+			continue;
+		list_del(&p->node);
+		ask_flow_pending_count--;
+		removed++;
+		kfree(p);
+	}
+	spin_unlock_bh(&ask_flow_pending_lock);
+	if (removed)
+		pr_info_ratelimited("ask: flow_offload: cancelled %u pending NAT44 flow(s) on capability disable\n",
+				    removed);
+	return 0;
 }
 
 static int ask_flow_pending_invalidate(u64 *epoch, u8 flags)
@@ -859,6 +908,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 	p->generation       = generation;
 	p->vlan_epoch       = ask_vlan_pending_epoch;
 	p->pppoe_epoch      = ask_pppoe_pending_epoch;
+	p->nat44_epoch      = ask_nat44_pending_epoch;
 	p->pppoe_session_epoch = pppoe_session_epoch;
 
 	spin_lock_bh(&ask_flow_pending_lock);
@@ -889,6 +939,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
 			iter->generation       = generation;
 			iter->vlan_epoch       = p->vlan_epoch;
 			iter->pppoe_epoch      = p->pppoe_epoch;
+			iter->nat44_epoch      = p->nat44_epoch;
 			iter->pppoe_session_epoch = pppoe_session_epoch;
 			spin_unlock_bh(&ask_flow_pending_lock);
 			kfree(p);
@@ -1053,6 +1104,7 @@ struct ask_neigh_mac_ctx {
 	const u8        *new_mac;   /* fresh lladdr from n->ha          */
 	struct list_head fixups;    /* ask_neigh_mac_fixup, built here  */
 	unsigned int    matched;
+	bool            incomplete; /* true if any victim skipped on OOM */
 };
 
 struct ask_neigh_mac_fixup {
@@ -1102,8 +1154,10 @@ static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
 		return 0;                           /* MAC unchanged */
 
 	fx = kzalloc(sizeof(*fx), GFP_ATOMIC);
-	if (!fx)
+	if (!fx) {
+		ctx->incomplete = true;
 		return 0;                           /* best-effort; skip on OOM */
+	}
 	fx->cookie       = f->cookie;
 	fx->fe_token     = f->fe_token;
 	fx->key          = f->key;
@@ -1286,19 +1340,20 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
  * window a rebuilt flow has no HW backing the kernel SW path carries it, so no
  * packet is lost.  Runs in PROCESS context (workqueue) — insert/remove sleep.
  */
-void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
+bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 				u8 l3_proto, const u8 *new_mac)
 {
 	struct ask_flow_table *t = ask_flow_default_table();
 	struct ask_neigh_mac_fixup *fx, *tmp;
 	struct ask_neigh_mac_ctx ctx;
+	bool complete = true;
 	int rc;
 
 	if (!t || !dev || !dst_ip || !new_mac)
-		return;
+		return false;
 	/* A multicast/zero lladdr is never an offloadable next-hop. */
 	if (is_zero_ether_addr(new_mac) || is_multicast_ether_addr(new_mac))
-		return;
+		return false;
 
 	ctx.ifindex      = dev->ifindex;
 	ctx.dst_ip       = dst_ip;
@@ -1306,11 +1361,13 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 	ctx.addr_len     = ask_flow_l3_addr_len(l3_proto);
 	ctx.new_mac      = new_mac;
 	ctx.matched      = 0;
+	ctx.incomplete   = false;
 	INIT_LIST_HEAD(&ctx.fixups);
 
-	ask_flow_walk(t, ask_neigh_mac_collect, &ctx);
+	if (ask_flow_walk(t, ask_neigh_mac_collect, &ctx))
+		complete = false;
 	if (!ctx.matched)
-		return;
+		return complete && !ctx.incomplete;
 
 	list_for_each_entry_safe(fx, tmp, &ctx.fixups, node) {
 		struct ask_flow *cur;
@@ -1353,8 +1410,10 @@ void ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 		rc = ask_flow_withdraw_owned(t, fx->cookie, fx->generation,
 					     fx->fe_token, &old_key, hw_backed,
 					     "neigh stale-MAC", NULL);
-		if (rc)
+		if (rc) {
+			complete = false;
 			goto neigh_next;
+		}
 		rcu_read_lock();
 		cur = ask_flow_lookup(t, fx->cookie);
 		replaced = cur != NULL;
@@ -1391,6 +1450,7 @@ neigh_next:
 		list_del(&fx->node);
 		kfree(fx);
 	}
+	return complete && !ctx.incomplete;
 }
 EXPORT_SYMBOL_GPL(ask_flow_neigh_mac_changed);
 
@@ -3643,29 +3703,108 @@ void ask_flow_pppoe_flush(void)
 EXPORT_SYMBOL_GPL(ask_flow_pppoe_flush);
 
 /*
- * F-262: when the ask.ipv6_hw_frag kill switch is cleared, drop the IPv6 HW
- * records that already carry the microcode MTU check so those flows return to
- * the kernel (which then sends Packet Too Big).
+ * F-262: (T1(a)) when the ask.ipv6_hw_frag kill switch is cleared,
+ * synchronously withdraw the live IPv6 HW records that carry the microcode
+ * MTU check so those flows return to the kernel (Packet Too Big) and report
+ * incomplete withdrawal instead of failing silently.
  */
-static int ask_v6_frag_collect(struct ask_flow *f, void *arg)
+static bool ask_nat44_withdraw_unresolved;
+static bool ask_nat66_withdraw_unresolved;
+static bool ask_v6_frag_withdraw_unresolved;
+
+static int ask_nat44_collect(struct ask_flow *f, void *arg)
 {
-	if (f->key.l3_proto != ASK_FLOW_L3_IPV6 || !f->key.egress_mtu)
+	if (!f->hw_backed || f->key.l3_proto != ASK_FLOW_L3_IPV4 ||
+	    !f->key.nat_flags)
 		return 0;
 	return ask_collect_flush_victim(f, arg);
 }
 
-static void ask_v6_frag_flush_fn(struct work_struct *w)
+static int ask_nat66_collect(struct ask_flow *f, void *arg)
 {
-	ask_flow_flush_matching(ask_v6_frag_collect,
-				"IPv6 hardware fragmentation disabled");
+	if (!f->hw_backed || f->key.l3_proto != ASK_FLOW_L3_IPV6 ||
+	    !f->key.nat_flags)
+		return 0;
+	return ask_collect_flush_victim(f, arg);
 }
-static DECLARE_WORK(ask_v6_frag_flush_work, ask_v6_frag_flush_fn);
 
-/* No-op before the flow table exists (the parameter can be set at insmod). */
-static void ask_flow_v6_frag_flush(void)
+static int ask_v6_frag_collect(struct ask_flow *f, void *arg)
 {
-	if (ask_flow_default_table())
-		schedule_work(&ask_v6_frag_flush_work);
+	if (!f->hw_backed || f->key.l3_proto != ASK_FLOW_L3_IPV6 ||
+	    !f->key.egress_mtu)
+		return 0;
+	return ask_collect_flush_victim(f, arg);
+}
+
+static int __ask_flow_flush_checked(int (*collect)(struct ask_flow *, void *),
+				    const char *what, bool *unresolved)
+{
+	bool identity_lost = false;
+	int rc;
+
+	lockdep_assert_held(&ask_flow_lifecycle_lock);
+	if (*unresolved)
+		return -ESTALE;
+	mutex_lock(&ask_fe_orphan_lock);
+	rc = list_empty(&ask_fe_orphans) ? 0 : -EBUSY;
+	mutex_unlock(&ask_fe_orphan_lock);
+	if (!rc)
+		rc = __ask_flow_flush_matching(collect, what, true,
+					       &identity_lost);
+	if (identity_lost || rc == -ESTALE || rc == -ENOENT) {
+		*unresolved = true;
+		pr_err("ask: flow_offload: %s: withdrawal lost owner identity; a newer hardware record may remain, cold boot required\n",
+		       what);
+	}
+	return rc;
+}
+
+int ask_flow_nat44_flush(void)
+{
+	int rc;
+
+	if (ask_hw_nat44_offload_armed())
+		return -EINVAL;
+	mutex_lock(&ask_flow_lifecycle_lock);
+	rc = ask_flow_pending_invalidate_nat44();
+	if (rc) {
+		ask_nat44_withdraw_unresolved = true;
+		pr_err("ask: flow_offload: NAT44 offload disabled: pending epoch exhausted; cold boot required\n");
+	} else {
+		rc = __ask_flow_flush_checked(ask_nat44_collect,
+					      "NAT44 offload disabled",
+					      &ask_nat44_withdraw_unresolved);
+	}
+	mutex_unlock(&ask_flow_lifecycle_lock);
+	return rc;
+}
+
+int ask_flow_nat66_flush(void)
+{
+	int rc;
+
+	if (ask_hw_nat66_offload_armed())
+		return -EINVAL;
+	mutex_lock(&ask_flow_lifecycle_lock);
+	rc = __ask_flow_flush_checked(ask_nat66_collect,
+				      "NAT66 offload disabled",
+				      &ask_nat66_withdraw_unresolved);
+	mutex_unlock(&ask_flow_lifecycle_lock);
+	return rc;
+}
+
+static int ask_flow_v6_frag_flush_sync(void)
+{
+	int rc;
+
+	if (READ_ONCE(ask_ipv6_hw_frag))
+		return -EINVAL;
+	mutex_lock(&ask_flow_lifecycle_lock);
+	rc = __ask_flow_flush_checked(ask_v6_frag_collect,
+				      "IPv6 hardware fragmentation disabled",
+				      &ask_v6_frag_withdraw_unresolved);
+	mutex_unlock(&ask_flow_lifecycle_lock);
+	return rc;
 }
 
 /* T-M6-SP4: is PPPoE offload armed (pppoe_offload on, port engaged) on the
@@ -5532,6 +5671,69 @@ static bool ask_flow_destroy_unknown_unlocked(struct flow_cls_offload *f)
 	return true;
 }
 
+/*
+ * S8(3): skip egress-side echo REPLACE deliveries before taking
+ * ask_flow_lifecycle_lock or parsing keys/actions. On a multi-port flowtable
+ * every REPLACE is broadcast to every bound member port, so (N - 1) / N of
+ * callbacks are echoes whose block dev does not match META.ingress_ifindex
+ * (or its physical lower for a VLAN vif). Preserve F-291 by falling through
+ * to the locked path if the cookie has an unsettled owner.
+ */
+static bool ask_flow_cookie_unsettled(struct ask_flow_table *t,
+				      unsigned long cookie)
+{
+	struct ask_flow *existing;
+	u64 existing_gen = 0;
+
+	if (!t)
+		return false;
+	rcu_read_lock();
+	existing = ask_flow_lookup(t, (u64)cookie);
+	if (existing)
+		existing_gen = existing->generation;
+	rcu_read_unlock();
+	return existing && !ask_flow_gen_is_current(t, (u64)cookie,
+						    existing_gen);
+}
+
+static bool ask_flow_replace_echo_unlocked(struct net_device *dev,
+					   struct flow_cls_offload *f)
+{
+	struct flow_rule *rule;
+	struct flow_match_meta mm;
+	struct net_device *my_phys, *ti, *ti_phys;
+	int meta_iif;
+	bool same_port;
+
+	if (!dev || !f)
+		return false;
+	rule = flow_cls_offload_flow_rule(f);
+	if (!rule || !flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META))
+		return false;
+	flow_rule_match_meta(rule, &mm);
+	if (!mm.key || !mm.mask ||
+	    !(mm.key->ingress_ifindex & mm.mask->ingress_ifindex))
+		return false;
+	meta_iif = mm.key->ingress_ifindex;
+	if (meta_iif <= 0 || dev->ifindex == meta_iif)
+		return false;
+
+	my_phys = is_vlan_dev(dev) ? vlan_dev_real_dev(dev) : dev;
+	if (my_phys->ifindex == meta_iif)
+		return false;
+	ti = dev_get_by_index(&init_net, meta_iif);
+	ti_phys = ti && is_vlan_dev(ti) ? vlan_dev_real_dev(ti) : ti;
+	same_port = ti_phys && ti_phys->ifindex == my_phys->ifindex;
+	if (ti)
+		dev_put(ti);
+	if (same_port)
+		return false;
+
+	ask_pr_dbg("flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (meta iif=%d — true ingress installs)\n",
+		   f->cookie, netdev_name(dev), meta_iif);
+	return true;
+}
+
 static void ask_flow_owner_forget_settled(u64 cookie)
 {
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
@@ -5648,6 +5850,10 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 	case FLOW_CLS_REPLACE:
 		ask_pr_dbg("flow_offload: cb invoked REPLACE cookie=0x%lx dev=%s\n",
 			   f->cookie, dev ? netdev_name(dev) : "?");
+		if (ask_flow_replace_echo_unlocked(dev, f) &&
+		    !ask_flow_cookie_unsettled(ask_flow_default_table(),
+					       f->cookie))
+			return -EOPNOTSUPP;	/* S8: non-ingress echo */
 		if (ask_flow_replace_deferred_unlocked(cb_priv, f))
 			return -EAGAIN;	/* S7: never-installed, too young */
 		mutex_lock(&ask_flow_lifecycle_lock);
@@ -6056,7 +6262,6 @@ void ask_flow_offload_exit(void)
 	if (ask_fib_nb_ok)
 		unregister_fib_notifier(&init_net, &ask_fib_nb);
 	cancel_delayed_work_sync(&ask_fibchg_flush_work);
-	cancel_work_sync(&ask_v6_frag_flush_work);
 
 	if (ask_flow_offload_registered) {
 		dpaa_unregister_flow_offload_handler(&ask_flow_offload_ops);

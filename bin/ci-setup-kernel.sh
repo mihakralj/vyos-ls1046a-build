@@ -2986,7 +2986,11 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_222.py" 2>&1
     echo "### dpaa_eth.c: F-222 revert DPAA_BP_ORDER 1->0 (order-1 wedges RX under load)"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_227.py" 2>&1
-    echo "### dpaa_eth.c: F-227 crash-safe TX-confirm guard (reject FMan HIT FD on confirmed FQ)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_317.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f227-fixup.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f317-fixup.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-tx-cleanup.py" "$(pwd)" 2>&1
+    echo "### dpaa_eth.c: F-227 guard and F-317 IC probe retirement host-model verified"
 fi
 
 # F-229 (issue #45, 2026-08-22): the GPY115C-reported link on a 1G RJ45
@@ -3128,6 +3132,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-netns-guard 2>&1
     echo "### dpaa_eth.c: F-294 immutable DPAA netdev identity verified"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_295.py" 2>&1
+    # F-316: per-FQ tail-drop for ask.ko's per-flow offload TX FQ set.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_316.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-offload-fq.py" "$(pwd)" 2>&1
     echo "### dpaa_eth.c: F-295 offload FQ initialization quarantine verified"
     echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically reconcile VyOS status LED state
+
+[Timer]
+OnBootSec=5s
+OnUnitInactiveSec=5min
+AccuracySec=10s
+Unit=vyos-led-reconcile.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="show">
+    <children>
+      <node name="hardware">
+        <children>
+          <leafNode name="led">
+            <properties><help>Show status LED mode and color</help></properties>
+            <command>${vyos_op_scripts_dir}/show_hardware_led.py</command>
+          </leafNode>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>

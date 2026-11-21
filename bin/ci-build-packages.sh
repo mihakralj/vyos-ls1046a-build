@@ -275,7 +275,7 @@ for package in $packages; do
     fi
   fi
 
-  ### vyos-1x .deb cache (skip ~6m build when patches+upstream commit unchanged)
+  ### vyos-1x .deb cache
   #
   # Cache key derivation (must be deterministic and survive across runs):
   #   * UPSTREAM_SHA — short SHA from the `commit_id = "..."` line of the
@@ -283,13 +283,6 @@ for package in $packages; do
   #     vyos-build tree, BEFORE build.py clones+checks-out vyos-1x/. Reading
   #     it from the toml lets us compute the key without first having to
   #     clone vyos-1x (which `./build.py` does on a cache miss).
-  #   * PATCH_HASH — sha256 of `cat data/vyos-1x-*.patch` ++ the contents
-  #     of `bin/ci-setup-vyos1x.sh` (which carries the pre_build_hook —
-  #     including the debian/control sed loop that strips jool / nat-rtsp /
-  #     unbuilt-nic guard blocks). Patch files are applied in filesystem-sort
-  #     order by build.py (`sorted(patch_dir.glob('*'))`), so renaming or
-  #     reordering them legitimately invalidates the cache — this is
-  #     intentional. New patches with new numbers also bump the hash.
   #     INVARIANT: any logic that mutates the upstream vyos-1x source tree
   #     before `dpkg-buildpackage` runs MUST be reflected in this hash —
   #     otherwise a stale cached .deb will be replayed and overrule the fix.
@@ -303,30 +296,72 @@ for package in $packages; do
   SKIP_VYOS1X_BUILD=0
   if [ "$package" == "vyos-1x" ]; then
     UPSTREAM_SHA=$(awk -F'"' '/^commit_id/ {print $2}' package.toml 2>/dev/null | head -1 | cut -c1-12)
-    PATCH_HASH=$( { cat "$GITHUB_WORKSPACE"/data/vyos-1x-*.patch 2>/dev/null; cat "$GITHUB_WORKSPACE"/bin/ci-setup-vyos1x.sh 2>/dev/null; } | sha256sum | cut -c1-16)
+    hash_vyos1x_overlay() {
+      TAR_OPTIONS='' LC_ALL=C tar --sort=name --format=gnu --mtime=@0 \
+        --owner=0 --group=0 --numeric-owner \
+        -C "$1/vyos-1x-files" -cf - . | sha256sum | cut -c1-64
+    }
+    SOURCE_OVERLAY_HASH=$(hash_vyos1x_overlay "$GITHUB_WORKSPACE/data")
+    STAGED_OVERLAY_HASH=$(hash_vyos1x_overlay ls1046a-patches)
+    if [ "$SOURCE_OVERLAY_HASH" != "$STAGED_OVERLAY_HASH" ]; then
+      echo "::error::vyos-1x overlay changed after staging; rerun bin/ci-setup-vyos1x.sh" >&2
+      exit 1
+    fi
+    PATCH_HASH=$( {
+      cat "$GITHUB_WORKSPACE"/data/vyos-1x-*.patch 2>/dev/null &&
+      cat "$GITHUB_WORKSPACE"/bin/ci-setup-vyos1x.sh 2>/dev/null &&
+      printf '%s\0%s\0' "$SOURCE_OVERLAY_HASH" "$STAGED_OVERLAY_HASH"
+    } | sha256sum | cut -c1-16)
+    VYOS1X_DEB_NAMES=(vyos-1x vyos-1x-aws vyos-1x-smoketest
+      vyos-1x-vmware vyos-user-utils libvyosconfig0)
+    vyos1x_bundle_intact() (
+      local dir="$1" deb_name arch
+      local -a debs matches
+      shopt -s nullglob
+      debs=("$dir"/*.deb)
+      [ "${#debs[@]}" -eq "${#VYOS1X_DEB_NAMES[@]}" ] || return 1
+      for deb_name in "${VYOS1X_DEB_NAMES[@]}"; do
+        case "$deb_name" in
+          vyos-1x|libvyosconfig0) arch=arm64 ;;
+          *) arch=all ;;
+        esac
+        matches=("$dir/${deb_name}_"*_"${arch}.deb")
+        [ "${#matches[@]}" -eq 1 ] || return 1
+        [ -f "${matches[0]}" ] && [ ! -L "${matches[0]}" ] || return 1
+      done
+      cache_debs_intact "${debs[@]}"
+    )
+    vyos1x_cache_intact() (
+      local dir="$1"
+      [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+      [ -f "$dir/SHA256SUMS" ] && [ ! -L "$dir/SHA256SUMS" ] || return 1
+      vyos1x_bundle_intact "$dir" || return 1
+      cd "$dir" || return 1
+      export LC_ALL=C
+      sha256sum -- *.deb | cmp -s - SHA256SUMS
+    )
+    for deb_name in "${VYOS1X_DEB_NAMES[@]}"; do
+      rm -f -- "${deb_name}_"*.deb "../${deb_name}_"*.deb
+    done
     CACHE_DIR="${RUNNER_TOOL_CACHE:-/tmp}/vyos-1x-cache"
     mkdir -p "$CACHE_DIR"
-    find "$CACHE_DIR" -maxdepth 1 -name 'vyos-1x_*' -mtime +14 -delete 2>/dev/null || true
+    find "$CACHE_DIR" -mindepth 1 -maxdepth 1 \( -name 'vyos-1x_*' -o -name '.staging.*' \) \
+      -mtime +14 -exec rm -rf -- {} + 2>/dev/null || true
     if [ -n "$UPSTREAM_SHA" ] && [ -n "$PATCH_HASH" ]; then
-      # v2: the entry holds every installable deb the vyos-1x build emits, not only
-      # vyos-1x itself; v1 entries (vyos-1x only) let live-build pull libvyosconfig0
-      # and vyos-user-utils from upstream rolling (image 2026.11.07-2010).
-      CACHE_KEY="vyos-1x_v2_${UPSTREAM_SHA}_${PATCH_HASH}"
-      CACHED=$(find "$CACHE_DIR" -maxdepth 1 -name "${CACHE_KEY}__*.deb" 2>/dev/null | sort)
-      if [ -n "$CACHED" ] && cache_debs_intact $CACHED; then
+      CACHE_KEY="vyos-1x_v4_${UPSTREAM_SHA}_${PATCH_HASH}"
+      CACHE_ENTRY="$CACHE_DIR/$CACHE_KEY"
+      if vyos1x_cache_intact "$CACHE_ENTRY"; then
         echo "### vyos-1x cache HIT (key=$CACHE_KEY)"
-        for c in $CACHED; do
-          orig=$(basename "$c" | sed -E "s/^${CACHE_KEY}__//")
-          cp -v "$c" "../$orig"
+        for c in "$CACHE_ENTRY"/*.deb; do
+          cp -v "$c" "../$(basename "$c")"
         done
+        touch "$CACHE_ENTRY"
         SKIP_VYOS1X_BUILD=1
+      elif [ -e "$CACHE_ENTRY" ] || [ -L "$CACHE_ENTRY" ]; then
+        echo "### vyos-1x cache MISS (key=$CACHE_KEY, incomplete or corrupt entry evicted) — building"
+        rm -rf -- "$CACHE_ENTRY"
       else
-        if [ -n "$CACHED" ]; then
-          echo "### vyos-1x cache MISS (key=$CACHE_KEY, corrupt entry evicted) — building"
-          rm -f $CACHED
-        else
-          echo "### vyos-1x cache MISS (key=$CACHE_KEY) — building"
-        fi
+        echo "### vyos-1x cache MISS (key=$CACHE_KEY) — building"
       fi
     else
       echo "### vyos-1x cache: could not derive key (UPSTREAM_SHA='$UPSTREAM_SHA' PATCH_HASH='$PATCH_HASH') — building"
@@ -506,51 +541,50 @@ for package in $packages; do
   # cwd here is `vyos-build/scripts/package-build/vyos-1x/` (we cd'd into
   # $package above). build.py's `repo_dir = Path('vyos-1x')` makes the
   # actual git clone live at `./vyos-1x/`. dpkg-buildpackage runs with
-  # cwd=repo_dir and emits .debs to repo_dir.parent — which is `./` here,
-  # NOT `../`. (`../` would be `package-build/` itself, and that's where
-  # build.py's copy_packages() *eventually* lifts them — but copy_packages
-  # is called by build.py's __main__ AFTER this script's per-package step
-  # has already finished, and only if it walks back to build.py's main
-  # loop. By that time we're already in the post-build guard.) Glob both
-  # locations defensively so future refactors of build.py / copy_packages
-  # don't silently re-break the guard.
+  # cwd=repo_dir and emits .debs to repo_dir.parent — which is `./` here.
+  # Glob both locations defensively so future refactors of build.py /
+  # copy_packages don't silently re-break the guard.
   if [ "$package" == "vyos-1x" ] && [ "$SKIP_VYOS1X_BUILD" -eq 0 ] && [ -n "${CACHE_KEY:-}" ]; then
-    cached_count=0
-    # Every installable package of the vyos-1x source build (dbgsym and
-    # build-deps excluded); all must come from the same pinned commit.
-    for built in {,../}{vyos-1x,vyos-1x-aws,vyos-1x-smoketest,vyos-1x-vmware,vyos-user-utils,libvyosconfig0}_*.deb; do
-      [ -f "$built" ] || continue
-      # Stage then atomically rename (same filesystem) so a job killed
-      # mid-copy never leaves a truncated .deb visible under the final
-      # cache-key filename — matches the linux-kernel cache's stage->mv
-      # pattern below. Without this, a later run's cache-HIT glob would
-      # see the partial file (it only checked existence, not integrity)
-      # before the dpkg-deb --info validation was added.
-      dest="$CACHE_DIR/${CACHE_KEY}__$(basename "$built")"
-      stage="$CACHE_DIR/.staging.$$.${CACHE_KEY}__$(basename "$built")"
-      cp "$built" "$stage"
-      mv "$stage" "$dest"
-      cached_count=$((cached_count + 1))
-    done
-    if ls "$CACHE_DIR/${CACHE_KEY}__vyos-1x_"*_arm64.deb >/dev/null 2>&1; then
-      echo "### Cached $cached_count vyos-1x .deb(s) under key $CACHE_KEY"
-      ls -lh "$CACHE_DIR/${CACHE_KEY}__"*.deb 2>/dev/null || true
-    else
-      # HARD FAIL: build.py's per-package error swallower ("Failed to build
-      # package vyos-1x: ... ignoring") used to let CI continue with NO
-      # vyos-1x .deb produced. live-build chroot_install would then silently
-      # substitute the unpatched upstream vyos-1x from the VyOS apt repo,
-      # shipping an ISO without our LS1046A patches → `add system image`
-      # writes boot dirs with no mono-gw.dtb → unbootable installs. (CI run
-      # 26142046765, 2026-05-20.) Refuse to proceed instead.
-      echo "::error::vyos-1x build produced no vyos-1x_*_arm64.deb in either ./ or ../ — refusing to build ISO with unpatched upstream vyos-1x" >&2
-      echo "::error::This usually means dpkg-buildpackage failed inside build.py and the failure was swallowed. Search the log above for 'Failed to build package vyos-1x' and look at the preceding output." >&2
-      echo "### Debug: contents of cwd ($(pwd)):" >&2
-      ls -la . 2>&1 | head -40 >&2 || true
-      echo "### Debug: contents of parent ($(cd .. && pwd)):" >&2
-      ls -la .. 2>&1 | head -40 >&2 || true
-      exit 1
-    fi
+    (
+      stage=$(mktemp -d "$CACHE_DIR/.staging.${CACHE_KEY}.XXXXXXXX")
+      trap 'rm -rf -- "$stage"' EXIT
+      for deb_name in "${VYOS1X_DEB_NAMES[@]}"; do
+        for built in "${deb_name}_"*.deb "../${deb_name}_"*.deb; do
+          [ -f "$built" ] || continue
+          dest="$stage/$(basename "$built")"
+          if [ -e "$dest" ]; then
+            if ! cmp -s -- "$built" "$dest"; then
+              echo "::error::conflicting vyos-1x build artifacts: $built and $dest" >&2
+              exit 1
+            fi
+          else
+            cp -- "$built" "$dest"
+          fi
+        done
+      done
+      if ! ls "$stage"/vyos-1x_*_arm64.deb >/dev/null 2>&1; then
+        echo "::error::vyos-1x build produced no vyos-1x_*_arm64.deb in either ./ or ../ — refusing to build ISO with unpatched upstream vyos-1x" >&2
+        exit 1
+      fi
+      if ! vyos1x_bundle_intact "$stage"; then
+        echo "::error::incomplete or invalid vyos-1x .deb bundle; expected: ${VYOS1X_DEB_NAMES[*]}" >&2
+        exit 1
+      fi
+      (
+        cd "$stage" || exit 1
+        export LC_ALL=C
+        sha256sum -- *.deb > SHA256SUMS
+      )
+      chmod 755 "$stage"
+      if mv -T -n -- "$stage" "$CACHE_ENTRY" && [ ! -e "$stage" ]; then
+        echo "### Cached ${#VYOS1X_DEB_NAMES[@]} vyos-1x .deb(s) under key $CACHE_KEY"
+      elif vyos1x_cache_intact "$CACHE_ENTRY"; then
+        echo "### vyos-1x cache already populated (key=$CACHE_KEY)"
+      else
+        echo "::error::could not publish complete vyos-1x cache entry: $CACHE_ENTRY" >&2
+        exit 1
+      fi
+    )
   fi
 
   [ "$package" == "keepalived" ] && apt-get remove -y libsnmp-dev

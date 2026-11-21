@@ -1,0 +1,10 @@
+[Unit]
+Description=Reconcile VyOS status LED configuration
+Wants=vyos-router.service
+After=vyos-router.service
+ConditionPathExists=/proc/device-tree/compatible
+
+[Service]
+Type=oneshot
+TimeoutStartSec=21min
+ExecStart=/usr/bin/python3 /usr/libexec/vyos/conf_mode/system_hardware_led.py --reconcile

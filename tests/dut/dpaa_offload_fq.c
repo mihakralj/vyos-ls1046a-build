@@ -56,6 +56,9 @@ struct dpaa_fq {
 	u32 fqid, flags;
 	u16 channel;
 	u8 wq;
+#ifdef OFFLOAD_FQ_TD
+	u32 td_bytes;
+#endif
 	int fq_type, xdp_rxq;
 };
 struct dpaa_pcd_ops { void (*teardown)(struct dpaa_priv *); };
@@ -65,6 +68,7 @@ struct qm_mcc_initfq {
 	u16 we_mask;
 	struct {
 		u16 fq_ctrl;
+		u16 ics_cred;
 		u8 cgid;
 		struct { struct { u8 exclusive; } stashing; } context_a;
 	} fqd;
@@ -90,6 +94,7 @@ enum { NETREG_REGISTERED, NETREG_UNREGISTERING, NETREG_UNREGISTERED };
 #define QM_INITFQ_WE_OAC 8
 #define QM_INITFQ_WE_TDTHRESH 16
 #define QM_INITFQ_WE_CONTEXTA 32
+#define QM_INITFQ_WE_ICSCRED 64
 #define QM_FQCTRL_PREFERINCACHE 1
 #define QM_FQCTRL_AVOIDBLOCK 2
 #define QM_FQCTRL_CGE 4
@@ -118,6 +123,7 @@ static const struct dpaa_fq_cbs dpaa_fq_cbs;
 static struct qman_fq *fq_table[32];
 static int create_error, init_error, creates, inits, destroys, frees;
 static int managed_allocations, holds, errors, cleanup_calls, pcd_teardowns;
+static u16 last_we_mask, last_ics_cred;
 static bool rtnl_held, expect_rtnl = true, expect_taildrop = true;
 static jmp_buf unregister_wait;
 
@@ -172,6 +178,8 @@ static int qman_init_fq(struct qman_fq *fq, u32 flags, struct qm_mcc_initfq *opt
 	assert(rtnl_held || !expect_rtnl);
 	inits++;
 	assert(fq_table[fq->idx] == fq);
+	last_we_mask = opts->we_mask;
+	last_ics_cred = opts->fqd.ics_cred;
 	if (expect_taildrop) {
 		assert(opts->we_mask & QM_INITFQ_WE_TDTHRESH);
 		assert(!(opts->we_mask & QM_INITFQ_WE_OAC));
@@ -209,7 +217,11 @@ static int dpaa_tx_fq_to_id(const struct dpaa_priv *priv, struct qman_fq *fq)
 static void qm_fqd_set_destwq(void *fqd, u16 channel, u8 wq) {}
 static void qm_fqd_set_oac(void *fqd, int value) {}
 static void qm_fqd_set_oal(void *fqd, size_t value) {}
-static void qm_fqd_set_taildrop(void *fqd, u32 threshold, int rounded) {}
+static u32 last_taildrop;
+static void qm_fqd_set_taildrop(void *fqd, u32 threshold, int rounded)
+{
+	last_taildrop = threshold;
+}
 static void qm_fqd_context_a_set64(void *fqd, uint64_t value) {}
 static void qm_fqd_set_stashing(void *fqd, int a, int b, int c) {}
 static int xdp_rxq_info_reg(int *info, struct net_device *dev, int queue, int napi)
@@ -299,9 +311,23 @@ int main(int argc, char **argv)
 		assert(fq->net_dev == &dev && fq->fq_type == FQ_TYPE_TX_NO_CONFIRM);
 		assert(fq->init && fq->wq == 6 && fq->channel == 0x801 && dev.refs == 1);
 		assert(!holds && !frees && managed_allocations == 1);
+		assert(last_taildrop == DPAA_FQ_TD);
+		assert(!(last_we_mask & QM_INITFQ_WE_ICSCRED));
 		puts("successful offload FQ remains usable");
 		return 0;
 	}
+
+#ifdef OFFLOAD_FQ_TD
+	if (!strcmp(argv[1], "td")) {
+		assert(dpaa_alloc_offload_tx_fq_td(&dev, 0x40000, &fqid) == 0);
+		fq = container_of(fq_table[14], struct dpaa_fq, fq_base);
+		assert(fqid == 7 && fq->td_bytes == 0x40000 && last_taildrop == 0x40000);
+		assert(fq->init && fq->wq == 6 && fq->fq_type == FQ_TYPE_TX_NO_CONFIRM);
+		assert((last_we_mask & QM_INITFQ_WE_ICSCRED) && last_ics_cred == 0x4000);
+		puts("per-FQ tail-drop threshold and DRR credit reach the FQD");
+		return 0;
+	}
+#endif
 
 	if (!strcmp(argv[1], "create-error")) {
 		create_error = -ENOSPC;

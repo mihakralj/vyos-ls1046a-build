@@ -1,32 +1,20 @@
-"""Host test for the real wgfp_orp_xmit(): immediate enqueue, no clock read on the fast path."""
+"""Fail-closed ownership test for the retired WGFP ORP TX path."""
 
 from pathlib import Path
-import subprocess
 
 import pytest
 
 pytestmark = pytest.mark.host
 ROOT = Path(__file__).resolve().parents[1]
 WGFP = ROOT / "kernel/common/files/drivers/net/ethernet/freescale/dpaa/dpaa_wgfp.c"
-HARNESS = ROOT / "tests/dut/wgfp_orp_xmit.c"
 
-
-def extract(source, start, end):
-    offset = source.index(start)
-    return source[offset:source.index(end, offset)]
-
-
-def test_orp_xmit(tmp_path):
+def test_real_bpid_orp_xmit_is_disabled():
     wgfp = WGFP.read_text()
-    body = "\n\n".join([
-        extract(wgfp, "struct wgfp_orp_ctx {", "\n/* One WGFP NAPI per CPU."),
-        extract(wgfp, "static bool wgfp_orp_xmit(", "\nvoid dpaa_wgfp_xmit("),
-    ])
-    (tmp_path / "wgfp_orp_xmit_body.h").write_text(body + "\n")
-    binary = tmp_path / "wgfp_orp_xmit"
-    subprocess.run(
-        ["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
-         "-I", str(tmp_path), str(HARNESS), "-o", str(binary)],
-        check=True,
-    )
-    subprocess.run([str(binary)], check=True)
+    assert "static bool wgfp_spread = false;" in wgfp
+    assert "static bool wgfp_orp_xmit(" not in wgfp
+    assert 'sscanf(buf, "spread %u", &n)' in wgfp
+    assert "err = -EOPNOTSUPP;" in wgfp
+    xmit = wgfp[wgfp.index("void dpaa_wgfp_xmit("):wgfp.index(
+        "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_xmit)"
+    )]
+    assert "qman_enqueue_orp_fqid" not in xmit

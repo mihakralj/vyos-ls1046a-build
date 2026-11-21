@@ -89,6 +89,9 @@ int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 /* F-199 (T-M7-2 S4): allocate a dedicated no-confirm TX FQ for the FE
  * hardware offload terminal (context_a B0V=0). Board patch exports it. */
 int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
+/* F-316: the same FQ with its own tail-drop threshold (0 = DPAA_FQ_TD). */
+int dpaa_alloc_offload_tx_fq_td(struct net_device *dev, u32 td_bytes,
+				u32 *fqid);
 
 /*
  * PER-PORT OFFLOAD FAMILY MASK (2026-08-21). IPv4 and IPv6 are selected
@@ -112,6 +115,8 @@ static u8 ask_hw_port_family[64];
 static u64 ask_hw_family_seq = 1;
 static u64 ask_hw_family_changed[ARRAY_SIZE(ask_hw_port_family)][2];
 static bool ask_hw_family_seq_exhausted;
+static u64 ask_hw_role_policy_seq[ARRAY_SIZE(ask_hw_port_family)];
+static bool ask_hw_role_admin_disabled[ARRAY_SIZE(ask_hw_port_family)];
 static bool ask_hw_ready;
 
 /* Ports engaged with the L2_DA profile (T-M6-2 B3a). Lockless for the routed,
@@ -154,9 +159,42 @@ static u8 ask_hw_port_family_get(u8 hw_port_id)
  * NOT silicon-validated and is rejected in preflight even while this is true.
  */
 static bool ask_nat44_offload = true;
-module_param_named(nat44_offload, ask_nat44_offload, bool, 0644);
+static bool ask_nat44_disable_incomplete;
+
+static int ask_nat44_offload_set(const char *val, const struct kernel_param *kp)
+{
+	bool enabled;
+	int rc;
+
+	if (!try_module_get(THIS_MODULE))
+		return -ENODEV;
+	rc = kstrtobool(val ? val : "1", &enabled);
+	if (rc)
+		goto out;
+	if (enabled && ask_nat44_disable_incomplete) {
+		rc = -EBUSY;
+		goto out;
+	}
+	WRITE_ONCE(ask_nat44_offload, enabled);
+	if (READ_ONCE(ask_hw_ready) && !enabled) {
+		rc = ask_flow_nat44_flush();
+		ask_nat44_disable_incomplete = rc != 0;
+		if (rc)
+			ask_pr_err("hw: NAT44 offload disable incomplete (%d); hardware records may remain, resolve retained owners or cold boot before enabling\n",
+				   rc);
+	}
+out:
+	module_put(THIS_MODULE);
+	return rc;
+}
+
+static const struct kernel_param_ops ask_nat44_offload_ops = {
+	.set = ask_nat44_offload_set,
+	.get = param_get_bool,
+};
+module_param_cb(nat44_offload, &ask_nat44_offload_ops, &ask_nat44_offload, 0644);
 MODULE_PARM_DESC(nat44_offload,
-		 "IPv4-to-IPv4 NAT/PAT FMan hardware offload (default 1; nat66 separate, nat46/nat64 not offloadable)");
+		 "IPv4-to-IPv4 NAT/PAT FMan hardware offload (default 1; 0 closes admission and withdraws identified records; nat66 separate, nat46/nat64 not offloadable)");
 
 bool ask_hw_nat44_offload_armed(void)
 {
@@ -178,9 +216,42 @@ EXPORT_SYMBOL_GPL(ask_hw_nat44_offload_armed);
  * opcode — and always fall back to software.
  */
 static bool ask_nat66_offload = true;
-module_param_named(nat66_offload, ask_nat66_offload, bool, 0644);
+static bool ask_nat66_disable_incomplete;
+
+static int ask_nat66_offload_set(const char *val, const struct kernel_param *kp)
+{
+	bool enabled;
+	int rc;
+
+	if (!try_module_get(THIS_MODULE))
+		return -ENODEV;
+	rc = kstrtobool(val ? val : "1", &enabled);
+	if (rc)
+		goto out;
+	if (enabled && ask_nat66_disable_incomplete) {
+		rc = -EBUSY;
+		goto out;
+	}
+	WRITE_ONCE(ask_nat66_offload, enabled);
+	if (READ_ONCE(ask_hw_ready) && !enabled) {
+		rc = ask_flow_nat66_flush();
+		ask_nat66_disable_incomplete = rc != 0;
+		if (rc)
+			ask_pr_err("hw: NAT66 offload disable incomplete (%d); hardware records may remain, resolve retained owners or cold boot before enabling\n",
+				   rc);
+	}
+out:
+	module_put(THIS_MODULE);
+	return rc;
+}
+
+static const struct kernel_param_ops ask_nat66_offload_ops = {
+	.set = ask_nat66_offload_set,
+	.get = param_get_bool,
+};
+module_param_cb(nat66_offload, &ask_nat66_offload_ops, &ask_nat66_offload, 0644);
 MODULE_PARM_DESC(nat66_offload,
-		 "IPv6-to-IPv6 NAT FMan hardware offload (default 1; nat44 separate, nat46/nat64 not offloadable)");
+		 "IPv6-to-IPv6 NAT FMan hardware offload (default 1; 0 closes admission and withdraws identified records; nat44 separate, nat46/nat64 not offloadable)");
 
 bool ask_hw_nat66_offload_armed(void)
 {
@@ -527,6 +598,28 @@ static bool ask_hw_cached_valid;
 #define ASK_HW_MAX_PORTS        8       /* LS1046A has 8 BMI RX ports total */
 
 #define ASK_HW_NOCONF_SLOTS     16      /* T-M7-2 S4: no-confirm TX FQ cache */
+#define ASK_HW_FLOW_FQS         16      /* per-flow no-confirm TX FQs per port */
+
+/*
+ * Per-flow egress FQ set. With one no-confirm FQ per egress port, a flow that
+ * holds the FQ at its tail-drop threshold gets every other flow's frames to
+ * that port rejected; at 9000 MTU, bidirectional BBR data in one direction
+ * locked out the other direction's ACKs for seconds. Each routed flow now
+ * takes the least-used FQ of a per-port set at insert, so a flow admitted
+ * while a set FQ is unused shares its tail-drop with no other flow; flows
+ * are never migrated, so churn can leave two on one FQ. egress_fqs=0 maps
+ * new flows to the single legacy FQ (A/B: existing flows keep their FQ);
+ * egress_fq_td is read when the set is allocated. 16 x 256 KiB matches the
+ * legacy 4 MiB per-port bound; it is not a BMan pool reservation.
+ */
+static unsigned int ask_egress_fqs = ASK_HW_FLOW_FQS;
+module_param_named(egress_fqs, ask_egress_fqs, uint, 0644);
+MODULE_PARM_DESC(egress_fqs,
+		 "Per-flow no-confirm TX FQs used per egress port for new flows (0 = legacy single FQ, max 16)");
+static unsigned int ask_egress_fq_td = 256 * 1024;
+module_param_named(egress_fq_td, ask_egress_fq_td, uint, 0444);
+MODULE_PARM_DESC(egress_fq_td,
+		 "Tail-drop bytes of each per-flow TX FQ (64 KiB..4 MiB)");
 
 /*
  * Per-offloaded-port record.  Under the board substrate ask.ko owns no
@@ -569,10 +662,18 @@ struct ask_hw_pcd {
 	 * ifindex % ASK_HW_NOCONF_SLOTS; a collision falls back to a fresh
 	 * alloc without caching (correctness over reuse; impossible with the
 	 * board's <=5 dpaa netdevs).
+	 *
+	 * fqid is the legacy per-port FQ (DPAA_FQ_TD): bridge records and
+	 * egress_fqs=0. flow_fqid[0..nflow) is the per-flow set, written only
+	 * by prewarm under ask_hw_prewarm_lock and published by a release
+	 * store of nflow; users[] counts live cookies per set FQ (h->lock).
 	 */
 	struct {
 		u32     ifindex;
 		u32     fqid;
+		u32     nflow;
+		u32     flow_fqid[ASK_HW_FLOW_FQS];
+		u32     users[ASK_HW_FLOW_FQS];
 	}               noconf_tx[ASK_HW_NOCONF_SLOTS];
 
 };
@@ -1235,6 +1336,31 @@ EXPORT_SYMBOL_GPL(ask_hw_flow_get_sink_fqid);
  *       congestion / order-restoration wedge).
  * Read-only: issues QM MC QUERYFQ_NP commands only; touches no datapath state.
  */
+static void ask_fq_probe_one(unsigned int slot, u32 ifindex, int set,
+			     u32 users, u32 fqid)
+{
+	struct qm_mcr_queryfq_np np;
+	struct qman_fq fq;
+	char tag[32] = "";
+	int rc;
+
+	if (set >= 0)
+		snprintf(tag, sizeof(tag), " set=%d users=%u", set, users);
+	memset(&fq, 0, sizeof(fq));
+	fq.fqid = fqid;
+	memset(&np, 0, sizeof(np));
+	rc = qman_query_fq_np(&fq, &np);
+	if (rc)
+		pr_info("ask: FQ-PROBE slot=%u ifindex=%u%s fqid=0x%x query rc=%d\n",
+			slot, ifindex, tag, fqid, rc);
+	else
+		pr_info("ask: FQ-PROBE slot=%u ifindex=%u%s fqid=0x%x state=0x%02x frm_cnt=%u byte_cnt=%u fqd_link=0x%x\n",
+			slot, ifindex, tag, fqid,
+			np.state & QM_MCR_NP_STATE_MASK,
+			qm_mcr_np_get(&np, frm_cnt), np.byte_cnt,
+			qm_mcr_np_get(&np, fqd_link));
+}
+
 static int ask_fq_probe_set(const char *val, const struct kernel_param *kp)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_inst;
@@ -1255,25 +1381,16 @@ static int ask_fq_probe_set(const char *val, const struct kernel_param *kp)
 	mutex_lock(&h->lock);
 
 	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
-		struct qman_fq fq;
-		struct qm_mcr_queryfq_np np;
+		unsigned int j;
 
 		if (!h->noconf_tx[i].fqid)
 			continue;
-		memset(&fq, 0, sizeof(fq));
-		fq.fqid = h->noconf_tx[i].fqid;
-		memset(&np, 0, sizeof(np));
-		rc = qman_query_fq_np(&fq, &np);
-		if (rc) {
-			pr_info("ask: FQ-PROBE slot=%u ifindex=%u fqid=0x%x query rc=%d\n",
-				i, h->noconf_tx[i].ifindex, fq.fqid, rc);
-		} else {
-			pr_info("ask: FQ-PROBE slot=%u ifindex=%u fqid=0x%x state=0x%02x frm_cnt=%u byte_cnt=%u fqd_link=0x%x\n",
-				i, h->noconf_tx[i].ifindex, fq.fqid,
-				np.state & QM_MCR_NP_STATE_MASK,
-				qm_mcr_np_get(&np, frm_cnt), np.byte_cnt,
-				qm_mcr_np_get(&np, fqd_link));
-		}
+		ask_fq_probe_one(i, h->noconf_tx[i].ifindex, -1, 0,
+				 h->noconf_tx[i].fqid);
+		for (j = 0; j < smp_load_acquire(&h->noconf_tx[i].nflow); j++)
+			ask_fq_probe_one(i, h->noconf_tx[i].ifindex, j,
+					 h->noconf_tx[i].users[j],
+					 h->noconf_tx[i].flow_fqid[j]);
 		shown++;
 	}
 
@@ -1399,7 +1516,8 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
  */
 static int ask_hw_offload_engage_profile(u8 hw_port_id,
 					 enum fman_pcd_fe_profile profile,
-					 bool from_flow, u8 family_mask)
+					 bool from_flow, u8 family_mask,
+					 u64 expected_role_policy_seq)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct ask_hw_port *p;
@@ -1412,6 +1530,21 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 		return -EAGAIN;
 
 	mutex_lock(&h->lock);
+
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_role_policy_seq)) {
+		rc = -EINVAL;
+		goto out_unlock;
+	}
+	if (expected_role_policy_seq &&
+	    ask_hw_role_admin_disabled[hw_port_id]) {
+		rc = -EACCES;
+		goto out_unlock;
+	}
+	if (expected_role_policy_seq &&
+	    expected_role_policy_seq != ask_hw_role_policy_seq[hw_port_id]) {
+		rc = -ESTALE;
+		goto out_unlock;
+	}
 
 	if (from_flow && !ask_hw_port_family_get(hw_port_id)) {
 		rc = -ENODEV;	/* administratively disabled: stay in software */
@@ -1548,12 +1681,14 @@ out_unlock:
 int ask_hw_offload_engage(u8 hw_port_id)
 {
 	return ask_hw_offload_engage_profile(hw_port_id,
-					     FMAN_PCD_FE_PROFILE_ROUTED, false, 0);
+					     FMAN_PCD_FE_PROFILE_ROUTED, false, 0,
+					     0);
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_engage);
 
 static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id);
-static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc);
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
+				   int *slotp);
 
 static int ask_hw_b2_port_of(const char *ifname, u8 *port_id)
 {
@@ -1569,23 +1704,43 @@ static int ask_hw_b2_port_of(const char *ifname, u8 *port_id)
 
 /*
  * Bridge plan D1 port role: engage @hw_port_id with @profile, disengaging it
- * first if it is armed with another one; the family mask survives. With
- * @if_engaged, a port that is not engaged is left alone (bridge join/leave).
- * Callers serialize on rtnl. Never call with ask_bridge_lock held: disengage
- * takes it.
+ * first if it is armed with another one. NETDEV_PRECHANGEUPPER uses the
+ * prepare/commit split: a successful prepare means FMan's readback-confirmed
+ * detach completed, while the saved family mask lets bridge reconciliation
+ * finish or roll back the generated role transition.
  */
-int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
-			       bool if_engaged, u8 family_mask)
+int ask_hw_offload_role_prepare(u8 hw_port_id,
+				enum fman_pcd_fe_profile profile,
+				bool if_engaged, u8 *family_mask,
+				bool *detached, u64 *policy_seq,
+				u64 expected_policy_seq)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	u8 fam;
 	bool engaged = false, other = false, retained = false, transitioning = false;
 	unsigned int i;
 
+	if (!family_mask || !detached || !policy_seq ||
+	    profile >= FMAN_PCD_FE_PROFILE_NR ||
+	    hw_port_id >= ARRAY_SIZE(ask_hw_role_policy_seq))
+		return -EINVAL;
+	*detached = false;
+	*policy_seq = 0;
+	if (!READ_ONCE(ask_hw_ready))
+		return -EAGAIN;
 	if (!h)
 		return -ENODEV;
 	mutex_lock(&h->lock);
-	fam = family_mask ? family_mask : ask_hw_port_family_get(hw_port_id);
+	if (expected_policy_seq &&
+	    expected_policy_seq != ask_hw_role_policy_seq[hw_port_id]) {
+		mutex_unlock(&h->lock);
+		return -ESTALE;
+	}
+	if (ask_hw_role_admin_disabled[hw_port_id]) {
+		mutex_unlock(&h->lock);
+		return -EACCES;
+	}
+	fam = *family_mask ? *family_mask : ask_hw_port_family_get(hw_port_id);
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
 		if (h->port[i].in_use && h->port[i].port_id == hw_port_id) {
 			retained = h->port[i].fe_retained;
@@ -1593,14 +1748,20 @@ int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
 			engaged = h->port[i].offload_engaged;
 			other = engaged && h->port[i].engaged_profile != profile;
 		}
+	*family_mask = fam;
+	if (!ask_hw_role_policy_seq[hw_port_id])
+		ask_hw_role_policy_seq[hw_port_id] = 1;
+	*policy_seq = ask_hw_role_policy_seq[hw_port_id];
 	mutex_unlock(&h->lock);
 
 	if (retained)
 		return -ESHUTDOWN;
 	if (transitioning)
 		return -EAGAIN;
-	if (if_engaged && (!engaged || !fam))
+	if (if_engaged && (!engaged || !fam)) {
+		*family_mask = 0;
 		return 0;
+	}
 	if (other) {
 		int rc;
 
@@ -1608,9 +1769,49 @@ int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
 			    hw_port_id, profile);
 		rc = ask_hw_offload_disengage(hw_port_id);
 		if (rc)
-			return rc;	/* F-289: stays disengaged, family cleared */
+			return rc;
+		*detached = true;
 	}
-	return ask_hw_offload_engage_profile(hw_port_id, profile, false, fam);
+	return 0;
+}
+
+int ask_hw_offload_role_commit(u8 hw_port_id,
+			       enum fman_pcd_fe_profile profile,
+			       u8 family_mask, u64 policy_seq)
+{
+	if (!family_mask)
+		return 0;
+	return ask_hw_offload_engage_profile(hw_port_id, profile, false,
+					     family_mask, policy_seq);
+}
+
+int ask_hw_offload_engage_role(u8 hw_port_id, enum fman_pcd_fe_profile profile,
+			       bool if_engaged, u8 family_mask)
+{
+	u8 saved;
+	u64 policy_seq, expected_policy_seq;
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	bool detached;
+	int rc;
+
+	if (!h)
+		return -ENODEV;
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_role_policy_seq))
+		return -EINVAL;
+	mutex_lock(&h->lock);
+	++ask_hw_role_policy_seq[hw_port_id];
+	ask_hw_role_admin_disabled[hw_port_id] = false;
+	saved = family_mask ? family_mask : ask_hw_port_family_get(hw_port_id);
+	if (!saved)
+		saved = ASK_FAM_V4 | ASK_FAM_V6;
+	expected_policy_seq = ask_hw_role_policy_seq[hw_port_id];
+	mutex_unlock(&h->lock);
+	rc = ask_hw_offload_role_prepare(hw_port_id, profile, if_engaged,
+					 &saved, &detached, &policy_seq,
+					 expected_policy_seq);
+	if (rc || (if_engaged && !saved))
+		return rc;
+	return ask_hw_offload_role_commit(hw_port_id, profile, saved, policy_seq);
 }
 
 /* T-M6-2 B2 (debugfs only): engage @ifname's port with the L2_DA profile. */
@@ -1619,9 +1820,8 @@ int ask_hw_b2_l2_engage(const char *ifname)
 	u8 port;
 	int rc = ask_hw_b2_port_of(ifname, &port);
 
-	return rc ? rc : ask_hw_offload_engage_profile(port,
-						       FMAN_PCD_FE_PROFILE_L2_DA,
-						       false, 0);
+	return rc ? rc : ask_hw_offload_engage_role(
+		port, FMAN_PCD_FE_PROFILE_L2_DA, false, 0);
 }
 
 /* Manual records bypass bridge ownership and synchronous withdrawal. */
@@ -1731,8 +1931,9 @@ int ask_hw_offload_disengage(u8 hw_port_id)
 
 	p->offload_engaged = false;
 	p->teardown_in_progress = !rc;
-	if (!rc)
-		clear_bit(hw_port_id, ask_hw_port_l2);
+	/* Once the prepared detach began, L2 admission must stay closed even if
+	 * its final readback or teardown failed. */
+	clear_bit(hw_port_id, ask_hw_port_l2);
 	mutex_unlock(&h->lock);
 
 	if (rc) {
@@ -1757,6 +1958,22 @@ int ask_hw_offload_disengage(u8 hw_port_id)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_disengage);
+
+int ask_hw_offload_disengage_admin(u8 hw_port_id)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+
+	if (!h)
+		return -ENODEV;
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_role_policy_seq))
+		return -EINVAL;
+	mutex_lock(&h->lock);
+	ask_hw_role_admin_disabled[hw_port_id] = true;
+	++ask_hw_role_policy_seq[hw_port_id];
+	mutex_unlock(&h->lock);
+	return ask_hw_offload_disengage(hw_port_id);
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_disengage_admin);
 
 /* ------------------------------------------------------------------------- */
 /* Legacy ABI stubs (consumers/tests still name these; Stage C removes them)  */
@@ -1804,7 +2021,8 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
 	 * (genl ASK_CMD_ENGAGE) may enable a port, never traffic.
 	 */
 	rc = ask_hw_offload_engage_profile(port_id,
-					   FMAN_PCD_FE_PROFILE_ROUTED, true, 0);
+					   FMAN_PCD_FE_PROFILE_ROUTED, true, 0,
+					   0);
 	if (rc && rc != -ENODEV)
 		ask_pr_warn("hw: port-bind engage port 0x%02x dir=%u dev=%s failed: %d\n",
 			    port_id, dir,
@@ -2028,7 +2246,8 @@ static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
  * Only ask_hw_prewarm_egress_fq() (genuinely safe process context, no
  * flow_block_lock held) passes allow_alloc=true.
  */
-static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc)
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
+				   int *slotp)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_inst;
 	struct net_device *dev;
@@ -2060,6 +2279,8 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc)
 	if (h && h->noconf_tx[slot].fqid &&
 	    h->noconf_tx[slot].ifindex == phys_ifindex) {
 		*fqid = h->noconf_tx[slot].fqid;
+		if (slotp)
+			*slotp = slot;
 		dev_put(dev);
 		return 0;
 	}
@@ -2097,6 +2318,8 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc)
 	if (h && h->noconf_tx[slot].fqid == 0) {
 		h->noconf_tx[slot].ifindex = phys_ifindex;
 		h->noconf_tx[slot].fqid = *fqid;
+		if (slotp)
+			*slotp = slot;
 	} else if (h && h->noconf_tx[slot].ifindex != phys_ifindex) {
 		ask_pr_warn("hw: no-confirm TX FQ cache collision slot=%u phys_ifindex=%u (cached %u); not caching\n",
 			    slot, phys_ifindex, h->noconf_tx[slot].ifindex);
@@ -2180,18 +2403,106 @@ int ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id)
 /* The port's `offload ipv4|ipv6` mask (ASK_FAM_V4/V6), 0 when disengaged. */
 u8 ask_hw_port_family_mask(u8 hw_port_id)
 {
-	return ask_hw_port_family_get(hw_port_id);
+	return READ_ONCE(ask_hw_ready) ? ask_hw_port_family_get(hw_port_id) : 0;
 }
 
 bool ask_hw_port_is_l2(u8 hw_port_id)
 {
-	return test_bit(hw_port_id, ask_hw_port_l2);
+	return READ_ONCE(ask_hw_ready) &&
+	       test_bit(hw_port_id, ask_hw_port_l2);
 }
 
 /* Cache-only egress FQ lookup: safe under rtnl (never allocates). */
 int ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid)
 {
-	return ask_hw_resolve_oif_fqid(ifindex, fqid, false);
+	return ask_hw_resolve_oif_fqid(ifindex, fqid, false, NULL);
+}
+
+static DEFINE_MUTEX(ask_hw_prewarm_lock);
+
+/*
+ * Fill @slot's per-flow FQ set (see ASK_HW_FLOW_FQS). Safe process context
+ * only: the allocator takes rtnl. FQs belong to the netdev (fsl_dpa frees
+ * them); a partial set is kept and flows spread over what was obtained.
+ */
+static void ask_hw_prewarm_flow_fqs(u8 hw_port_id, int slot)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_inst;
+	u32 td = clamp_t(u32, ask_egress_fq_td, 64 * 1024, 4 * 1024 * 1024);
+	struct net_device *dev;
+	unsigned int n;
+	u32 fqid;
+	int rc = 0;
+
+	if (!h || slot < 0)
+		return;
+	mutex_lock(&ask_hw_prewarm_lock);
+	n = h->noconf_tx[slot].nflow;
+	while (n < ASK_HW_FLOW_FQS) {
+		rtnl_lock();
+		dev = ask_hw_port_netdev(hw_port_id);
+		if (dev && dev->ifindex == h->noconf_tx[slot].ifindex)
+			dev_hold(dev);
+		else
+			dev = NULL;
+		rtnl_unlock();
+		if (!dev) {
+			rc = -ENODEV;
+			break;
+		}
+		rc = dpaa_alloc_offload_tx_fq_td(dev, td, &fqid);
+		dev_put(dev);
+		if (rc)
+			break;
+		h->noconf_tx[slot].flow_fqid[n] = fqid;
+		smp_store_release(&h->noconf_tx[slot].nflow, ++n);
+	}
+	mutex_unlock(&ask_hw_prewarm_lock);
+	if (rc)
+		ask_pr_warn("hw: per-flow TX FQ set for port 0x%02x stopped at %u/%u (%d)\n",
+			    hw_port_id, n, ASK_HW_FLOW_FQS, rc);
+	else
+		ask_pr_info("hw: per-flow TX FQ set for port 0x%02x: %u FQs, td %u\n",
+			    hw_port_id, n, td);
+}
+
+/*
+ * Pick @slot's least-used per-flow FQ (lowest index on a tie) and count the
+ * flow on it; @legacy when the set is empty or egress_fqs=0. h->lock held.
+ */
+static u32 ask_hw_flow_fq_get(struct ask_hw_pcd *h, int slot, u32 legacy)
+{
+	unsigned int n = min_t(unsigned int, READ_ONCE(ask_egress_fqs),
+			       smp_load_acquire(&h->noconf_tx[slot].nflow));
+	u32 *users = h->noconf_tx[slot].users;
+	unsigned int i, best = 0;
+
+	lockdep_assert_held(&h->lock);
+	if (!n)
+		return legacy;
+	for (i = 1; i < n; i++)
+		if (users[i] < users[best])
+			best = i;
+	users[best]++;
+	return h->noconf_tx[slot].flow_fqid[best];
+}
+
+/* Drop the flow count ask_hw_flow_fq_get() took for @fqid. h->lock held. */
+static void ask_hw_flow_fq_put(struct ask_hw_pcd *h, u32 fqid)
+{
+	unsigned int i, j, n;
+
+	lockdep_assert_held(&h->lock);
+	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		n = smp_load_acquire(&h->noconf_tx[i].nflow);
+		for (j = 0; j < n; j++) {
+			if (h->noconf_tx[i].flow_fqid[j] != fqid)
+				continue;
+			if (!WARN_ON_ONCE(!h->noconf_tx[i].users[j]))
+				h->noconf_tx[i].users[j]--;
+			return;
+		}
+	}
 }
 
 /* @hw_port_id's slot if it is engaged as L2_DA. h->lock held. */
@@ -2280,6 +2591,7 @@ void ask_hw_prewarm_egress_fq(u8 hw_port_id)
 {
 	struct net_device *dev;
 	int ifindex = 0;
+	int slot = -1;
 	u32 fqid;
 
 	rtnl_lock();
@@ -2288,8 +2600,8 @@ void ask_hw_prewarm_egress_fq(u8 hw_port_id)
 		ifindex = dev->ifindex;
 	rtnl_unlock();
 
-	if (ifindex)
-		ask_hw_resolve_oif_fqid(ifindex, &fqid, true);
+	if (ifindex && !ask_hw_resolve_oif_fqid(ifindex, &fqid, true, &slot))
+		ask_hw_prewarm_flow_fqs(hw_port_id, slot);
 }
 
 int ask_hw_flow_preflight(const struct ask_flow_key *key,
@@ -2381,7 +2693,7 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 	/* Egress forward FQ must exist before we publish. CR-013: this runs
 	 * in the flow-insert hot path under flow_block_lock -- never allow
 	 * the cold-cache allocation here. */
-	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid, false);
+	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid, false, NULL);
 	if (rc)
 		return rc;
 
@@ -2407,6 +2719,7 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 	u32 tx_fqid = 0;
 	u32 cookie;
 	u8  port_id = 0;
+	int oif_slot = -1;
 	int rc;
 
 	(void)action_flags; (void)dir;
@@ -2439,7 +2752,7 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 
 	/* CR-013: same hot-path constraint as ask_hw_flow_preflight() above --
 	 * this runs under flow_block_lock, never allow the cold-cache alloc. */
-	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid, false);
+	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid, false, &oif_slot);
 	if (rc)
 		return rc;
 
@@ -2456,6 +2769,9 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 	 * ask_flow_offload.c. This function now only snapshots the cookie
 	 * metadata for teardown (port_id, sink_ifindex, sink_fqid). */
 
+	if (oif_slot >= 0)
+		tx_fqid = ask_hw_flow_fq_get(h, oif_slot, tx_fqid);
+
 	ck.fm           = h->fman;
 	ck.port_id      = port_id;
 	ck.sink_ifindex = (int)oif;
@@ -2463,6 +2779,7 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 
 	cookie = ask_hw_cookie_alloc(h, &ck);
 	if (!cookie) {
+		ask_hw_flow_fq_put(h, tx_fqid);
 		rc = -ENOMEM;
 		goto out_unlock;
 	}
@@ -2500,6 +2817,7 @@ int ask_hw_flow_remove(u32 hw_flow_id)
 	 * (Fork-B) manages its own flow deletion via ask_fe_flow_remove()
 	 * in ask_flow_offload.c. */
 
+	ask_hw_flow_fq_put(h, ck->sink_fqid);
 	ask_hw_cookie_free(h, hw_flow_id);
 
 	mutex_unlock(&h->lock);
@@ -2534,6 +2852,12 @@ int ask_hw_init(void)
 	(void)ask_hw_pcd_bringup();
 	return 0;
 }
+
+bool ask_hw_is_ready(void)
+{
+	return READ_ONCE(ask_hw_ready);
+}
+EXPORT_SYMBOL_GPL(ask_hw_is_ready);
 
 void ask_hw_set_ready(bool ready)
 {
