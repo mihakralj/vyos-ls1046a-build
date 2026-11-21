@@ -76,8 +76,9 @@ SSHO="-o BatchMode=yes -o ConnectTimeout=8"
 DUT_KIND=${DUT_KIND:-ask2}; RIG_NS=${RIG_NS:-}
 RIG_EXTERNAL_NAT_TOKEN=${RIG_EXTERNAL_NAT_TOKEN:-}
 if [ -n "$RIG_EXTERNAL_NAT_TOKEN" ] &&
-   { [ "$DUT_KIND" != vendor ] || ! [[ $RIG_EXTERNAL_NAT_TOKEN =~ ^[0-9a-f]{32}$ ]]; }; then
-  echo "RIG_EXTERNAL_NAT_TOKEN requires a vendor DUT and a 32-digit hexadecimal owner token" >&2
+   { [ "$DUT_KIND" != vendor ] && [ "$DUT_KIND" != ask2 ] ||
+     ! [[ $RIG_EXTERNAL_NAT_TOKEN =~ ^[0-9a-f]{32}$ ]]; }; then
+  echo "RIG_EXTERNAL_NAT_TOKEN requires an ASK2/vendor DUT and a 32-digit hexadecimal owner token" >&2
   exit 2
 fi
 PPPOE_SERVER4=${PPPOE_SERVER4:-10.99.50.1}
@@ -189,7 +190,7 @@ nat_clear(){
   $S 'sudo nft delete table ip ask2q 2>/dev/null; sudo nft delete table ip6 ask2q 2>/dev/null; true'; }
 nat_set(){
   if [ -n "$RIG_EXTERNAL_NAT_TOKEN" ]; then
-    local listing rule iface suffix family=ip source=${2:-} dest=${3:-} owner
+    local listing rule iface suffix family=ip source=${2:-} dest=${3:-} owner nft_cmd=nft
     owner=${RIG_EXTERNAL_NAT_OWNER:-dut2-wan-$RIG_EXTERNAL_NAT_TOKEN}
     case $1 in
       none) suffix= ;;
@@ -203,7 +204,8 @@ nat_set(){
       6r) iface=eth3; suffix=nat6down; family=ip6 ;;
       *) echo "ERROR: external NAT does not support mode $1" >&2; return 1 ;;
     esac
-    listing=$($S "nft -a list table $family vwn$RIG_EXTERNAL_NAT_TOKEN") || {
+    [ "$DUT_KIND" != ask2 ] || nft_cmd='sudo nft'
+    listing=$($S "$nft_cmd -a list table $family vwn$RIG_EXTERNAL_NAT_TOKEN") || {
       echo "ERROR: external NAT table is unavailable" >&2; return 1;
     }
     printf '%s\n' "$listing" | grep -Fq "comment \"$owner\"" || {
@@ -211,6 +213,9 @@ nat_set(){
     }
     if [ -n "$suffix" ]; then
       rule=$(printf '%s\n' "$listing" | grep -F "comment \"$owner-$suffix\"") || return 1
+      case "$DUT_KIND:$suffix" in
+        ask2:ppp|ask2:wg) source=10.99.2.0/24 ;;
+      esac
       [ "$(printf '%s\n' "$rule" | wc -l)" -eq 1 ] &&
         [ -n "$source" ] && [ -n "$dest" ] || {
           echo "ERROR: external NAT rule $suffix is incomplete" >&2; return 1;

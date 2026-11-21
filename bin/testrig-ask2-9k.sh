@@ -211,12 +211,65 @@ df_probe(){
     on g1 "ping -M do -c 2 -W 2 -s $s4 -I $1 $2 >/dev/null" || { echo "DF ping $s4 B $1 -> $2 failed" >&2; bad=1; }
     on g2 "ping -M do -c 2 -W 2 -s $s4 -I $2 $1 >/dev/null" || { echo "DF ping $s4 B $2 -> $1 failed" >&2; bad=1; }
   done
+  # Off/on re-engagement can leave a failed IPv6 neighbor entry on the
+  # generator while the DUT's solicited advertisement is transient. Prime
+  # each tagged and untagged next hop with normal packets before the strict DF
+  # probes; retain the failure if it cannot settle.
+  for p in "$g1p6 $g2p6" "$g1v6 $g2v6" "$g1v6 $g2p6"; do
+    local i ok=0
+    set -- $p
+    for i in $(seq 1 10); do
+      if on g1 "ping -6 -c 1 -W 1 -s 56 -I $1 $2 >/dev/null"; then
+        ok=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$ok" = 1 ] || { echo "DF probe cannot prime IPv6 neighbor $1 -> $2" >&2; bad=1; }
+    ok=0
+    for i in $(seq 1 10); do
+      if on g2 "ping -6 -c 1 -W 1 -s 56 -I $2 $1 >/dev/null"; then
+        ok=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$ok" = 1 ] || { echo "DF probe cannot prime IPv6 neighbor $2 -> $1" >&2; bad=1; }
+  done
   for p in "$g1p6 $g2p6" "$g1v6 $g2v6" "$g1v6 $g2p6"; do
     set -- $p
     on g1 "ping -6 -M do -c 2 -W 2 -s $s6 -I $1 $2 >/dev/null" || { echo "DF ping $s6 B $1 -> $2 failed" >&2; bad=1; }
     on g2 "ping -6 -M do -c 2 -W 2 -s $s6 -I $2 $1 >/dev/null" || { echo "DF ping $s6 B $2 -> $1 failed" >&2; bad=1; }
   done
   [ "$bad" = 0 ]
+}
+
+ndp_prime(){
+  local g1p6=${QUICK_G1_IPV6:-fd99:1::112} g2p6=${QUICK_G2_IPV6:-fd99:2::113}
+  local g1v6=${QUICK_G1_VLAN6:-fd99:10::112} g2v6=${QUICK_G2_VLAN6:-fd99:20::113}
+  local p i ok
+
+  for p in "$g1p6 $g2p6" "$g1v6 $g2v6" "$g1v6 $g2p6"; do
+    set -- $p
+    ok=0
+    for i in $(seq 1 10); do
+      if on g1 "ping -6 -c 1 -W 1 -s 56 -I $1 $2 >/dev/null"; then
+        ok=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$ok" = 1 ] || return 1
+    ok=0
+    for i in $(seq 1 10); do
+      if on g2 "ping -6 -c 1 -W 1 -s 56 -I $2 $1 >/dev/null"; then
+        ok=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$ok" = 1 ] || return 1
+  done
 }
 
 up(){
@@ -245,6 +298,7 @@ up(){
   offload_configured || die "DUT offload configuration changed during generator claims; lease kept"
   armed_check on || die "DUT offload is not armed; lease kept"
   for i in 0 1 2 3; do gen_mtu check "$i" 1500 "$MTU" || die "${GLINKS[$i]} claim changed; lease kept"; done
+  ndp_prime || die "baseline IPv6 neighbors did not settle at MTU 1500; lease kept"
   offload off
   vyos "set interfaces ethernet eth3 mtu $MTU" "set interfaces ethernet eth4 mtu $MTU" \
        "set interfaces ethernet eth3 vif 10 mtu $MTU" "set interfaces ethernet eth4 vif 20 mtu $MTU" ||

@@ -81,7 +81,7 @@ dut_ppp_drained(){
   for i in $(seq 1 30); do
     on dut "test ! -e /sys/class/net/pppoe7 &&
       ! systemctl is-active --quiet ppp@pppoe7.service 2>/dev/null &&
-      ! pgrep -af 'pppd.*pppoe7' >/dev/null" && return 0
+      ! ps -C pppd -o args= | grep -q '[p]ppoe7'" && return 0
     sleep 1
   done
   echo "DUT pppoe7 link, unit, or process did not drain" >&2
@@ -146,6 +146,7 @@ setup(){
   local unit="ask2wan-$RID.service" boot nat_token i
   say "wan setup, lease $LEASE"
   # dell1: private run dir, VLAN 7, second concentrator whose pppd runs only this run's hook scripts
+  say "wan stage: generator owned resources"
   j g1 rundir "$D" "$O-run"; own g1 rundir-create "$D" "$O-run" || return 1
   j g1 link "$IF7" "$O-v7"; own g1 link-create "$IF7" "$O-v7" link "$GEN_IF" type vlan id "$VID" || return 1
   on g1 "sudo ip link set $IF7 up" || return 1
@@ -165,17 +166,33 @@ chmod 755 $D/ipv6-up
   echo "ipv6-up-script $D/ipv6-up"; } > $D/options
 EOS
   on g1 "sudo test -x $D/ipv6-up -a -s $D/options" || { echo "ABORT: dell1 hook scripts missing" >&2; return 1; }
+  say "wan stage: transient PPPoE concentrator"
   boot=$(on g1 'cat /proc/sys/kernel/random/boot_id') || return 1
   [[ $boot =~ ^[0-9a-f-]{36}$ ]] || return 1
   j g1 procs "$unit" "$boot"
   on g1 "sudo systemd-run --quiet --collect --unit='$unit' \
+    --service-type=forking --property=PIDFile='$D/pppoe-server.pid' \
     --property=KillMode=control-group --property=TimeoutStopSec=20s \
     /usr/sbin/pppoe-server -k -g '$PPPOE_PLUGIN' -I '$IF7' \
     -L 10.99.57.1 -R 10.99.57.10 -N 2 -C 'ASK2-WAN7-$RID' \
     -X '$D/pppoe-server.pid' -O '$D/options'" || return 1
-  on g1 "systemctl is-active --quiet '$unit' &&
-         systemctl show --property=MainPID --value '$unit' | grep -Eq '^[1-9][0-9]*$' &&
-         test -s '$D/pppoe-server.pid'" || return 1
+  local service_ok=0
+  for i in $(seq 1 20); do
+    if on g1 "systemctl is-active --quiet '$unit' &&
+      systemctl show --property=MainPID --value '$unit' |
+        grep -Eq '^[1-9][0-9]*$'"; then
+      service_ok=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ "$service_ok" = 1 ] || {
+    echo "ABORT: transient PPPoE service did not publish an active PID" >&2
+    on g1 "systemctl show --no-pager '$unit' -p ActiveState -p SubState \
+      -p MainPID" >&2 || true
+    return 1
+  }
+  say "wan stage: DUT PPPoE configuration"
   # DUT: VLAN 7 and pppoe7 (same account as pppoe10), every node tagged with this run's description
   local PW; PW=$(on dut 'cli-shell-api returnActiveValue interfaces pppoe pppoe10 authentication password')
   [ -n "$PW" ] || { echo "ABORT: no pppoe10 password in the DUT config" >&2; return 1; }
@@ -196,6 +213,7 @@ EOS
     on g1 "pgrep -af '^/usr/sbin/pppoe-server .*$D/'; sudo journalctl -t pppd -t pppoe-server --no-pager -n 8" >&2
     return 1
   fi
+  say "wan stage: generator WAN routes"
   # dell2 (LAN): the WAN-side prefixes through the DUT, tagged proto 159 metric 4159
   local dst gw route
   for route in "${WAN_G2_ROUTES[@]}"; do
@@ -203,6 +221,7 @@ EOS
     j g2 route "$dst" "$gw"; own g2 route-add "$dst" "$gw" 159 4159 </dev/null || return 1
   done
   # WireGuard over pppoe7: owned wgw0 on both ends; dell1's IPv6 return path to the LAN is a tagged policy
+  say "wan stage: owned WireGuard links and routes"
   # route (table 158), not a main-table route over dell1's own fd99:2::/64
   local kd kg pd pg
   j dut link wgw0 "$O-wg"; own dut link-create wgw0 "$O-wg" type wireguard || return 1
