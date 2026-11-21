@@ -44,6 +44,7 @@ static struct platform_device pdev = { .dev = { .drvdata = &controller } };
 static const cpumask_t affine_cpus = { .bits = (1U << NR_CPUS) - 1 };
 static cpumask_t clean_cpus;
 static bool cgr_deleted, cgrid_released, fail_registration;
+static int fail_kill_cpu = -1;
 static unsigned int allocated_netdevs, duplicate_releases, mask_frees;
 static void (*registered_action)(void *);
 static void *registered_data;
@@ -99,6 +100,8 @@ static void kfree(void *ptr)
 static int kill_fq(struct device *dev, struct qman_fq *fq)
 {
 	assert(dev == &pdev.dev);
+	if (fail_kill_cpu >= 0 && fq == &queues[fail_kill_cpu])
+		return -ETIMEDOUT;
 	kfree(fq);
 	return 0;
 }
@@ -193,6 +196,7 @@ static void reset(bool fail)
 	qi_cache = NULL;
 	cgr_deleted = cgrid_released = false;
 	fail_registration = fail;
+	fail_kill_cpu = -1;
 	allocated_netdevs = duplicate_releases = mask_frees = 0;
 	registered_action = NULL;
 	registered_data = NULL;
@@ -222,6 +226,17 @@ int main(void)
 	reset(true);
 	ret = caam_qi_init(&pdev);
 	if (ret != -ENOMEM || registered_action || !fully_released() ||
+	    duplicate_releases)
+		failures++;
+
+	reset(false);
+	ret = caam_qi_init(&pdev);
+	assert(!ret && registered_action && mask_frees == 1);
+	fail_kill_cpu = 0;
+	registered_action(registered_data);
+	if (queues[0].released || netdevs[0].released ||
+	    !queues[1].released || !netdevs[1].released ||
+	    cgr_deleted || cgrid_released || cache.released ||
 	    duplicate_releases)
 		failures++;
 

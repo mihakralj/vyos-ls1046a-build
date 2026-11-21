@@ -12,7 +12,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOCATOR = "int dpaa_alloc_offload_tx_fq_td"
+ALLOCATOR = "int dpaa_alloc_offload_tx_fq_ics"
 HARNESS = ROOT / "tests/dut/dpaa_offload_fq.c"
 
 
@@ -83,10 +83,10 @@ def run(kernel):
     rtnl = (kernel / "net/core/rtnetlink.c").read_text()
     rtnl_header = (kernel / "include/linux/rtnetlink.h").read_text()
     check_source_contract(dpaa, qman, net, netdev, rtnl, rtnl_header)
-    per_fq_td = "F-316" in dpaa
+    offload_cgr = "F-316" in dpaa
     body = "\n".join((
         function(dpaa, "static int dpaa_fq_init"),
-        *((function(dpaa, ALLOCATOR),) if per_fq_td else ()),
+        *((function(dpaa, ALLOCATOR),) if offload_cgr else ()),
         function(dpaa, "int dpaa_alloc_offload_tx_fq"),
         function(dpaa, "static void dpaa_remove"),
     ))
@@ -99,13 +99,14 @@ def run(kernel):
                 "-std=gnu11", "-Wall", "-Wextra", "-Werror",
                 "-Wno-unused-parameter", "-Wno-unused-function",
                 *(["-DCGR_CONTAINMENT"] if "F-300: keep unsettled CGR owners alive" in dpaa else []),
-                *(["-DOFFLOAD_FQ_TD"] if per_fq_td else []),
+                *(["-DOFFLOAD_FQ_CGR"] if offload_cgr else []),
                 "-I", str(path), str(HARNESS), "-o", str(binary),
             ],
             check=True,
         )
         for case in ("success", "create-error", "timeout", "init-error",
-                     "unregistered", "probe-error", *(("td",) if per_fq_td else ())):
+                     "unregistered", "probe-error",
+                     *(("ics", "no-cgr", "td-preserve") if offload_cgr else ())):
             subprocess.run([str(binary), case], check=True, timeout=30)
     print("Host model only: no QMan hardware or concurrent parent teardown tested.")
 

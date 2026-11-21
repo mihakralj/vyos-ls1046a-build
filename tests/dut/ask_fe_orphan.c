@@ -10,8 +10,10 @@
 #include <string.h>
 
 typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+#define READ_ONCE(x) (x)
 typedef struct { int counter; } atomic_t;
 #define ATOMIC_INIT(v) { (v) }
 static void atomic_inc(atomic_t *a) { a->counter++; }
@@ -154,11 +156,21 @@ static struct fman the_fman;
 static struct fman *fman_ptr = &the_fman;
 static struct fman *ask_hw_get_fman(void) { return fman_ptr; }
 
+#define ASK_FLOW_L3_IPV4 0
+#define ASK_FLOW_L3_IPV6 1
+#define ASK_NATF_SNAT 1
 #define ASK_VLANF_POP 1
 #define ASK_VLANF_PUSH 2
 #define ASK_VLANF_PPPOE_STRIP 4
 #define ASK_VLANF_PPPOE_INSERT 8
-struct ask_flow_key { u8 port_id; u8 id; u8 vlan_edit_flags; };
+struct ask_flow_key {
+	u8 port_id;
+	u8 id;
+	u8 l3_proto;
+	u8 nat_flags;
+	u8 vlan_edit_flags;
+	u16 egress_mtu;
+};
 static void ask_fe_build_key_dual(const struct ask_flow_key *key,
 				  u8 k[ASK_FE_KEY_SIZE_DUAL])
 {
@@ -322,7 +334,17 @@ static int ask_pppoe_session_finish_withdrawal(u64 epoch)
 	return 0;
 }
 
+static bool nat44_armed, nat66_armed, ask_ipv6_hw_frag;
+static bool ask_hw_nat44_offload_armed(void) { return nat44_armed; }
+static bool ask_hw_nat66_offload_armed(void) { return nat66_armed; }
+static int ask_flow_pending_invalidate_nat44(void)
+{
+	lockdep_assert_held(&ask_flow_lifecycle_lock);
+	return 0;
+}
+
 #include "ask_fe_flush_body.h"
+#include "ask_fe_nat_frag_flush_body.h"
 
 static int collect_flush_flow(struct ask_flow *f, void *arg)
 {
@@ -529,7 +551,7 @@ static void check_vlan_flush(void)
 	current_generation = 5;
 	replacement_present[13] = true;
 	replacement_token[13] = 131;
-	ask_flow_flush_matching(collect_flush_flow, "superseded flush");
+	(void)__ask_flow_flush_matching(collect_flush_flow, "superseded flush", false, NULL);
 	assert(!flush_owner_present && replacement_present[13]);
 	assert(del_calls[13] == 1 && !current_generation);
 
@@ -709,6 +731,81 @@ static void check_pppoe_mismatch_with_sw_failure(void)
 	assert(del_calls[25] == 1);
 }
 
+static void check_orphan_cap_scope(void)
+{
+	struct ask_flow_key plain = { .port_id = 0x10, .id = 30, .l3_proto = ASK_FLOW_L3_IPV4 };
+	struct ask_flow_key vlan = {
+		.port_id = 0x10, .id = 31, .l3_proto = ASK_FLOW_L3_IPV4,
+		.vlan_edit_flags = ASK_VLANF_POP,
+	};
+	struct ask_flow_key pppoe_vlan = {
+		.port_id = 0x10, .id = 32, .l3_proto = ASK_FLOW_L3_IPV4,
+		.vlan_edit_flags = ASK_VLANF_POP | ASK_VLANF_PPPOE_STRIP,
+	};
+	struct ask_flow_key v6frag = {
+		.port_id = 0x10, .id = 33, .l3_proto = ASK_FLOW_L3_IPV6,
+		.egress_mtu = 1492,
+	};
+	struct ask_flow_key emerg = { .port_id = 0x22, .id = 34, .l3_proto = ASK_FLOW_L3_IPV4 };
+
+	flush_owner_present = false;
+	vlan_armed = pppoe_armed = nat44_armed = nat66_armed = ask_ipv6_hw_frag = false;
+
+	/* 1. An unrelated plain-routed orphan must not block capability flushes. */
+	del_rc[30] = -ETIMEDOUT;
+	assert(ask_fe_flow_remove_retain(&plain, 30, 300, "plain") == -EAGAIN);
+	assert(ask_fe_orphan_count == 1);
+	assert(ask_flow_vlan_flush() == 0);
+	assert(ask_flow_pppoe_flush_sync() == 0);
+	assert(ask_flow_nat44_flush() == 0);
+	assert(ask_flow_nat66_flush() == 0);
+	assert(ask_flow_v6_frag_flush_sync() == 0);
+
+	/* 2. A VLAN-only orphan blocks VLAN withdrawal, not PPPoE/NAT/v6-frag. */
+	del_rc[31] = -ETIMEDOUT;
+	assert(ask_fe_flow_remove_retain(&vlan, 31, 310, "vlan") == -EAGAIN);
+	assert(ask_flow_vlan_flush() == -EBUSY);
+	assert(ask_flow_pppoe_flush_sync() == 0);
+	assert(ask_flow_nat44_flush() == 0);
+	assert(ask_flow_nat66_flush() == 0);
+	assert(ask_flow_v6_frag_flush_sync() == 0);
+
+	/* 3. A PPPoE-over-VLAN orphan blocks both VLAN and PPPoE, not NAT/v6-frag. */
+	ask_fe_orphan_exit();
+	del_rc[32] = -ETIMEDOUT;
+	assert(ask_fe_flow_remove_retain(&pppoe_vlan, 32, 320, "pppoe-vlan") == -EAGAIN);
+	assert(ask_flow_vlan_flush() == -EBUSY);
+	assert(ask_flow_pppoe_flush_sync() == -EBUSY);
+	assert(ask_flow_nat44_flush() == 0);
+	assert(ask_flow_nat66_flush() == 0);
+	assert(ask_flow_v6_frag_flush_sync() == 0);
+
+	/* 4. An IPv6-frag orphan blocks v6-frag, not VLAN/PPPoE/NAT. */
+	ask_fe_orphan_exit();
+	del_rc[33] = -ETIMEDOUT;
+	assert(ask_fe_flow_remove_retain(&v6frag, 33, 330, "v6frag") == -EAGAIN);
+	assert(ask_flow_v6_frag_flush_sync() == -EBUSY);
+	assert(ask_flow_vlan_flush() == 0);
+	assert(ask_flow_pppoe_flush_sync() == 0);
+	assert(ask_flow_nat44_flush() == 0);
+	assert(ask_flow_nat66_flush() == 0);
+
+	/* 5. Emergency OOM orphan fails closed and blocks every capability flush. */
+	ask_fe_orphan_exit();
+	alloc_fail = 1;
+	del_rc[34] = -ETIMEDOUT;
+	assert(ask_fe_flow_remove_retain(&emerg, 34, 340, "emerg") == -EAGAIN);
+	alloc_fail = 0;
+	assert(ask_flow_vlan_flush() == -EBUSY);
+	assert(ask_flow_pppoe_flush_sync() == -EBUSY);
+	assert(ask_flow_nat44_flush() == -EBUSY);
+	assert(ask_flow_nat66_flush() == -EBUSY);
+	assert(ask_flow_v6_frag_flush_sync() == -EBUSY);
+
+	ask_fe_orphan_exit();
+	assert(live_allocs == 0 && !module_refs);
+}
+
 int main(int argc, char **argv)
 {
 	struct ask_flow_key a = { .port_id = 0x10, .id = 1 };
@@ -730,6 +827,10 @@ int main(int argc, char **argv)
 	}
 	if (argc > 1 && !strcmp(argv[1], "pppoe-sw-remove-failure")) {
 		check_pppoe_mismatch_with_sw_failure();
+		return 0;
+	}
+	if (argc > 1 && !strcmp(argv[1], "cap-scope")) {
+		check_orphan_cap_scope();
 		return 0;
 	}
 	key_bytes(1, ka);
@@ -802,7 +903,7 @@ int main(int argc, char **argv)
 	flush_flow.hw_backed = true;
 	flush_flow.fe_token = 0;
 	warnings = warning_count;
-	ask_flow_flush_matching(collect_flush_flow, "legacy flush");
+	(void)__ask_flow_flush_matching(collect_flush_flow, "legacy flush", false, NULL);
 	assert(flush_owner_present && del_calls[5] == calls);
 	assert(ask_fe_orphan_count == 1);
 	assert(warning_count == warnings + 1);
@@ -810,7 +911,7 @@ int main(int argc, char **argv)
 	/* A software-only identified flow has no FE entry to withdraw. */
 	flush_flow.fe_token = 50;
 	flush_flow.hw_backed = false;
-	ask_flow_flush_matching(collect_flush_flow, "software-only flush");
+	(void)__ask_flow_flush_matching(collect_flush_flow, "software-only flush", false, NULL);
 	assert(!flush_owner_present && del_calls[5] == calls);
 	assert(ask_fe_orphan_count == 1 && generation_releases == 1);
 	alloc_fail = 0;
@@ -822,7 +923,7 @@ int main(int argc, char **argv)
 	allocator_expect_lock = false;
 	alloc_fail = 1;
 	warnings = warning_count;
-	ask_flow_flush_matching(ask_collect_flush_victim, "collector OOM");
+	(void)__ask_flow_flush_matching(ask_collect_flush_victim, "collector OOM", false, NULL);
 	assert(flush_owner_present && del_calls[5] == calls);
 	assert(warning_count == warnings + 2);
 	allocator_expect_lock = true;
@@ -838,7 +939,7 @@ int main(int argc, char **argv)
 	del_rc[5] = -ETIMEDOUT;
 	alloc_fail = 1;
 	calls = sw_removals;
-	ask_flow_flush_matching(collect_flush_flow, "flush");
+	(void)__ask_flow_flush_matching(collect_flush_flow, "flush", false, NULL);
 	alloc_fail = 0;
 	assert(flush_owner_present && sw_removals == calls);
 	assert(generation_tombstoned && ask_fe_orphan_count == 2);
@@ -867,7 +968,7 @@ int main(int argc, char **argv)
 	current_generation = 2;
 	generation_tombstoned = false;
 	calls = del_calls[9];
-	ask_flow_flush_matching(collect_flush_flow, "settled flush");
+	(void)__ask_flow_flush_matching(collect_flush_flow, "settled flush", false, NULL);
 	assert(!flush_owner_present && del_calls[9] == calls + 1);
 	assert(delete_calls_at_removal == calls + 1);
 	assert(generation_releases == 2 && !current_generation);
@@ -878,7 +979,7 @@ int main(int argc, char **argv)
 	current_generation = 3;
 	calls = del_calls[9];
 	warnings = warning_count;
-	ask_flow_flush_matching(collect_flush_flow, "stale flush");
+	(void)__ask_flow_flush_matching(collect_flush_flow, "stale flush", false, NULL);
 	assert(flush_owner_present && !generation_tombstoned);
 	assert(del_calls[9] == calls && warning_count == warnings + 1);
 

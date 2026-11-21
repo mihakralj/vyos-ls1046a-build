@@ -9,8 +9,16 @@
 
 typedef uint8_t u8;
 typedef uint32_t u32;
+typedef int raw_spinlock_t;
 
 #define DPAA_ASSERT(x)
+#define unlikely(x) (x)
+#define raw_spin_lock_irqsave(lock, flags) do { \
+	(void)(lock); (flags) = 0; assert(!mc_locked); mc_locked = true; \
+} while (0)
+#define raw_spin_unlock_irqrestore(lock, flags) do { \
+	(void)(lock); (void)(flags); assert(mc_locked); mc_locked = false; \
+} while (0)
 #define QM_MCC_VERB_QUERYFQ_NP 0x45
 #define QM_MCC_VERB_QUERYFQ 0x44
 #define QM_MCC_VERB_ALTER_RETIRE 0x4a
@@ -63,7 +71,8 @@ union qm_mr_entry {
 	struct { u8 verb, fqs; u32 fqid; } fq;
 };
 struct qm_dqrr_entry { u32 fqid; u8 stat; bool has_frame; };
-struct qm_portal { int unused; };
+struct qm_mc { raw_spinlock_t lock; };
+struct qm_portal { struct qm_mc mc; };
 struct device { int unused; };
 struct qm_portal_config { struct device *dev; };
 struct qman_portal {
@@ -106,6 +115,14 @@ static unsigned int message_count, message_pos, dequeue_count, dequeue_pos;
 static unsigned int foreign_messages, discarded_frames, retire_commands, oos_commands, errors;
 static unsigned int released_fqids;
 static bool affine_held, target_retired, target_orl_pending, target_nonempty;
+static bool mc_locked __attribute__((unused));
+
+static int __attribute__((unused)) qman_requires_cleanup(void)
+{
+	return current != FOREIGN_RING_ENTRIES;
+}
+
+static void __attribute__((unused)) udelay(int usecs) {}
 
 static struct qman_portal *get_affine_portal(void)
 {
@@ -230,7 +247,7 @@ static int qm_mc_result_timeout(struct qm_portal *p, union qm_mc_result **mcr)
 {
 	assert(p == &portal.p && affine_held);
 	*mcr = &result;
-	if (current == OVERWRITTEN_BEFORE_SNAPSHOT &&
+	if (!mc_locked && current == OVERWRITTEN_BEFORE_SNAPSHOT &&
 	    result.verb == QM_MCC_VERB_ALTER_RETIRE)
 		result.alterfq.fqs = 0;
 	return 1;
@@ -246,7 +263,7 @@ static void gen_pool_free(void *pool, unsigned long address, size_t count)
 	assert(count == 1);
 	released_fqids++;
 }
-static void cpu_relax(void) {}
+static void __attribute__((unused)) cpu_relax(void) {}
 static void qm_mr_pvb_update(struct qm_portal *p)
 {
 	if (current == FOREIGN_FQRL && !message_count)
@@ -305,7 +322,7 @@ static void reset(enum scenario scenario)
 	message_count = message_pos = dequeue_count = dequeue_pos = 0;
 	foreign_messages = discarded_frames = retire_commands = oos_commands = errors = 0;
 	released_fqids = 0;
-	affine_held = target_retired = target_orl_pending = target_nonempty = false;
+	affine_held = mc_locked = target_retired = target_orl_pending = target_nonempty = false;
 	if (scenario == FOREIGN_RING_ENTRIES) {
 		push_dequeue(TARGET_FQID, 0, true);
 		push_dequeue(OTHER_FQID, 0, true);
@@ -340,10 +357,11 @@ static int check(enum scenario scenario, const char *name, bool control)
 		assert(false);
 	}
 	if (control) {
-		assert(rc == -EINPROGRESS && !unsafe && !affine_held);
+		assert(rc == -EINPROGRESS && !unsafe && !affine_held && !mc_locked);
 		printf("QMan shutdown %s: simulated refusal\n", name);
 		return 0;
 	}
+	assert(!mc_locked);
 	if (!unsafe) {
 		printf("QMan shutdown %s: contained\n", name);
 		return 0;

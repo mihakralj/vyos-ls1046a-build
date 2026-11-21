@@ -11,9 +11,17 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t dma_addr_t;
+typedef int raw_spinlock_t;
 
 #define CONFIG_FSL_DPAA_CHECKING 1
 #define DPAA_ASSERT(x) assert(x)
+#define unlikely(x) (x)
+#define raw_spin_lock_irqsave(lock, flags) do { \
+	(void)(lock); (flags) = 0; assert(!mc_locked); mc_locked = true; \
+} while (0)
+#define raw_spin_unlock_irqrestore(lock, flags) do { \
+	(void)(lock); (void)(flags); assert(mc_locked); mc_locked = false; \
+} while (0)
 #define QMAN_FQ_FLAG_NO_MODIFY 0x02
 #define QMAN_FQ_FLAG_TO_DCPORTAL 0x04
 #define QMAN_FQ_STATE_CHANGING 0x100
@@ -72,7 +80,8 @@ union qm_mc_command {
 };
 union qm_mc_result { struct { u8 verb, result; }; };
 struct device { int unused; };
-struct qm_portal { int unused; };
+struct qm_mc { raw_spinlock_t lock; };
+struct qm_portal { struct qm_mc mc; };
 struct qm_portal_config { struct device *dev; u16 channel; };
 struct qman_portal {
 	struct qm_portal p;
@@ -86,7 +95,9 @@ static struct qman_portal *qman_dma_portal = &portal;
 static union qm_mc_command command;
 static union qm_mc_result result;
 static bool affine_held, mc_claimed, map_error;
+static bool mc_locked __attribute__((unused));
 static unsigned int maps, starts, commits, stashes, errors;
+static unsigned int unmaps __attribute__((unused));
 
 static struct qman_portal *get_affine_portal(void)
 {
@@ -119,6 +130,14 @@ static bool dma_mapping_error(struct device *dev, dma_addr_t addr)
 {
 	assert(dev == &device && addr == MAPPED_ADDR);
 	return map_error;
+}
+
+static void __attribute__((unused))
+dma_unmap_single(struct device *dev, dma_addr_t addr, size_t size, int dir)
+{
+	assert(dev == &device && addr == MAPPED_ADDR && size == sizeof(struct qman_fq));
+	assert(dir == DMA_TO_DEVICE && !mc_locked);
+	unmaps++;
 }
 
 static void dev_err(struct device *dev, const char *format, ...)
@@ -167,8 +186,8 @@ static void reset(void)
 {
 	memset(&command, 0, sizeof(command));
 	memset(&result, 0, sizeof(result));
-	affine_held = mc_claimed = map_error = false;
-	maps = starts = commits = stashes = errors = 0;
+	affine_held = mc_locked = mc_claimed = map_error = false;
+	maps = unmaps = starts = commits = stashes = errors = 0;
 }
 
 int main(void)

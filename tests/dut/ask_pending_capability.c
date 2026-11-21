@@ -251,7 +251,7 @@ static int init_net, arp_tbl;
 #define EXPORT_SYMBOL_GPL(symbol)
 #define netdev_notifier_info_to_dev(ptr) (ptr)
 struct notifier_block { int unused; };
-static struct work_struct ask_devchg_flush_work;
+static struct delayed_work ask_devchg_flush_work;
 static unsigned int scheduled_work;
 static void schedule_work(struct work_struct *work) { scheduled_work++; }
 static int devchg_queued[4];
@@ -310,12 +310,28 @@ static void ask_resolve_neigh_v4(struct net_device *dev, __be32 dst,
 	memset(egress, 2, ETH_ALEN);
 }
 static unsigned int msecs_to_jiffies(unsigned int ms) { return ms; }
-static void schedule_delayed_work(struct delayed_work *work, unsigned int delay) {}
+static void schedule_delayed_work(struct delayed_work *work, unsigned int delay)
+{
+	if (work == &ask_devchg_flush_work)
+		scheduled_work++;
+}
 
 #include "pending_workers.h"
 
+#define ASK_FE_CAP_VLAN		(1U << 0)
+#define ASK_FE_CAP_PPPOE	(1U << 1)
 static DEFINE_MUTEX(ask_fe_orphan_lock);
 static LIST_HEAD(ask_fe_orphans);
+static bool ask_fe_orphan_blocks_cap(u8 cap_mask)
+{
+	bool blocked;
+
+	(void)cap_mask;
+	mutex_lock(&ask_fe_orphan_lock);
+	blocked = !list_empty(&ask_fe_orphans);
+	mutex_unlock(&ask_fe_orphan_lock);
+	return blocked;
+}
 static atomic_int withdrawal_calls;
 static int withdrawal_rc;
 static bool identity_lost;

@@ -89,59 +89,74 @@ def check_qbman_portal_guard(kernel):
     print("QBMan portals: sysfs bind/unbind suppressed for built-in drivers")
 
 
-def check_dpaa_cleanup_callers(dpaa):
+def check_dpaa_cleanup_callers(dpaa, require_retention=False):
     remove = function(dpaa, "static void dpaa_remove")
     fq_free = remove.find("err = dpaa_fq_free(dev, &priv->dpaa_fq_list);")
     release = remove.find("free_netdev(net_dev);")
     if fq_free < 0 or release < 0 or fq_free >= release:
         raise ValueError("DPAA remove cleanup changed; review FQ owner retention")
-    if "if (err)" not in remove[fq_free:release] or "return" in remove[fq_free:release]:
-        raise ValueError("DPAA remove error handling changed; review FQ owner retention")
 
     probe = function(dpaa, "static int dpaa_eth_probe")
     unwind = probe.find("free_dpaa_fqs:")
-    fq_free = probe.find("dpaa_fq_free(dev, &priv->dpaa_fq_list);", unwind)
-    release = probe.find("free_netdev(net_dev);", fq_free)
-    if min(unwind, fq_free, release) < 0 or fq_free >= release:
+    probe_fq_free = probe.find("dpaa_fq_free(dev, &priv->dpaa_fq_list);", unwind)
+    probe_release = probe.find("free_netdev(net_dev);", probe_fq_free)
+    if min(unwind, probe_fq_free, probe_release) < 0 or probe_fq_free >= probe_release:
         raise ValueError("DPAA probe unwind changed; review FQ owner retention")
+
+    remove_retains = (
+        "if (err)" in remove[fq_free:release]
+        and "return;" in remove[fq_free:release]
+    )
+    probe_retains = (
+        "dpaa_fq_init(dpaa_fq, false, &retain_failed_fq);" in probe[:unwind]
+        and "fq_err = dpaa_fq_free(dev, &priv->dpaa_fq_list);" in probe[unwind:probe_release]
+        and "if (fq_err || retain_failed_fq)" in probe[probe_fq_free:probe_release]
+        and "-EPROBE_DEFER" in probe[probe_fq_free:probe_release]
+        and "return " in probe[probe_fq_free:probe_release]
+    )
+    if remove_retains and probe_retains:
+        fq_alloc = function(dpaa, "static struct dpaa_fq *dpaa_fq_alloc")
+        bp_alloc = function(dpaa, "static struct dpaa_bp *dpaa_bp_alloc")
+        driver_start = dpaa.index("static struct platform_driver dpaa_driver = {")
+        driver_end = dpaa.index("\n};", driver_start) + 3
+        driver = dpaa[driver_start:driver_end]
+        if (".suppress_bind_attrs = true," not in driver or
+                "devm_" in fq_alloc or "devm_" in bp_alloc or
+                "devm_" in probe or
+                "dpaa_free_parent_resources(priv);" not in remove or
+                "dpaa_free_parent_resources(priv);" not in probe):
+            raise ValueError("DPAA parent retention incomplete (devm or unbind guard)")
+        print(
+            "Parent teardown: probe unwind and remove retain parent resources "
+            "and avoid devm auto-free on unsettled FQ cleanup."
+        )
+        return True
+
+    if require_retention:
+        raise ValueError("DPAA probe unwind or remove does not retain unsettled FQs")
+    if "if (err)" not in remove[fq_free:release] or "return" in remove[fq_free:release]:
+        raise ValueError("DPAA remove error handling changed; review FQ owner retention")
     print(
         "Parent teardown characterization: probe unwind ignores FQ cleanup "
         "status; remove logs errors but still releases the netdev."
     )
+    return False
 
 
-def run(kernel, controls):
+def run(kernel, controls, fq_only=False):
     dpaa = (kernel / "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c").read_text()
     qman = (kernel / "drivers/soc/fsl/qbman/qman.c").read_text()
     wgfp = WGFP.read_text()
     ask = ASK.read_text()
     check_qman_model(qman)
     check_namespace_move(kernel)
-    check_dpaa_cleanup_callers(dpaa)
+    check_dpaa_cleanup_callers(dpaa, require_retention=fq_only)
 
     with tempfile.TemporaryDirectory(prefix="dpaa-lifetime-") as directory:
         path = Path(directory)
-        # The enqueue transport is mocked; the FQ chosen by the actual
-        # egress/xmit functions is the identity oracle.
-        enqueue = """\
-static int qman_enqueue_fqid(struct qman_fq *tag, u32 fqid,
-\t\t\t     const struct qm_fd *fd)
-{
-\tportal.p.entry.fqid = fqid;
-\tportal.p.entry.fd = *fd;
-\tcommits++;
-\treturn 0;
-}
-"""
-        bodies = [
-            enqueue,
-            function(wgfp, "static void wgfp_egress_ern"),
-            function(wgfp, "int dpaa_wgfp_egress"),
-            # tx_batch (76a03e06): the per-CPU burst state and flush that dpaa_wgfp_xmit() uses
-            wgfp[wgfp.index("#define WGFP_TXB_MAX"):wgfp.index("\nstatic int wgfp_cpu_poll(")],
-            function(wgfp, "void dpaa_wgfp_xmit"),
-        ]
-        (path / "qman_wgfp_body.h").write_text("\n".join(bodies))
+        (path / "qman_wgfp_body.h").write_text(
+            function(wgfp, "int dpaa_wgfp_egress")
+        )
         (path / "ask_oif_body.h").write_text(
             function(ask, "static int ask_hw_resolve_oif_fqid")
         )
@@ -154,7 +169,8 @@ static int qman_enqueue_fqid(struct qman_fq *tag, u32 fqid,
 
         compiler = shlex.split(os.environ.get("HOSTCC", "cc"))
         failed = False
-        for name in ("dpaa_egress_lifetime", "dpaa_fq_lifetime"):
+        targets = ("dpaa_fq_lifetime",) if fq_only else ("dpaa_egress_lifetime", "dpaa_fq_lifetime")
+        for name in targets:
             binary = path / name
             command = compiler + [
                 "-std=gnu11", "-Wall", "-Wextra", "-Werror",
@@ -190,6 +206,10 @@ def main():
         "--verify-qbman-portal-guard", action="store_true",
         help="verify QMan/BMan sysfs unbind guards and ownership assumptions",
     )
+    parser.add_argument(
+        "--verify-fq-lifetime", action="store_true",
+        help="verify DPAA FQ teardown and parent resource retention strictly",
+    )
     args = parser.parse_args()
     print(
         "Host model only: namespace transitions, QMan outcomes and enqueue "
@@ -213,6 +233,13 @@ def main():
             print(f"QBMan portal guard check failed: {error}", file=sys.stderr)
             return 2
         return 0
+    if args.verify_fq_lifetime:
+        try:
+            failed = run(args.kernel_source, False, fq_only=True)
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+            print(f"DPAA FQ lifetime check failed: {error}", file=sys.stderr)
+            return 2
+        return 1 if failed else 0
     try:
         failed = run(args.kernel_source, args.oracle_controls)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:

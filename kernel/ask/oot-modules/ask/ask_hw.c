@@ -89,9 +89,9 @@ int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 /* F-199 (T-M7-2 S4): allocate a dedicated no-confirm TX FQ for the FE
  * hardware offload terminal (context_a B0V=0). Board patch exports it. */
 int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
-/* F-316: the same FQ with its own tail-drop threshold (0 = DPAA_FQ_TD). */
-int dpaa_alloc_offload_tx_fq_td(struct net_device *dev, u32 td_bytes,
-				u32 *fqid);
+/* F-316: the same FQ on priv->offload_cgr with optional DRR credit (0..0x7fff). */
+int dpaa_alloc_offload_tx_fq_ics(struct net_device *dev, u16 ics_cred,
+				 u32 *fqid);
 
 /*
  * PER-PORT OFFLOAD FAMILY MASK (2026-08-21). IPv4 and IPv6 are selected
@@ -601,25 +601,24 @@ static bool ask_hw_cached_valid;
 #define ASK_HW_FLOW_FQS         16      /* per-flow no-confirm TX FQs per port */
 
 /*
- * Per-flow egress FQ set. With one no-confirm FQ per egress port, a flow that
- * holds the FQ at its tail-drop threshold gets every other flow's frames to
- * that port rejected; at 9000 MTU, bidirectional BBR data in one direction
- * locked out the other direction's ACKs for seconds. Each routed flow now
- * takes the least-used FQ of a per-port set at insert, so a flow admitted
- * while a set FQ is unused shares its tail-drop with no other flow; flows
- * are never migrated, so churn can leave two on one FQ. egress_fqs=0 maps
- * new flows to the single legacy FQ (A/B: existing flows keep their FQ);
- * egress_fq_td is read when the set is allocated. 16 x 256 KiB matches the
- * legacy 4 MiB per-port bound; it is not a BMan pool reservation.
+ * Per-flow egress FQ set. All no-confirm offload TX FQs on a port share its
+ * frame-mode QMan CGR (priv->offload_cgr, F-316) instead of per-FQ byte
+ * tail-drop, so individual flows can burst beyond 256 KiB without premature
+ * tail-drop while aggregate occupancy stays bounded below half the RX buffer
+ * pool. Each routed flow takes the least-used FQ of the per-port set at
+ * insert (flows are never migrated, so churn can leave two on one FQ);
+ * egress_fqs=0 maps new flows to the single legacy FQ (A/B: existing flows
+ * keep their FQ), and egress_fq_ics sets each set FQ's intra-WQ DRR credit
+ * when the set is prewarmed.
  */
 static unsigned int ask_egress_fqs = ASK_HW_FLOW_FQS;
 module_param_named(egress_fqs, ask_egress_fqs, uint, 0644);
 MODULE_PARM_DESC(egress_fqs,
 		 "Per-flow no-confirm TX FQs used per egress port for new flows (0 = legacy single FQ, max 16)");
-static unsigned int ask_egress_fq_td = 256 * 1024;
-module_param_named(egress_fq_td, ask_egress_fq_td, uint, 0444);
-MODULE_PARM_DESC(egress_fq_td,
-		 "Tail-drop bytes of each per-flow TX FQ (64 KiB..4 MiB)");
+static unsigned int ask_egress_fq_ics = 0x4000;
+module_param_named(egress_fq_ics, ask_egress_fq_ics, uint, 0444);
+MODULE_PARM_DESC(egress_fq_ics,
+		 "Intra-WQ DRR credit for each per-flow TX FQ (0 = QMan default, max 0x7fff)");
 
 /*
  * Per-offloaded-port record.  Under the board substrate ask.ko owns no
@@ -663,8 +662,8 @@ struct ask_hw_pcd {
 	 * alloc without caching (correctness over reuse; impossible with the
 	 * board's <=5 dpaa netdevs).
 	 *
-	 * fqid is the legacy per-port FQ (DPAA_FQ_TD): bridge records and
-	 * egress_fqs=0. flow_fqid[0..nflow) is the per-flow set, written only
+	 * fqid is the legacy per-port FQ (on priv->offload_cgr, ics_cred=0):
+	 * bridge records and egress_fqs=0. flow_fqid[0..nflow) is the per-flow set, written only
 	 * by prewarm under ask_hw_prewarm_lock and published by a release
 	 * store of nflow; users[] counts live cookies per set FQ (h->lock).
 	 */
@@ -2428,7 +2427,7 @@ static DEFINE_MUTEX(ask_hw_prewarm_lock);
 static void ask_hw_prewarm_flow_fqs(u8 hw_port_id, int slot)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_inst;
-	u32 td = clamp_t(u32, ask_egress_fq_td, 64 * 1024, 4 * 1024 * 1024);
+	u16 ics = min_t(unsigned int, ask_egress_fq_ics, 0x7fff);
 	struct net_device *dev;
 	unsigned int n;
 	u32 fqid;
@@ -2450,7 +2449,7 @@ static void ask_hw_prewarm_flow_fqs(u8 hw_port_id, int slot)
 			rc = -ENODEV;
 			break;
 		}
-		rc = dpaa_alloc_offload_tx_fq_td(dev, td, &fqid);
+		rc = dpaa_alloc_offload_tx_fq_ics(dev, ics, &fqid);
 		dev_put(dev);
 		if (rc)
 			break;
@@ -2462,8 +2461,8 @@ static void ask_hw_prewarm_flow_fqs(u8 hw_port_id, int slot)
 		ask_pr_warn("hw: per-flow TX FQ set for port 0x%02x stopped at %u/%u (%d)\n",
 			    hw_port_id, n, ASK_HW_FLOW_FQS, rc);
 	else
-		ask_pr_info("hw: per-flow TX FQ set for port 0x%02x: %u FQs, td %u\n",
-			    hw_port_id, n, td);
+		ask_pr_info("hw: per-flow TX FQ set for port 0x%02x: %u FQs, ics 0x%x\n",
+			    hw_port_id, n, ics);
 }
 
 /*
@@ -2518,13 +2517,29 @@ static struct ask_hw_port *ask_hw_l2_port(struct ask_hw_pcd *h, u8 hw_port_id)
 	return NULL;
 }
 
+/* @hw_port_id just completed a clean L2_DA disengage and is about to run
+ * ask_bridge_forget_port(). h->lock held. */
+static bool ask_hw_l2_port_tearing_down(struct ask_hw_pcd *h, u8 hw_port_id)
+{
+	unsigned int i;
+
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
+		if (h->port[i].in_use && h->port[i].port_id == hw_port_id &&
+		    h->port[i].engaged_profile == FMAN_PCD_FE_PROFILE_L2_DA &&
+		    h->port[i].teardown_in_progress && !h->port[i].fe_retained)
+			return true;
+	return false;
+}
+
 /*
  * Add or remove one bridge record (@key -> @fqid) in @hw_port_id's L2_DA
  * table. h->lock makes the profile check and the table
  * operation atomic against disengage: with no per-port table,
  * fman_pcd_fe_flow_add() would fall back to the global ROUTED table.
  * A missing context or L2 port does not prove that the old table was
- * safely removed; leave the caller's record retained.
+ * safely removed; leave the caller's record retained. During the clean
+ * disengage handoff before ask_bridge_forget_port(), delete defers with
+ * -EAGAIN so the record is not permanently poisoned as unsettled.
  */
 int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
 		     u16 vid, u64 fe_token, bool add)
@@ -2549,7 +2564,8 @@ int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
 
 	mutex_lock(&h->lock);
 	if (!ask_hw_l2_port(h, hw_port_id))
-		rc = -ENODEV;
+		rc = (!add && ask_hw_l2_port_tearing_down(h, hw_port_id)) ?
+		     -EAGAIN : -ENODEV;
 	else if (add)
 		rc = fman_pcd_fe_flow_add(h->fman, hw_port_id, &a);
 	else

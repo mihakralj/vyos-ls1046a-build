@@ -475,6 +475,8 @@ static int ask_bridge_rec_del(struct ask_bridge_rec *r)
 	if (!r->dead) {
 		rc = ask_hw_l2_record(r->port, r->key, 0, r->act, r->vid,
 				      r->fe_token, false);
+		if (rc == -EAGAIN)
+			return rc;
 		if (rc) {
 			r->unsettled = true;
 			pr_warn_ratelimited("ask: bridge: delete %pM>%pM tci 0x%04x on port 0x%02x: %d; retaining unsettled record\n",

@@ -36,9 +36,10 @@ struct dpaa_priv {
 	struct mac_device *mac_dev;
 	struct list_head dpaa_fq_list;
 #ifdef CGR_CONTAINMENT
-	struct dpaa_cgr_context egress_ctx, ingress_ctx;
+	struct dpaa_cgr_context egress_ctx, ingress_ctx, offload_ctx;
 	struct { struct dpaa_cgr_context *ctx; } cgr_data;
 	struct dpaa_cgr_context *ingress_cgr;
+	struct dpaa_cgr_context *offload_cgr;
 #else
 	struct { struct cgr cgr; } cgr_data;
 	struct cgr ingress_cgr;
@@ -56,8 +57,8 @@ struct dpaa_fq {
 	u32 fqid, flags;
 	u16 channel;
 	u8 wq;
-#ifdef OFFLOAD_FQ_TD
-	u32 td_bytes;
+#ifdef OFFLOAD_FQ_CGR
+	u16 ics_cred;
 #endif
 	int fq_type, xdp_rxq;
 };
@@ -123,8 +124,10 @@ static const struct dpaa_fq_cbs dpaa_fq_cbs;
 static struct qman_fq *fq_table[32];
 static int create_error, init_error, creates, inits, destroys, frees;
 static int managed_allocations, holds, errors, cleanup_calls, pcd_teardowns;
-static u16 last_we_mask, last_ics_cred;
-static bool rtnl_held, expect_rtnl = true, expect_taildrop = true;
+static u16 last_we_mask, last_fq_ctrl, last_ics_cred, last_dest_channel;
+static u8 last_cgid, last_dest_wq;
+static uint64_t last_context_a;
+static bool rtnl_held, expect_rtnl = true, expect_taildrop = true, expect_offload_cgr = false;
 static jmp_buf unregister_wait;
 
 static void init_list(struct list_head *head) { head->next = head->prev = head; }
@@ -179,8 +182,17 @@ static int qman_init_fq(struct qman_fq *fq, u32 flags, struct qm_mcc_initfq *opt
 	inits++;
 	assert(fq_table[fq->idx] == fq);
 	last_we_mask = opts->we_mask;
+	last_fq_ctrl = opts->fqd.fq_ctrl;
 	last_ics_cred = opts->fqd.ics_cred;
-	if (expect_taildrop) {
+	last_cgid = opts->fqd.cgid;
+	if (expect_offload_cgr) {
+		assert(!(opts->we_mask & QM_INITFQ_WE_TDTHRESH));
+		assert(!(opts->we_mask & QM_INITFQ_WE_OAC));
+		assert(opts->we_mask & QM_INITFQ_WE_CGID);
+		assert(opts->we_mask & QM_INITFQ_WE_CONTEXTA);
+		assert(opts->we_mask & QM_INITFQ_WE_DESTWQ);
+		assert(opts->fqd.fq_ctrl == (QM_FQCTRL_PREFERINCACHE | QM_FQCTRL_CGE));
+	} else if (expect_taildrop) {
 		assert(opts->we_mask & QM_INITFQ_WE_TDTHRESH);
 		assert(!(opts->we_mask & QM_INITFQ_WE_OAC));
 	} else {
@@ -214,7 +226,11 @@ static int dpaa_tx_fq_to_id(const struct dpaa_priv *priv, struct qman_fq *fq)
 {
 	return -1;
 }
-static void qm_fqd_set_destwq(void *fqd, u16 channel, u8 wq) {}
+static void qm_fqd_set_destwq(void *fqd, u16 channel, u8 wq)
+{
+	last_dest_channel = channel;
+	last_dest_wq = wq;
+}
 static void qm_fqd_set_oac(void *fqd, int value) {}
 static void qm_fqd_set_oal(void *fqd, size_t value) {}
 static u32 last_taildrop;
@@ -222,7 +238,10 @@ static void qm_fqd_set_taildrop(void *fqd, u32 threshold, int rounded)
 {
 	last_taildrop = threshold;
 }
-static void qm_fqd_context_a_set64(void *fqd, uint64_t value) {}
+static void qm_fqd_context_a_set64(void *fqd, uint64_t value)
+{
+	last_context_a = value;
+}
 static void qm_fqd_set_stashing(void *fqd, int a, int b, int c) {}
 static int xdp_rxq_info_reg(int *info, struct net_device *dev, int queue, int napi)
 {
@@ -262,6 +281,7 @@ static void dpaa_cgr_release(struct device *dev, struct dpaa_cgr_context **ctx)
 static void dpaa_napi_del(struct net_device *dev) { cleanup_calls++; }
 static void dpaa_priv_detach_flavor_ops(struct dpaa_priv *priv) { cleanup_calls++; }
 static void dpaa_bps_free(struct dpaa_priv *priv) { cleanup_calls++; }
+static void dpaa_free_parent_resources(struct dpaa_priv *priv) { cleanup_calls++; }
 static void free_netdev(struct net_device *dev) { cleanup_calls++; }
 static void pcd_teardown(struct dpaa_priv *priv) { pcd_teardowns++; }
 static const struct dpaa_pcd_ops pcd_ops = { .teardown = pcd_teardown };
@@ -283,8 +303,15 @@ static void setup(struct net_device *dev, struct dpaa_priv *priv,
 	priv->net_dev = dev;
 	priv->mac_dev = mac;
 #ifdef CGR_CONTAINMENT
+	priv->egress_ctx.cgr.cgrid = 11;
+	priv->ingress_ctx.cgr.cgrid = 12;
+	priv->offload_ctx.cgr.cgrid = 17;
 	priv->cgr_data.ctx = &priv->egress_ctx;
 	priv->ingress_cgr = &priv->ingress_ctx;
+	priv->offload_cgr = &priv->offload_ctx;
+#endif
+#ifdef OFFLOAD_FQ_CGR
+	expect_offload_cgr = true;
 #endif
 	init_list(&priv->dpaa_fq_list);
 }
@@ -310,21 +337,60 @@ int main(int argc, char **argv)
 		fq = container_of(fq_table[14], struct dpaa_fq, fq_base);
 		assert(fq->net_dev == &dev && fq->fq_type == FQ_TYPE_TX_NO_CONFIRM);
 		assert(fq->init && fq->wq == 6 && fq->channel == 0x801 && dev.refs == 1);
+		assert(last_dest_channel == 0x801 && last_dest_wq == 6);
 		assert(!holds && !frees && managed_allocations == 1);
+		assert(last_context_a == 0x9a000000c0000000ULL);
+#ifdef OFFLOAD_FQ_CGR
+		assert(last_cgid == 17);
+		assert(last_fq_ctrl == (QM_FQCTRL_PREFERINCACHE | QM_FQCTRL_CGE));
+		assert((last_we_mask & QM_INITFQ_WE_ICSCRED) && last_ics_cred == 0);
+#else
 		assert(last_taildrop == DPAA_FQ_TD);
 		assert(!(last_we_mask & QM_INITFQ_WE_ICSCRED));
+#endif
 		puts("successful offload FQ remains usable");
 		return 0;
 	}
 
-#ifdef OFFLOAD_FQ_TD
-	if (!strcmp(argv[1], "td")) {
-		assert(dpaa_alloc_offload_tx_fq_td(&dev, 0x40000, &fqid) == 0);
+#ifdef OFFLOAD_FQ_CGR
+	if (!strcmp(argv[1], "ics")) {
+		assert(dpaa_alloc_offload_tx_fq_ics(&dev, 0x8000, &fqid) == -EINVAL);
+		assert(dpaa_alloc_offload_tx_fq_ics(&dev, 0xffff, &fqid) == -EINVAL);
+		assert(dpaa_alloc_offload_tx_fq_ics(&dev, 0x4000, &fqid) == 0);
 		fq = container_of(fq_table[14], struct dpaa_fq, fq_base);
-		assert(fqid == 7 && fq->td_bytes == 0x40000 && last_taildrop == 0x40000);
+		assert(fqid == 7 && fq->ics_cred == 0x4000);
 		assert(fq->init && fq->wq == 6 && fq->fq_type == FQ_TYPE_TX_NO_CONFIRM);
+		assert(last_dest_channel == 0x801 && last_dest_wq == 6);
+		assert(last_cgid == 17 && last_context_a == 0x9a000000c0000000ULL);
+		assert(last_fq_ctrl == (QM_FQCTRL_PREFERINCACHE | QM_FQCTRL_CGE));
 		assert((last_we_mask & QM_INITFQ_WE_ICSCRED) && last_ics_cred == 0x4000);
-		puts("per-FQ tail-drop threshold and DRR credit reach the FQD");
+		qman_destroy_fq(&fq->fq_base);
+		assert(dpaa_alloc_offload_tx_fq_ics(&other, 0x7fff, &fqid) == 0);
+		assert((last_we_mask & QM_INITFQ_WE_ICSCRED) && last_ics_cred == 0x7fff);
+		puts("shared offload CGR and DRR credit reach the FQD");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "no-cgr")) {
+		priv.offload_cgr = NULL;
+		assert(dpaa_alloc_offload_tx_fq(&dev, &fqid) == -ENODEV);
+		assert(dpaa_alloc_offload_tx_fq_ics(&dev, 0x4000, &fqid) == -ENODEV);
+		assert(!creates && !inits && !managed_allocations && !holds);
+		puts("missing offload CGR rejected fail-closed");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "td-preserve")) {
+		struct dpaa_fq td_fq = { .fq_type = FQ_TYPE_RX_ERROR };
+
+		dpaa_setup_egress(&priv, &td_fq, mac.port[TX],
+				  &dpaa_fq_cbs.egress_ern);
+		expect_rtnl = false;
+		expect_offload_cgr = false;
+		expect_taildrop = true;
+		assert(dpaa_fq_init(&td_fq, true, NULL) == 0);
+		assert(last_fq_ctrl == (QM_FQCTRL_PREFERINCACHE | QM_FQCTRL_TDE));
+		puts("td_enable preserves PREFERINCACHE and existing FQ flags");
 		return 0;
 	}
 #endif
@@ -361,6 +427,7 @@ int main(int argc, char **argv)
 		dpaa_setup_egress(&priv, &probe_fq, mac.port[TX],
 				  &dpaa_fq_cbs.egress_ern);
 		expect_rtnl = false;
+		expect_offload_cgr = false;
 		expect_taildrop = false;
 		init_error = -EIO;
 		rc = dpaa_fq_init(&probe_fq, false, NULL);

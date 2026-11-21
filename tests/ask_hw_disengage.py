@@ -49,7 +49,7 @@ def test_failed_disengage_is_reported_and_retained(tmp_path):
         _slice(source, "static int ask_hw_offload_engage_profile(u8 hw_port_id,",
                "\n}\n\nint ask_hw_offload_engage(").removesuffix(
                    "\n\nint ask_hw_offload_engage("),
-        _slice(source, "int ask_hw_offload_engage_role(u8 hw_port_id,",
+        _slice(source, "int ask_hw_offload_role_prepare(u8 hw_port_id,",
                "\n}\n\n/* T-M6-2 B2").removesuffix("\n\n/* T-M6-2 B2"),
         _slice(source, "struct ask_hw_fe_transition {",
                "\n}\n\nint ask_hw_offload_disengage(").removesuffix(

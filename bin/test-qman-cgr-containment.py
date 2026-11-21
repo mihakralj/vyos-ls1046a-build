@@ -31,7 +31,8 @@ def ordered(source, *fragments):
         position += len(fragment)
 
 
-def check_contract(qman, portal, dpaa, dpaa_header, qman_header):
+def check_contract(qman, portal, dpaa, dpaa_header, qman_header,
+                   require_offload_cgr=False):
     create = function(qman, "int qman_create_cgr")
     congestion = function(qman, "static void qm_congestion_task")
     for body in (create, congestion):
@@ -62,36 +63,81 @@ def check_contract(qman, portal, dpaa, dpaa_header, qman_header):
             or "struct dpaa_cgr_context {" not in dpaa_header):
         raise ValueError("CGR owner or checked API declaration changed")
 
-    for prefix, member in (
+    has_offload_cgr = "static int dpaa_offload_cgr_init(" in dpaa
+    if require_offload_cgr and not has_offload_cgr:
+        raise ValueError("dpaa_offload_cgr_init missing (F-316 offload CGR required)")
+
+    cgr_inits = [
         ("static int dpaa_eth_cgr_init", "cgr_data.ctx"),
         ("static int dpaa_ingress_cgr_init", "ingress_cgr"),
-    ):
+    ]
+    if has_offload_cgr:
+        cgr_inits.append(("static int dpaa_offload_cgr_init", "offload_cgr"))
+        if "struct dpaa_cgr_context *offload_cgr;" not in dpaa_header:
+            raise ValueError("struct dpaa_priv missing offload_cgr")
+
+    for prefix, member in cgr_inits:
         body = function(dpaa, prefix)
         ordered(body, "dpaa_cgr_alloc(priv)", "qman_alloc_cgrid(",
                 "qman_create_cgr(", "if (err < 0) {",
                 "dpaa_cgr_create_failed(", f"&priv->{member}, err);")
     probe = function(dpaa, "static int dpaa_eth_probe")
-    ordered(probe, "free_dpaa_fqs:", "dpaa_cgr_release(dev, &priv->ingress_cgr);",
-            "delete_egress_cgr:", "dpaa_cgr_release(dev, &priv->cgr_data.ctx);",
-            "free_netdev(net_dev);")
+    if has_offload_cgr:
+        ordered(probe, "priv->rx_headroom = dpaa_get_headroom(",
+                "dpaa_offload_cgr_init(priv)",
+                "dpaa_netdev_init(",
+                "free_dpaa_fqs:", "dpaa_fq_free(",
+                "dpaa_cgr_release(dev, &priv->offload_cgr);",
+                "dpaa_cgr_release(dev, &priv->ingress_cgr);",
+                "delete_egress_cgr:", "dpaa_cgr_release(dev, &priv->cgr_data.ctx);",
+                "free_netdev(net_dev);")
+    else:
+        ordered(probe, "free_dpaa_fqs:", "dpaa_cgr_release(dev, &priv->ingress_cgr);",
+                "delete_egress_cgr:", "dpaa_cgr_release(dev, &priv->cgr_data.ctx);",
+                "free_netdev(net_dev);")
     remove = function(dpaa, "static void dpaa_remove")
-    ordered(remove, "dpaa_cgr_deactivate(priv->cgr_data.ctx);",
-            "unregister_netdev(net_dev);",
-            "dpaa_cgr_release(dev, &priv->ingress_cgr);",
-            "dpaa_cgr_release(dev, &priv->cgr_data.ctx);",
-            "free_netdev(net_dev);")
+    if has_offload_cgr:
+        ordered(remove, "dpaa_cgr_deactivate(priv->cgr_data.ctx);",
+                "unregister_netdev(net_dev);",
+                "phylink_destroy(",
+                "dpaa_fq_free(",
+                "dpaa_cgr_release(dev, &priv->offload_cgr);",
+                "dpaa_cgr_release(dev, &priv->ingress_cgr);",
+                "dpaa_cgr_release(dev, &priv->cgr_data.ctx);",
+                "free_netdev(net_dev);")
+        set_speed = function(dpaa, "static void dpaa_eth_cgr_set_speed")
+        if "dpaa_offload_cgr_update(" not in set_speed:
+            raise ValueError("dpaa_eth_cgr_set_speed does not update offload CGR")
+        change_mtu = function(dpaa, "static int dpaa_change_mtu")
+        ordered(change_mtu, "WRITE_ONCE(net_dev->mtu, new_mtu);",
+                "dpaa_offload_cgr_update(")
+    else:
+        ordered(remove, "dpaa_cgr_deactivate(priv->cgr_data.ctx);",
+                "unregister_netdev(net_dev);",
+                "dpaa_cgr_release(dev, &priv->ingress_cgr);",
+                "dpaa_cgr_release(dev, &priv->cgr_data.ctx);",
+                "free_netdev(net_dev);")
+    return has_offload_cgr
 
 
-def run(kernel, sanitize):
+def run(kernel, sanitize, require_offload_cgr=False):
     qman = (kernel / "drivers/soc/fsl/qbman/qman.c").read_text()
     portal = (kernel / "drivers/soc/fsl/qbman/qman_portal.c").read_text()
     dpaa = (kernel / "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c").read_text()
     dpaa_header = (kernel / "drivers/net/ethernet/freescale/dpaa/dpaa_eth.h").read_text()
     qman_header = (kernel / "include/soc/fsl/qman.h").read_text()
-    check_contract(qman, portal, dpaa, dpaa_header, qman_header)
+    has_offload_cgr = check_contract(qman, portal, dpaa, dpaa_header, qman_header,
+                                     require_offload_cgr=require_offload_cgr)
     params = re.search(r"(?ms)^struct delete_cgr_params \{\n.*?^\};\n", qman)
     if not params:
         raise ValueError("CGR delete parameter structure not found")
+    extra_fns = ()
+    if has_offload_cgr:
+        extra_fns = (
+            function(dpaa, "static u32 dpaa_offload_cgr_frames"),
+            function(dpaa, "static int dpaa_offload_cgr_init"),
+            function(dpaa, "static void dpaa_offload_cgr_update"),
+        )
     body = "\n".join((
         function(qman, "int qman_create_cgr"),
         function(qman, "static struct qman_portal *qman_cgr_get_affine_portal"),
@@ -108,12 +154,15 @@ def run(kernel, sanitize):
         function(dpaa, "static void dpaa_eth_cgscn"),
         function(dpaa, "static int dpaa_eth_cgr_init"),
         function(dpaa, "static int dpaa_ingress_cgr_init"),
+        *extra_fns,
     ))
     with tempfile.TemporaryDirectory(prefix="qman-cgr-containment-") as directory:
         path = Path(directory)
         (path / "qman_cgr_containment_body.h").write_text(body)
         binary = path / "qman_cgr_containment"
         flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"] if sanitize else []
+        if has_offload_cgr:
+            flags.append("-DOFFLOAD_CGR")
         subprocess.run(
             shlex.split(os.environ.get("HOSTCC", "cc")) + [
                 "-std=gnu11", "-Wall", "-Wextra", "-Werror",
@@ -130,9 +179,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kernel_source", type=Path)
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--require-offload-cgr", action="store_true")
     args = parser.parse_args()
     try:
-        run(args.kernel_source, args.sanitize)
+        run(args.kernel_source, args.sanitize, args.require_offload_cgr)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"QMan CGR containment test failed: {error}", file=sys.stderr)
         return 1
