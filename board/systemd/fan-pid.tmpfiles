@@ -2,4 +2,4 @@
 # absolute symlinks created by `systemctl enable` in chroot hooks, breaking
 # them — tmpfiles.d creates the .wants symlink at first boot of the target).
 L /etc/systemd/system/multi-user.target.wants/fan-pid.service - - - - /etc/systemd/system/fan-pid.service
-L /etc/systemd/system/multi-user.target.wants/vyos-fan-reconcile.timer - - - - /etc/systemd/system/vyos-fan-reconcile.timer
+L /etc/systemd/system/multi-user.target.wants/vyos-fan-reconcile.service - - - - /etc/systemd/system/vyos-fan-reconcile.service

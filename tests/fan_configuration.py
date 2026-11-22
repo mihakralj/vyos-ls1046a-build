@@ -49,10 +49,20 @@ def test_schema_and_service_installation():
     zone = fan.find(".//tagNode[@name='zone']")
     assert set(zone.find('properties/completionHelp/list').text.split()) == set(load_module().DEFAULTS)
     assert {node.get('name') for node in zone.findall('children/leafNode')} == {'setpoint', 'critical'}
-    assert 'vyos-fan-reconcile.timer' in (ROOT / 'board/systemd/fan-pid.tmpfiles').read_text()
+    assert 'Wants=vyos-fan-reconcile.service' in (ROOT / 'board/systemd/fan-pid.service').read_text()
+    tmpfiles = (ROOT / 'board/systemd/fan-pid.tmpfiles').read_text()
+    assert 'vyos-fan-reconcile.service' in tmpfiles
+    assert 'vyos-fan-reconcile.timer' not in tmpfiles
+    reconcile_unit = (ROOT / 'board/systemd/vyos-fan-reconcile.service').read_text()
+    assert 'Type=simple' in reconcile_unit
+    assert '--reconcile-daemon' in reconcile_unit
+    assert 'Restart=always' in reconcile_unit
+    assert 'WantedBy=multi-user.target' in reconcile_unit
+    assert not (ROOT / 'board/systemd/vyos-fan-reconcile.timer').exists()
     build = (ROOT / 'bin/ci-setup-vyos-build.sh').read_text()
     assert 'board/systemd/vyos-fan-reconcile.service' in build
-    assert 'board/systemd/vyos-fan-reconcile.timer' in build
+    assert 'board/systemd/vyos-fan-reconcile.timer' not in build
+    assert load_module().VERIFICATION_MAX_AGE >= 30.0
 
 
 def test_partial_overrides_and_delete():
@@ -705,7 +715,7 @@ def test_reconcile_waits_for_boot_lock_and_retries_failure(tmp_path, monkeypatch
     script.reconcile()
     assert script.PENDING.exists()
     monkeypatch.setattr(script, 'boot_configuration_complete', lambda: True)
-    monkeypatch.setattr(script, 'acquire_commit_lock_file', lambda: (None, 'locked'))
+    monkeypatch.setattr(script, 'acquire_commit_lock_file', lambda: (None, script.COMMIT_LOCK_BUSY))
     script.reconcile()
     assert script.PENDING.exists()
     released = []
@@ -1704,27 +1714,223 @@ def test_lost_pending_for_new_generation_waits_for_new_ack(tmp_path, monkeypatch
     assert fan.read_applied()['generation'] != previous
 
 
-@pytest.mark.parametrize('raises', [False, True])
-def test_commit_lock_outage_revokes_verification_and_fails_safe(tmp_path, monkeypatch, raises):
+@pytest.mark.parametrize('failure', ['raises', 'critical_open', 'unexpected_message', 'non_string'])
+def test_commit_lock_outage_revokes_verification_and_fails_safe(tmp_path, monkeypatch, failure):
     fan, _, ctrl, writes = controller_fixture(tmp_path, monkeypatch, 'fan_pid_lock_outage_test')
     ctrl.step()
     assert fan.APPLIED.exists()
     script = load_script(monkeypatch, ROOT / 'data/vyos-1x-files/src/conf_mode/system_hardware_fan.py',
                          'fan_conf_lock_outage_test')
     script.PENDING = fan.PENDING
-    if raises:
+    if failure == 'raises':
         monkeypatch.setattr(script, 'acquire_commit_lock_file',
                             lambda: (_ for _ in ()).throw(OSError('lock failed')))
         with pytest.raises(OSError, match='lock failed'):
             script.reconcile()
+    elif failure == 'critical_open':
+        monkeypatch.setattr(script, 'acquire_commit_lock_file',
+                            lambda: (None, 'Critical error opening commit lock file: EACCES'))
+        with pytest.raises(Exception, match='Critical error opening commit lock file'):
+            script.reconcile()
+    elif failure == 'unexpected_message':
+        monkeypatch.setattr(script, 'acquire_commit_lock_file', lambda: (None, 'unexpected lock error'))
+        with pytest.raises(Exception, match='unexpected lock error'):
+            script.reconcile()
     else:
-        monkeypatch.setattr(script, 'acquire_commit_lock_file', lambda: (None, 'locked'))
-        script.reconcile()
+        monkeypatch.setattr(script, 'acquire_commit_lock_file', lambda: (None, None))
+        with pytest.raises(Exception, match='None'):
+            script.reconcile()
     assert fan.PENDING.exists()
     assert not fan.verification_path().exists()
     assert ctrl.step()[0]['fan1'] == 255
     assert writes[-1] == 255
     assert not fan.APPLIED.exists()
+
+
+def test_normal_commit_lock_contention_preserves_verification_until_lease_expires(tmp_path, monkeypatch):
+    fan, daemon, ctrl, writes = controller_fixture(tmp_path, monkeypatch, 'fan_pid_lock_contention_test')
+    clock = [fan.clock_now()]
+    monkeypatch.setattr(fan, 'clock_now', lambda: clock[0])
+    monkeypatch.setattr(daemon, 'clock_now', lambda: clock[0])
+    fan.write_verification(fan.read_snapshot())
+    assert ctrl.step()[0]['fan1'] < 255
+    assert fan.APPLIED.exists()
+    script = load_script(monkeypatch, ROOT / 'data/vyos-1x-files/src/conf_mode/system_hardware_fan.py',
+                         'fan_conf_lock_contention_test')
+    script.PENDING = fan.PENDING
+    monkeypatch.setattr(script, 'acquire_commit_lock_file',
+                        lambda: (None, script.COMMIT_LOCK_BUSY))
+    script.reconcile()
+    assert fan.verification_path().exists()
+    assert not fan.PENDING.exists()
+    assert ctrl.step()[0]['fan1'] < 255
+    assert fan.APPLIED.exists()
+    # A wedged fan commit with PENDING active also fails closed at PENDING_TIMEOUT.
+    fan.mark_pending()
+    clock[0] += fan.PENDING_TIMEOUT
+    fan.write_verification(fan.read_snapshot())
+    assert ctrl.step()[0]['fan1'] == 255
+    assert fan.read_applied()['mode'] == 'failsafe'
+    assert fan.configuration_status()['state'] == 'error'
+    fan.PENDING.unlink(missing_ok=True)
+    # Without PENDING, an unrelated wedged commit still fails closed when VERIFICATION_MAX_AGE expires.
+    fan.write_verification(fan.read_snapshot())
+    assert ctrl.step()[0]['fan1'] < 255
+    clock[0] += fan.VERIFICATION_MAX_AGE + 1
+    script.reconcile()
+    assert ctrl.step()[0]['fan1'] == 255
+    assert writes[-1] == 255
+    assert not fan.APPLIED.exists()
+
+
+def test_exiting_forced_max_arms_seek_blackout_and_preserves_learned_floor(tmp_path, monkeypatch):
+    fan, daemon, ctrl, _ = controller_fixture(tmp_path, monkeypatch, 'fan_pid_force_max_blackout_test')
+    clock = [fan.clock_now()]
+    monkeypatch.setattr(fan, 'clock_now', lambda: clock[0])
+    monkeypatch.setattr(daemon, 'clock_now', lambda: clock[0])
+    monkeypatch.setattr(daemon.time, 'monotonic', lambda: clock[0])
+    ctrl = daemon.Controller(1, [
+        {'name': 'fan1', 'duty_reg': 0x30, 'tach_file': 'fan1_input', 'present': True},
+        {'name': 'fan2', 'duty_reg': 0x40, 'tach_file': 'fan2_input', 'present': True},
+    ], '', dict(ctrl.zone_paths), {0x30: 33, 0x40: 74})
+    assert all(f['seek_blackout'] == daemon.SEEK_BLACKOUT for f in ctrl.fans)
+    for f in ctrl.fans:
+        f['seek_blackout'] = 0
+    fan.write_verification(fan.read_snapshot())
+    monkeypatch.setattr(daemon, 'fan_rpm', lambda f, _: 590)
+    pwms = ctrl.step()[0]
+    assert pwms == {'fan1': 33, 'fan2': 74}
+    # Enter forced-MAX failsafe (missing verification) and spin fans up.
+    fan.invalidate_verification()
+    monkeypatch.setattr(daemon, 'fan_rpm', lambda f, _: 8661 if f['duty_reg'] == 0x30 else 1942)
+    clock[0] += 2
+    assert ctrl.step()[0] == {'fan1': 255, 'fan2': 255}
+    # Restore verification while fans are still coasting down at high RPM.
+    fan.write_verification(fan.read_snapshot())
+    for _ in range(daemon.SEEK_BLACKOUT):
+        clock[0] += 2
+        pwms = ctrl.step()[0]
+        assert pwms == {'fan1': 33, 'fan2': 74}
+        assert ctrl.fans[0]['floor'] == 33
+        assert ctrl.fans[1]['floor'] == 74
+    # On tick SEEK_BLACKOUT + 1, normal floor convergence resumes.
+    clock[0] += 2
+    ctrl.step()
+    assert ctrl.fans[0]['floor'] < 33
+    assert ctrl.fans[1]['floor'] < 74
+    ctrl.fans[0]['floor'] = 33
+    ctrl.fans[1]['floor'] = 74
+    # Recovery exit (probe_uncertain_fans) also arms seek_blackout on the recovered fan.
+    ctrl.fans[0]['recovering'] = True
+    ctrl.fans[0]['recovery_count'] = 0
+    ctrl.fans[0]['max_since'] = clock[0] - daemon.PRESENCE_SPINUP_S - 1
+    ctrl.fans[0]['max_boot'] = clock[0] - daemon.PRESENCE_SPINUP_S - 1
+    for _ in range(daemon.TACH_RECOVERY_SAMPLES):
+        clock[0] += 2
+        fan.write_verification(fan.read_snapshot())
+        ctrl.step()
+    assert not ctrl.fans[0]['recovering']
+    assert ctrl.fans[0]['seek_blackout'] == daemon.SEEK_BLACKOUT
+    clock[0] += 2
+    fan.write_verification(fan.read_snapshot())
+    ctrl.step()
+    assert ctrl.fans[0]['seek_blackout'] == daemon.SEEK_BLACKOUT - 1
+    assert ctrl.fans[0]['floor'] == 33
+    # High thermal demand followed by cool-down must also arm seek_blackout.
+    monkeypatch.setattr(daemon, 'read_sensor', lambda zone, path: 78.0 if zone.name == 'ddr-thermal' else 50.0)
+    monkeypatch.setattr(daemon, 'fan_rpm', lambda f, _: 4000)
+    clock[0] += 2
+    hot_pwms = ctrl.step()[0]
+    assert hot_pwms['fan1'] > 33 + daemon.SEEK_MEASURE_TOL
+    assert ctrl.fans[0]['seek_blackout'] == daemon.SEEK_BLACKOUT
+    monkeypatch.setattr(daemon, 'read_sensor', lambda zone, path: 50.0)
+    clock[0] += 2
+    pwms = ctrl.step()[0]
+    assert pwms['fan1'] == 33
+    assert ctrl.fans[0]['floor'] == 33
+
+
+def test_reconcile_daemon_loops_deduplicates_errors_and_stops(tmp_path, monkeypatch, capsys):
+    fan, _ = modules(monkeypatch)
+    fan.STATE = tmp_path / 'state'
+    script = load_script(monkeypatch, ROOT / 'data/vyos-1x-files/src/conf_mode/system_hardware_fan.py',
+                         'fan_conf_daemon_test')
+    script.PENDING = tmp_path / 'pending'
+    calls = []
+    waits = []
+    failed_closed = []
+    stop_event = None
+    monkeypatch.setattr(script, 'fail_closed', lambda: failed_closed.append(True))
+
+    def fake_reconcile():
+        calls.append(len(calls))
+        if len(calls) in (1, 2):
+            raise RuntimeError('vyconfd restarting')
+        if len(calls) == 3:
+            fan.mark_boot_ready()
+            script.PENDING.write_text('0')
+        elif len(calls) == 4:
+            script.PENDING.unlink(missing_ok=True)
+        elif len(calls) == 5:
+            fan.mark_boot_failed()
+            script.PENDING.write_text('0')
+        elif len(calls) >= 6:
+            stop_event.set()
+
+    monkeypatch.setattr(script, 'reconcile', fake_reconcile)
+
+    class FakeEvent:
+        def __init__(self):
+            self.flag = False
+
+        def is_set(self):
+            return self.flag
+
+        def set(self):
+            self.flag = True
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            return self.flag
+
+    stop_event = FakeEvent()
+    script.reconcile_daemon(interval=5.0, fast_interval=2.0, stop_event=stop_event)
+    assert len(calls) == 6
+    assert len(failed_closed) == 2
+    # Before boot-ready (1, 2) and while pending (3) -> fast_interval; steady state (4) and boot_failed (5) -> interval
+    assert waits[:5] == [2.0, 2.0, 2.0, 5.0, 5.0]
+    stderr_lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
+    assert stderr_lines == ['vyconfd restarting']
+
+
+def test_reconcile_daemon_handles_real_sigterm_without_deadlock(tmp_path, monkeypatch):
+    import threading
+    fan, _ = modules(monkeypatch)
+    fan.STATE = tmp_path / 'state'
+    fan.mark_boot_ready()
+    script = load_script(monkeypatch, ROOT / 'data/vyos-1x-files/src/conf_mode/system_hardware_fan.py',
+                         'fan_conf_sigterm_test')
+    script.PENDING = tmp_path / 'pending'
+    calls = []
+    timer = None
+
+    def fake_reconcile():
+        nonlocal timer
+        calls.append(True)
+        if len(calls) == 1:
+            timer = threading.Timer(0.1, lambda: os.kill(os.getpid(), signal.SIGTERM))
+            timer.start()
+
+    monkeypatch.setattr(script, 'reconcile', fake_reconcile)
+    started = time.monotonic()
+    try:
+        script.reconcile_daemon(interval=30.0, fast_interval=30.0)
+    finally:
+        if timer is not None:
+            timer.cancel()
+            timer.join(2.0)
+    assert calls == [True]
+    assert time.monotonic() - started < 2.0
 
 
 def test_repaired_snapshot_requires_new_daemon_acknowledgement(tmp_path, monkeypatch):
@@ -2634,8 +2840,7 @@ def test_systemd_units_validate_with_host_fan_binary(tmp_path):
     unit.write_text(source.replace('ExecStart=/usr/local/bin/fan-pid',
                                    f'ExecStart={sys.executable} {ROOT / "board/scripts/fan-pid"}'))
     subprocess.run(['systemd-analyze', 'verify', str(unit),
-                    str(ROOT / 'board/systemd/vyos-fan-reconcile.service'),
-                    str(ROOT / 'board/systemd/vyos-fan-reconcile.timer')],
+                    str(ROOT / 'board/systemd/vyos-fan-reconcile.service')],
                    check=True, text=True, capture_output=True)
 
 

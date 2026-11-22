@@ -782,7 +782,7 @@ class Controller:
                 "last_written_pwm": -1,   # force first write
                 "seek_flat": 0,           # consecutive flat ticks (gates NEAR DOWN)
                 "seek_settle": 0,         # ticks to observe response after a DOWN step
-                "seek_blackout": 0,       # ticks to ignore post-kick coast-down rpm
+                "seek_blackout": SEEK_BLACKOUT,  # ignore startup/high-duty coast-down rpm
                 "floor_lo": FLOOR_MIN,    # learned hard lower bound (raised by stalls)
                 "cooldown": 0,            # ticks where a DOWN move is blocked
                 "kick": False,            # request a 255 kick this tick
@@ -950,6 +950,9 @@ class Controller:
             ok = ok and i2c_read_byte(self.i2c_fd, reg) == PWM_MAX
             self.record_max(fan, ok)
             fan['last_written_pwm'] = PWM_MAX if ok else -1
+            fan['seek_flat'] = 0
+            fan['seek_settle'] = 0
+            fan['seek_blackout'] = SEEK_BLACKOUT
             if not ok:
                 write_failed = True
                 continue
@@ -1032,6 +1035,9 @@ class Controller:
             self.record_max(fan, success)
             all_ok = all_ok and success
             fan["last_written_pwm"] = -1
+            fan["seek_flat"] = 0
+            fan["seek_settle"] = 0
+            fan["seek_blackout"] = SEEK_BLACKOUT
         return all_ok
 
     def invalidate_settings_ack(self) -> None:
@@ -1226,6 +1232,10 @@ class Controller:
                     zone.integral = 0.0
                 out = PWM_MAX
             fan_pwms[fan["name"]] = out
+            if out == PWM_MAX or out > fan["floor"] + SEEK_MEASURE_TOL:
+                fan["seek_flat"] = 0
+                fan["seek_settle"] = 0
+                fan["seek_blackout"] = SEEK_BLACKOUT
             force = (out == 0 or out == PWM_MAX)
             if (force or fan["last_written_pwm"] < 0
                     or abs(out - fan["last_written_pwm"]) >= PWM_DEADBAND):
@@ -1355,8 +1365,13 @@ class Controller:
         if not allow_seek:
             fan["seek_flat"] = 0
             fan["seek_settle"] = 0
+            if fan["last_written_pwm"] > fan["floor"] + SEEK_MEASURE_TOL or fan["last_written_pwm"] < 0:
+                fan["seek_blackout"] = SEEK_BLACKOUT
             return
-        if fan["last_written_pwm"] > fan["floor"] + SEEK_MEASURE_TOL:
+        if fan["last_written_pwm"] > fan["floor"] + SEEK_MEASURE_TOL or fan["last_written_pwm"] < 0:
+            fan["seek_flat"] = 0
+            fan["seek_settle"] = 0
+            fan["seek_blackout"] = SEEK_BLACKOUT
             return
         if fan["seek_settle"] > 0:
             fan["seek_settle"] -= 1

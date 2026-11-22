@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 
+import os
+import select
+import signal
 import sys
 from pathlib import Path
 
 from vyos import ConfigError
 from vyos.base import Warning
 from vyos.config import Config
-from vyos.fan_control import (PENDING_TIMEOUT, boot_failure_marker, effective, invalidate_verification,
+from vyos.fan_control import (PENDING_TIMEOUT, boot_failure_latched, boot_failure_marker,
+                              boot_marker, effective, invalidate_verification,
                               load_snapshot_record, mark_boot_failed, mark_boot_ready, mark_pending,
                               read_applied, read_verification, write_snapshot, write_verification)
 from vyos.utils.boot import boot_configuration_complete, boot_configuration_success
@@ -14,6 +18,9 @@ from vyos.utils.commit import acquire_commit_lock_file, release_commit_lock_file
 
 PATH = ['system', 'hardware', 'fan']
 PENDING = Path('/run/vyos-fan-pending')
+COMMIT_LOCK_BUSY = 'Configuration system locked by another commit in progress'
+RECONCILE_INTERVAL = 5.0
+RECONCILE_FAST_INTERVAL = 2.0
 
 
 def get_config(config=None):
@@ -105,19 +112,19 @@ def reconcile():
     if not boot_approved():
         return
     try:
-        mark_boot_ready()
         lock, message = acquire_commit_lock_file()
     except Exception:
         fail_closed()
         raise
     if lock is None:
-        fail_closed()
-        if message.startswith('Critical error opening commit lock file'):
-            raise ConfigError(message)
+        if message != COMMIT_LOCK_BUSY:
+            fail_closed()
+            raise ConfigError(str(message))
         return
     try:
         if not boot_approved():
             return
+        mark_boot_ready()
         conf = Config()
         if conf.get_config_tree(effective=True) is None:
             raise ConfigError('VyOS running configuration is unavailable')
@@ -158,10 +165,89 @@ def reconcile():
         release_commit_lock_file(lock)
 
 
+def _reconcile_delay(interval, fast_interval):
+    try:
+        if boot_failure_latched():
+            return interval
+        if PENDING.exists() or not boot_marker().exists():
+            return fast_interval
+    except OSError:
+        return fast_interval
+    return interval
+
+
+class _SignalStop:
+    def __init__(self):
+        self._stopped = False
+        self._r_fd, self._w_fd = os.pipe()
+        os.set_blocking(self._r_fd, False)
+        os.set_blocking(self._w_fd, False)
+        self._prev_term = signal.signal(signal.SIGTERM, self._handle)
+        self._prev_int = signal.signal(signal.SIGINT, self._handle)
+
+    def _handle(self, _sig, _frame):
+        self._stopped = True
+        try:
+            os.write(self._w_fd, b'\x00')
+        except OSError:
+            pass
+
+    def is_set(self):
+        return self._stopped
+
+    def wait(self, timeout):
+        if self._stopped:
+            return True
+        try:
+            ready, _, _ = select.select([self._r_fd], [], [], timeout)
+            if ready:
+                try:
+                    os.read(self._r_fd, 64)
+                except OSError:
+                    pass
+        except InterruptedError:
+            pass
+        return self._stopped
+
+    def close(self):
+        signal.signal(signal.SIGTERM, self._prev_term)
+        signal.signal(signal.SIGINT, self._prev_int)
+        os.close(self._r_fd)
+        os.close(self._w_fd)
+
+
+def reconcile_daemon(interval=RECONCILE_INTERVAL, fast_interval=RECONCILE_FAST_INTERVAL, stop_event=None):
+    owned_stop = _SignalStop() if stop_event is None else None
+    stopper = owned_stop if owned_stop is not None else stop_event
+    last_error = None
+    try:
+        while not stopper.is_set():
+            try:
+                reconcile()
+                last_error = None
+            except Exception as error:
+                try:
+                    fail_closed()
+                except OSError:
+                    pass
+                message = str(error) or type(error).__name__
+                if message != last_error:
+                    print(message, file=sys.stderr, flush=True)
+                    last_error = message
+            if stopper.is_set():
+                break
+            stopper.wait(_reconcile_delay(interval, fast_interval))
+    finally:
+        if owned_stop is not None:
+            owned_stop.close()
+
+
 if __name__ == '__main__':
     try:
         if sys.argv[1:] == ['--reconcile']:
             reconcile()
+        elif sys.argv[1:] == ['--reconcile-daemon']:
+            reconcile_daemon()
         else:
             config = get_config()
             verify(config)

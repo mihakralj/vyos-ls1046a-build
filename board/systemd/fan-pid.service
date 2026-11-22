@@ -6,6 +6,7 @@ Documentation=file:///usr/local/bin/fan-pid
 # (DefaultDependencies=no detached the unit from the target graph and the
 #  .wants/ symlink alone was not enough — observed 2026-05-11.)
 After=sysinit.target systemd-modules-load.service
+Wants=vyos-fan-reconcile.service
 Conflicts=fancontrol.service
 # Board gate: only Mono Gateway DK has the EMC2305 + LS1046A thermal zones.
 # We gate ONLY on /proc/device-tree/compatible (a stable DT-only path that
