@@ -23,6 +23,7 @@ typedef int64_t atomic64_t;
 #define ETH_P_8021AD 0x88a8
 #define DMA_FROM_DEVICE 2
 #define WGFP_MAX_EGRESS 8
+#define DPAA_WGFP_TX_HEADROOM 64
 #define unlikely(x) (x)
 #define likely(x) (x)
 #define atomic64_inc(p) (++*(p))
@@ -31,8 +32,27 @@ typedef int64_t atomic64_t;
 #define rcu_read_unlock() ((void)0)
 #define rcu_dereference(p) (p)
 #define smp_load_acquire(p) (*(p))
+#define this_cpu_ptr(p) (p)
 #define ntohs(x) __builtin_bswap16(x)
 #define EXPORT_SYMBOL_GPL(x)
+
+typedef unsigned long dma_addr_t;
+struct qm_fd { u8 bpid; };
+struct wgfp_bman_rel {
+	bool active;
+	u8 bpid;
+	int n;
+	dma_addr_t addr[8];
+};
+static struct wgfp_bman_rel wgfp_bman_rel;
+static void wgfp_bman_rel_flush(struct wgfp_bman_rel *rel) { rel->n = 0; }
+
+struct dpaa_wgfp_tx_buf {
+	void *buf;
+	u32 buf_size;
+	int ifindex;
+	void *priv;
+};
 
 struct device { int unused; };
 struct net_device {
@@ -158,10 +178,31 @@ static int dev_queue_xmit(struct sk_buff *skb)
 }
 
 static int settles;
-static void wgfp_orp_settle_after_skb(void)
+static void dpaa_wgfp_orp_settle(void)
 {
 	settles++;
 }
+
+/* Force fallback to the owned-skb path in this harness (WGFP TX slot path is
+ * tested separately in tests/dut/wgfp_tx_slots.c). */
+static bool dpaa_wgfp_tx_alloc(int egress, int expected_ifindex, u32 max_len,
+			       struct dpaa_wgfp_tx_buf *out)
+{
+	(void)egress; (void)expected_ifindex; (void)max_len; (void)out;
+	return false;
+}
+
+static void dpaa_wgfp_tx_submit(struct dpaa_wgfp_frame *f,
+				struct dpaa_wgfp_tx_buf *tx, u32 off, u32 len)
+{
+	(void)f; (void)tx; (void)off; (void)len;
+	assert(0 && "unexpected tx_submit when tx_alloc returns false");
+}
+
+struct sk_buff *dpaa_wgfp_alloc_xmit_skb(int egress, int expected_ifindex,
+					 u32 total_len);
+void dpaa_wgfp_xmit_skb(struct dpaa_wgfp_frame *f, int egress,
+			int expected_ifindex, struct sk_buff *skb);
 
 #include "wgfp_xmit_body.h"
 

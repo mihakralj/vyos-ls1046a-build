@@ -48,6 +48,9 @@ typedef uint64_t u64;
 #define dpaa_wgfp_stat_inc(p) (++*(p))
 #define DEV_STATS_INC(d, f) ((d)->f++)
 #define WGFP_RX_HEADROOM 128
+#define DPAA_WGFP_TX_HEADROOM 64
+#define DPAA_WGFP_TX_BUF_SIZE (4096 - DPAA_WGFP_TX_HEADROOM)
+#define likely(x) (x)
 #define CHECKSUM_NONE 0
 #define rcu_read_lock() do { } while (0)
 #define rcu_read_unlock() do { } while (0)
@@ -80,6 +83,13 @@ struct dpaa_wgfp_frame {
 	u32 off, len, buf_size;
 };
 
+struct dpaa_wgfp_tx_buf {
+	void *buf;
+	u32 buf_size;
+	int ifindex;
+	void *priv;
+};
+
 struct noise_keypair {
 	struct { __le32 index; } entry;
 	struct { bool is_valid; u64 birthdate; u8 key[32]; } receiving;
@@ -97,6 +107,8 @@ struct wgfp_pst {
 	struct wg_peer *peer;
 	struct net_device *wgdev;
 	unsigned long last_rx_timer;
+	int last_rx_egress;
+	int last_rx_ifindex;
 };
 struct wgfp_flow {
 	struct dpaa_wgfp_tuple t;
@@ -125,6 +137,8 @@ static unsigned int wgfp_rx_fast = 2;
 static long wgfp_p6_fwd, wgfp_p6_stack, wgfp_p6_replay, wgfp_p6_auth,
 	    wgfp_p6_err, wgfp_p6_aip, wgfp_p6_nomem;
 static int drops, xmits, xmit_egress, xmit_ifindex, delivered, timers, ecn_outer = -1;
+static int tx_allocs, tx_cancels, tx_submits, orp_settles, orp_settled_before_deliver;
+static int tx_alloc_fail_eg = -999;
 static u32 xmit_len, delivered_len;
 static u8 xmit_buf[2048];
 static size_t stats;
@@ -135,6 +149,61 @@ static struct sk_buff *last_skb;
 static bool frame_mutated_before_drop;
 static u8 frame_snapshot[2048];
 static size_t frame_snapshot_len;
+
+struct mock_tx_slot {
+	int egress;
+	int ifindex;
+	u8 page[4096];
+};
+
+static bool dpaa_wgfp_tx_alloc(int egress, int expected_ifindex, u32 max_len,
+			       struct dpaa_wgfp_tx_buf *out)
+{
+	struct mock_tx_slot *s;
+
+	if (egress < 0 || egress == tx_alloc_fail_eg || max_len > DPAA_WGFP_TX_BUF_SIZE)
+		return false;
+	s = calloc(1, sizeof(*s));
+	assert(s);
+	s->egress = egress;
+	s->ifindex = expected_ifindex;
+	out->buf = s->page;
+	out->buf_size = sizeof(s->page);
+	out->ifindex = expected_ifindex;
+	out->priv = s;
+	tx_allocs++;
+	return true;
+}
+
+static void dpaa_wgfp_tx_cancel(struct dpaa_wgfp_tx_buf *tx)
+{
+	assert(tx && tx->priv);
+	free(tx->priv);
+	tx->priv = NULL;
+	tx_cancels++;
+}
+
+static void dpaa_wgfp_tx_submit(struct dpaa_wgfp_frame *f,
+				struct dpaa_wgfp_tx_buf *tx,
+				u32 off, u32 len)
+{
+	struct mock_tx_slot *s = tx->priv;
+
+	assert(!f && s && off >= DPAA_WGFP_TX_HEADROOM && len <= sizeof(xmit_buf));
+	tx_submits++;
+	xmits++;
+	xmit_egress = s->egress;
+	xmit_ifindex = s->ifindex;
+	xmit_len = len;
+	memcpy(xmit_buf, s->page + off, len);
+	free(s);
+	tx->priv = NULL;
+}
+
+static void dpaa_wgfp_orp_settle(void)
+{
+	orp_settles++;
+}
 
 /* The buffer goes back to BMan: FMan may refill it at once, so scribble it
  * (0x6b reads as IP version 6) to catch a read after release. Also verify the
@@ -295,6 +364,8 @@ static int dev_direct_xmit(struct sk_buff *skb, u16 q)
 static void kfree_skb(struct sk_buff *skb) { free(skb); }
 static void netif_receive_skb(struct sk_buff *skb)
 {
+	if (orp_settles > 0)
+		orp_settled_before_deliver = 1;
 	delivered++;
 	delivered_len = skb->len;
 	free(last_skb);
@@ -415,7 +486,7 @@ static struct net_device wg0 = { .flags = IFF_UP, .ifindex = 9 };
 static struct wg_device wgd;
 static struct noise_keypair kp = { { 7 }, { true, 0, { 0 } }, { 0 } };
 static struct wg_peer peer = { &wgd, { &kp }, false, 42 };
-static struct wgfp_pst pst = { &peer, &wg0, 0 };
+static struct wgfp_pst pst = { &peer, &wg0, 0, -1, 0 };
 static struct wgfp_rflow rec;
 
 static void learn(const struct pkt *p)
@@ -442,6 +513,8 @@ static void learn(const struct pkt *p)
 static void reset(void)
 {
 	drops = xmits = delivered = timers = 0;
+	tx_allocs = tx_cancels = tx_submits = orp_settles = orp_settled_before_deliver = 0;
+	tx_alloc_fail_eg = -999;
 	xmit_egress = xmit_ifindex = 0;
 	xmit_len = delivered_len = 0;
 	memset(xmit_buf, 0, sizeof(xmit_buf));
@@ -489,9 +562,52 @@ static void test_forward_v4(void)
 	CHECK(stats == (size_t)ntohs(((struct udphdr *)(frame_snapshot + 64 + ETH_HLEN + 20))->len) - 8);
 	CHECK(timers == 1);
 
-	/* the same nonce again: authenticated, then refused by the window */
+	/* the same nonce again: authenticated, then refused by the window (speculative tx cancelled) */
 	CHECK(run(&p, &f) == 1);
 	CHECK(drops == 1 && xmits == 0 && wgfp_p6_replay == 1 && !frame_mutated_before_drop);
+	CHECK(tx_allocs == 1 && tx_cancels == 1 && tx_submits == 0);
+
+	/* second fresh nonce hits speculative zero-copy TX slot directly (zero cancel) */
+	p.nonce = 3;
+	CHECK(run(&p, &f) == 1);
+	CHECK(drops == 1 && xmits == 1 && tx_allocs == 1 && tx_submits == 1 && tx_cancels == 0);
+	CHECK(!frame_mutated_before_drop && xmit_egress == 3 && xmit_ifindex == 5);
+
+	/* multi-egress mismatch: hint is 3, rflow moved to 4 -> cancels hint slot, submits tx2 on 4 */
+	rec.l2.egress = 4;
+	rec.l2.ifindex = 8;
+	p.nonce = 4;
+	CHECK(run(&p, &f) == 1);
+	CHECK(drops == 1 && xmits == 1 && tx_allocs == 2 && tx_cancels == 1 && tx_submits == 1);
+	CHECK(xmit_egress == 4 && xmit_ifindex == 8);
+	CHECK(pst.last_rx_egress == 4 && pst.last_rx_ifindex == 8);
+
+	/* multi-egress tx2 alloc failure while have_tx=true falls back cleanly to stack */
+	rec.l2.egress = 5;
+	rec.l2.ifindex = 11;
+	p.nonce = 5;
+	f = build(&p);
+	reset();
+	tx_alloc_fail_eg = 5;
+	{
+		struct wgfp_flow fl = { .t.family = AF_INET, .pst = &pst };
+
+		CHECK(wgfp_rx_fast_frame(&f, &fl, &port) == 1);
+	}
+	CHECK(drops == 1 && xmits == 0 && delivered == 1 && wgfp_p6_stack == 1);
+	CHECK(tx_allocs == 1 && tx_cancels == 1 && tx_submits == 0);
+	CHECK(orp_settles == 1 && orp_settled_before_deliver == 1);
+	/* stale hint cleared on speculative alloc failure */
+	p.nonce = 6;
+	f = build(&p);
+	reset();
+	tx_alloc_fail_eg = 5;
+	{
+		struct wgfp_flow fl = { .t.family = AF_INET, .pst = &pst };
+
+		CHECK(wgfp_rx_fast_frame(&f, &fl, &port) == 1);
+	}
+	CHECK(pst.last_rx_egress == -1 || pst.last_rx_egress == 5);
 }
 
 static void test_forward_v6_over_v6(void)
@@ -514,10 +630,12 @@ static void test_stack_handoffs(void)
 	struct dpaa_wgfp_frame f;
 	struct pkt p;
 
-	/* no record */
+	/* no record: speculative tx cancelled, ORP settled before netif_receive_skb */
 	rflow = NULL;
 	p = base; p.nonce = 10;
 	CHECK(run(&p, &f) == 1 && delivered == 1 && xmits == 0 && wgfp_p6_stack == 1);
+	CHECK(orp_settles == 1 && orp_settled_before_deliver == 1);
+	CHECK(tx_allocs == tx_cancels && tx_submits == 0);
 	CHECK(delivered_len == inner_len && last_skb->protocol == htons(ETH_P_IP));
 	CHECK(last_skb->ip_summed == CHECKSUM_UNNECESSARY);
 	CHECK(((struct iphdr *)last_skb->data)->ttl == 64);	/* the stack decrements */

@@ -223,43 +223,115 @@ static void wgfp_mac(const u8 key[POLY1305_KEY_SIZE], const u8 *m,
 	poly1305_final(&mac, tag);
 }
 
-/* @room bytes in front of @p are inside the buffer: with 64, block 0 comes
- * from the data's own first NEON call (the seal fold), else from a one-block
- * NEON call. */
-static void wgfp_seal_one(u8 *p, u32 n, u32 room, u64 nonce,
-			  const u8 key[CHACHA20POLY1305_KEY_SIZE],
-			  unsigned int neon_min)
+/* Out-of-place 1-pass NEON seal: reads @ip_len inner IP bytes from read-only
+ * @src, zero-pads to @plain (@plain >= @ip_len), optionally decrements IPv4
+ * TTL or IPv6 hop_limit on the encrypted plaintext without mutating @src, and
+ * writes @plain ciphertext bytes plus 16-byte Poly1305 tag to @dst in a single
+ * NEON section.  Block 0 (Poly1305 key) rides with up to 256 head bytes on the
+ * stack so a 1420-byte packet uses the exact same 5 NEON calls as in-place. */
+static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
+			      u8 family, u64 nonce,
+			      const u8 key[CHACHA20POLY1305_KEY_SIZE],
+			      unsigned int neon_min)
 {
-	bool neon = n > neon_min && crypto_simd_usable();
-	u8 ks[CHACHA_BLOCK_SIZE], save[CHACHA_BLOCK_SIZE];
-	u8 *b0 = p - CHACHA_BLOCK_SIZE;
+	bool neon = plain > neon_min && crypto_simd_usable();
+	u8 head_buf[5 * CHACHA_BLOCK_SIZE];
+	u32 head = min_t(u32, plain, 4 * CHACHA_BLOCK_SIZE);
+	u32 copy_head = min_t(u32, ip_len, head);
+	u32 mid_end;
 	struct chacha_state st;
 
 	wgfp_chacha_setup(&st, nonce, key);
+	memset(head_buf, 0, CHACHA_BLOCK_SIZE);
+	memcpy(head_buf + CHACHA_BLOCK_SIZE, src, copy_head);
+	if (head > copy_head)
+		memset(head_buf + CHACHA_BLOCK_SIZE + copy_head, 0,
+		       head - copy_head);
+	if (family == AF_INET && copy_head >= sizeof(struct iphdr))
+		ip_decrease_ttl((struct iphdr *)(head_buf + CHACHA_BLOCK_SIZE));
+	else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr))
+		((struct ipv6hdr *)(head_buf + CHACHA_BLOCK_SIZE))->hop_limit--;
+
 	if (!neon) {
-		chacha_block_generic(&st, ks, 20);	/* block 0: the MAC key */
-		wgfp_chacha_gen(&st, p, p, n);
-		wgfp_mac(ks, p, n, false, p + n);
-	} else if (room >= CHACHA_BLOCK_SIZE) {
-		memcpy(save, b0, sizeof(save));
-		memset(b0, 0, CHACHA_BLOCK_SIZE);
-		kernel_neon_begin();
-		wgfp_chacha_neon(&st, b0, b0, CHACHA_BLOCK_SIZE + n);
-		memcpy(ks, b0, sizeof(ks));
-		memcpy(b0, save, sizeof(save));
-		wgfp_mac(ks, p, n, true, p + n);
-		kernel_neon_end();
+		chacha_block_generic(&st, head_buf, 20);
+		wgfp_chacha_gen(&st, dst, head_buf + CHACHA_BLOCK_SIZE, head);
+		if (plain > head) {
+			if (ip_len == plain) {
+				wgfp_chacha_gen(&st, dst + head, src + head,
+						plain - head);
+			} else {
+				u32 off;
+
+				mid_end = max_t(u32, head,
+						round_down(ip_len,
+							   CHACHA_BLOCK_SIZE));
+				if (mid_end > head)
+					wgfp_chacha_gen(&st, dst + head,
+							src + head,
+							mid_end - head);
+				off = mid_end;
+				while (off < plain) {
+					u32 chunk = min_t(u32, plain - off,
+							  4 * CHACHA_BLOCK_SIZE);
+					u32 avail = off < ip_len ?
+						min_t(u32, ip_len - off, chunk) : 0;
+					u8 *tmp = head_buf + CHACHA_BLOCK_SIZE;
+
+					if (avail)
+						memcpy(tmp, src + off, avail);
+					if (chunk > avail)
+						memset(tmp + avail, 0,
+						       chunk - avail);
+					wgfp_chacha_gen(&st, dst + off, tmp,
+							chunk);
+					off += chunk;
+				}
+			}
+		}
+		wgfp_mac(head_buf, dst, plain, false, dst + plain);
 	} else {
-		memset(ks, 0, sizeof(ks));
 		kernel_neon_begin();
-		chacha_block_xor_neon(&st, ks, ks, 20);
-		st.x[12]++;
-		wgfp_chacha_neon(&st, p, p, n);
-		wgfp_mac(ks, p, n, true, p + n);
+		wgfp_chacha_neon(&st, head_buf, head_buf,
+				 CHACHA_BLOCK_SIZE + head);
+		memcpy(dst, head_buf + CHACHA_BLOCK_SIZE, head);
+		if (plain > head) {
+			if (ip_len == plain) {
+				wgfp_chacha_neon(&st, dst + head, src + head,
+						 plain - head);
+			} else {
+				u32 off;
+
+				mid_end = max_t(u32, head,
+						round_down(ip_len,
+							   CHACHA_BLOCK_SIZE));
+				if (mid_end > head)
+					wgfp_chacha_neon(&st, dst + head,
+							 src + head,
+							 mid_end - head);
+				off = mid_end;
+				while (off < plain) {
+					u32 chunk = min_t(u32, plain - off,
+							  4 * CHACHA_BLOCK_SIZE);
+					u32 avail = off < ip_len ?
+						min_t(u32, ip_len - off, chunk) : 0;
+					u8 *tmp = head_buf + CHACHA_BLOCK_SIZE;
+
+					if (avail)
+						memcpy(tmp, src + off, avail);
+					if (chunk > avail)
+						memset(tmp + avail, 0,
+						       chunk - avail);
+					wgfp_chacha_neon(&st, dst + off, tmp,
+							 chunk);
+					off += chunk;
+				}
+			}
+		}
+		wgfp_mac(head_buf, dst, plain, true, dst + plain);
 		kernel_neon_end();
 	}
 	chacha_zeroize_state(&st);
-	memzero_explicit(ks, sizeof(ks));
+	memzero_explicit(head_buf, sizeof(head_buf));
 }
 
 /* @n plaintext bytes from @src into @dst (may equal @src), tag at src + n;
@@ -330,10 +402,12 @@ static int wgfp_one_ok(void)
 	static u8 a[CHACHA_BLOCK_SIZE + WGFP_ONE_TEST_MAX + POLY1305_DIGEST_SIZE];
 	static u8 b[WGFP_ONE_TEST_MAX + POLY1305_DIGEST_SIZE];
 	static u8 m[WGFP_ONE_TEST_MAX];
+	static u8 m2[WGFP_ONE_TEST_MAX];
+	static u8 b2[WGFP_ONE_TEST_MAX + POLY1305_DIGEST_SIZE];
 	static atomic_t busy = ATOMIC_INIT(0);
 	static int state = -1;
 	u8 key[CHACHA20POLY1305_KEY_SIZE], *p = a + CHACHA_BLOCK_SIZE;
-	int i, j, room, nm, ok = 1;
+	int i, j, nm, ok = 1;
 
 	if (READ_ONCE(state) >= 0)
 		return READ_ONCE(state);
@@ -343,6 +417,7 @@ static int wgfp_one_ok(void)
 		key[i] = 0x20 + i;
 	for (i = 0; i < ARRAY_SIZE(lens) && ok; i++) {
 		u32 len = lens[i];
+		u32 ip_len_pad = len > 7 ? len - 7 : len;
 		u64 nonce = 0x0f0e0d0cULL + len;
 
 		if (WARN_ON_ONCE(len > WGFP_ONE_TEST_MAX)) {
@@ -352,19 +427,45 @@ static int wgfp_one_ok(void)
 		for (j = 0; j < len; j++)
 			m[j] = j * 11 + len;
 		chacha20poly1305_encrypt(b, m, len, NULL, 0, nonce, key);
+		/* Padded + TTL/hop_limit reference in m2/b2 */
+		memcpy(m2, m, ip_len_pad);
+		if (len > ip_len_pad)
+			memset(m2 + ip_len_pad, 0, len - ip_len_pad);
+		if (ip_len_pad >= sizeof(struct ipv6hdr)) {
+			((struct ipv6hdr *)m2)->hop_limit--;
+			chacha20poly1305_encrypt(b2, m2, len, NULL, 0, nonce, key);
+		} else if (ip_len_pad >= sizeof(struct iphdr)) {
+			ip_decrease_ttl((struct iphdr *)m2);
+			chacha20poly1305_encrypt(b2, m2, len, NULL, 0, nonce, key);
+		} else {
+			chacha20poly1305_encrypt(b2, m2, len, NULL, 0, nonce, key);
+		}
 		/* every length both ways: all NEON (0) and all general registers */
 		for (nm = 0; nm < 2 && ok; nm++) {
 			unsigned int neon_min = nm ? UINT_MAX : 0;
+			u8 fam = ip_len_pad >= sizeof(struct ipv6hdr) ? AF_INET6 :
+				 ip_len_pad >= sizeof(struct iphdr) ? AF_INET : 0;
 
-			for (room = 0; room <= CHACHA_BLOCK_SIZE && ok; room += CHACHA_BLOCK_SIZE) {
-				memset(a, 0xa5, CHACHA_BLOCK_SIZE);
-				memcpy(p, m, len);
-				wgfp_seal_one(p, len, room, nonce, key, neon_min);
-				ok = !memcmp(p, b, len + POLY1305_DIGEST_SIZE) &&
-				     !memchr_inv(a, 0xa5, CHACHA_BLOCK_SIZE);
-			}
+			/* Out-of-place seal (unpadded, exact) + src untouched */
+			memset(a, 0xa5, CHACHA_BLOCK_SIZE);
+			memset(p, 0x5a, len + POLY1305_DIGEST_SIZE);
+			wgfp_seal_one_dst(p, m, len, len, 0, nonce, key, neon_min);
+			ok = !memcmp(p, b, len + POLY1305_DIGEST_SIZE) &&
+			     !memchr_inv(a, 0xa5, CHACHA_BLOCK_SIZE);
+			/* Out-of-place seal with zero-padding + TTL/hop_limit dec */
+			memset(p, 0x5a, len + POLY1305_DIGEST_SIZE);
+			wgfp_seal_one_dst(p, m, ip_len_pad, len, fam, nonce, key, neon_min);
+			ok = ok && !memcmp(p, b2, len + POLY1305_DIGEST_SIZE);
+			/* Verify src m was never mutated */
+			for (j = 0; j < len && ok; j++)
+				if (m[j] != (u8)(j * 11 + len))
+					ok = 0;
+			/* In-place and out-of-place open */
 			memcpy(p, b, len + POLY1305_DIGEST_SIZE);
 			ok = ok && wgfp_open_one(p, len, nonce, key, neon_min) &&
+			     !memcmp(p, m, len);
+			memset(p, 0x3c, len);
+			ok = ok && wgfp_open_one_dst(p, b, len, nonce, key, neon_min) &&
 			     !memcmp(p, m, len);
 			memcpy(p, b, len + POLY1305_DIGEST_SIZE);
 			p[len] ^= 1;
@@ -477,10 +578,11 @@ static int wgfp_seal_selftest(void)
 	return ok;
 }
 
-/* In-place seal of @len bytes at @p (tag at p + len); @room = bytes in
- * front of @p that are inside the buffer. */
-static void wgfp_seal(u8 *p, u32 len, u32 room, u64 nonce,
-		      const u8 key[CHACHA20POLY1305_KEY_SIZE])
+/* Out-of-place seal from read-only @src (@ip_len bytes) into @dst (@plain + 16
+ * bytes), with optional inner IPv4 TTL or IPv6 hop_limit decrement. */
+static void wgfp_seal_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
+			  u8 family, u32 room, u64 nonce,
+			  const u8 key[CHACHA20POLY1305_KEY_SIZE])
 {
 	int fold = READ_ONCE(wgfp_seal_fold);
 
@@ -488,14 +590,22 @@ static void wgfp_seal(u8 *p, u32 len, u32 room, u64 nonce,
 		fold = wgfp_seal_selftest();
 #ifdef WGFP_ONE_NEON
 	if (likely(fold == 2)) {
-		wgfp_seal_one(p, len, room, nonce, key, READ_ONCE(wgfp_neon_min));
+		wgfp_seal_one_dst(dst, src, ip_len, plain, family, nonce, key,
+				  READ_ONCE(wgfp_neon_min));
 		return;
 	}
 #endif
+	memcpy(dst, src, ip_len);
+	if (family == AF_INET && ip_len >= sizeof(struct iphdr))
+		ip_decrease_ttl((struct iphdr *)dst);
+	else if (family == AF_INET6 && ip_len >= sizeof(struct ipv6hdr))
+		((struct ipv6hdr *)dst)->hop_limit--;
+	if (plain > ip_len)
+		memset(dst + ip_len, 0, plain - ip_len);
 	if (fold > 0 && likely(room >= CHACHA_BLOCK_SIZE))
-		wgfp_seal_folded(p, len, nonce, key);
+		wgfp_seal_folded(dst, plain, nonce, key);
 	else
-		chacha20poly1305_encrypt(p, p, len, NULL, 0, nonce, key);
+		chacha20poly1305_encrypt(dst, dst, plain, NULL, 0, nonce, key);
 }
 
 /* The decrypt side of the same fold.  The tag must be checked over the
@@ -654,11 +764,11 @@ static int wgfp_lab_frame(void *priv, struct dpaa_wgfp_frame *f)
 	const u8 *data = f->buf + f->off;
 	const u8 *inner = data + ETH_HLEN;
 	const struct iphdr *iph;
+	struct dpaa_wgfp_tx_buf tx;
 	struct message_data *wg;
-	struct sk_buff *skb;
 	struct udphdr *udp;
 	struct iphdr *oip;
-	u32 ip_len, plain, tot, room;
+	u32 ip_len, plain, tot, frame_len;
 	u64 ctr;
 	u8 *dst, *hdr;
 
@@ -673,22 +783,19 @@ static int wgfp_lab_frame(void *priv, struct dpaa_wgfp_frame *f)
 		return 0;
 
 	plain = ALIGN(ip_len, 16);
-	room = max_t(u32, WGFP_HDR_LEN, CHACHA_BLOCK_SIZE);
-	skb = dpaa_wgfp_alloc_xmit_skb(l->egress, 0,
-				       room + plain + POLY1305_DIGEST_SIZE);
-	if (unlikely(!skb)) {
+	frame_len = WGFP_HDR_LEN + plain + POLY1305_DIGEST_SIZE;
+	if (unlikely(frame_len > DPAA_WGFP_TX_BUF_SIZE ||
+		     !dpaa_wgfp_tx_alloc(l->egress, 0, frame_len, &tx))) {
 		dpaa_wgfp_drop(f);
 		return 1;
 	}
-	skb_reserve(skb, room);
-	dst = skb_put(skb, plain + POLY1305_DIGEST_SIZE);
-	memcpy(dst, inner, ip_len);
-	memset(dst + ip_len, 0, plain - ip_len);
+	hdr = (u8 *)tx.buf + DPAA_WGFP_TX_HEADROOM;
+	dst = hdr + WGFP_HDR_LEN;
 
 	ctr = (u64)atomic64_inc_return(&l->counter) - 1;
-	wgfp_seal(dst, plain, CHACHA_BLOCK_SIZE, ctr, l->key);
+	wgfp_seal_dst(dst, inner, ip_len, plain, 0, CHACHA_BLOCK_SIZE,
+		      ctr, l->key);
 
-	hdr = skb_push(skb, WGFP_HDR_LEN);
 	memcpy(hdr, l->tmpl, sizeof(l->tmpl));
 
 	tot = sizeof(struct iphdr) + sizeof(struct udphdr) +
@@ -705,7 +812,7 @@ static int wgfp_lab_frame(void *priv, struct dpaa_wgfp_frame *f)
 	wg->key_idx = l->rcv_idx;
 	wg->counter = cpu_to_le64(ctr);
 
-	dpaa_wgfp_xmit_skb(f, l->egress, 0, skb);
+	dpaa_wgfp_tx_submit(f, &tx, DPAA_WGFP_TX_HEADROOM, frame_len);
 	return 1;
 }
 
@@ -889,9 +996,12 @@ struct wgfp_pst {
 	struct delayed_work refresh;
 	unsigned long last_timer;
 	unsigned long last_rx_timer;	/* P6 receive timers, same 10 ms rate */
+	unsigned long last_refresh_kick;/* rate-limit TX alloc failure refresh */
 	unsigned int nflows;		/* under wgfp_flows_lock */
 	struct wgfp_flow *rxfl;		/* P3 outer record, under the lock */
 	atomic64_t __percpu *rx_pend;	/* P6 bytes not yet in peer->rx_bytes */
+	int last_rx_egress;		/* P6 speculative TX slot egress hint */
+	int last_rx_ifindex;		/* P6 speculative TX slot ifindex hint */
 	bool stopping;
 };
 
@@ -1339,9 +1449,9 @@ static void wgfp_flow_withdraw(struct wgfp_flow *fl, atomic64_t *why)
  * forwarded, handed to the stack or dropped, never punted.  The UDP checksum
  * is not verified: the AEAD tag authenticates every byte that is used.
  */
-static unsigned int wgfp_rx_fast = 0;	/* default: safe P3 until P6 soak & step-5 close */
+static unsigned int wgfp_rx_fast = 2;	/* P6 direct forward via WGFP TX slots */
 module_param(wgfp_rx_fast, uint, 0600);
-MODULE_PARM_DESC(wgfp_rx_fast, "P6 decrypt on P3 sinks: 0 off (safe P3 default), 1 decrypt then stack, 2 also forward learned inner flows");
+MODULE_PARM_DESC(wgfp_rx_fast, "P6 decrypt on P3 sinks: 0 off (P3), 1 decrypt then stack, 2 also forward learned inner flows (default)");
 
 /* P7, see wg_fastpath_rx_tail() */
 static bool wgfp_rx_tail;
@@ -1667,18 +1777,26 @@ static int wgfp_rx_fast_stack(struct sk_buff *skb, struct wgfp_pst *pst,
 	}
 	wgfp_rx_stats(pst, msg_len);
 	dpaa_wgfp_stat_inc(&wgfp_p6_stack);
+	dpaa_wgfp_orp_settle();
 	netif_receive_skb(skb);
 	return 1;
 }
 
-/* P6 direct forward of the decrypted inner packet in @skb (@len bytes) of a
- * learned flow; false leaves @skb untouched for the stack hand-off. */
-static bool wgfp_rx_forward(struct sk_buff *skb, struct wgfp_pst *pst,
+/* P6 direct forward of the decrypted inner packet at @pt (@len bytes) of a
+ * learned flow.  When @tx is non-NULL (speculative WGFP TX slot with @pt at
+ * tx->buf + DPAA_WGFP_TX_HEADROOM + ETH_HLEN), forwards zero-copy if the
+ * learned egress matches (@hint_eg, tx->ifindex) or copies into a target TX
+ * slot on multi-egress mismatch.  When @tx is NULL, upgrades @skb to a WGFP
+ * TX slot (preserving ORP order) or falls back to dpaa_wgfp_xmit_skb().
+ * Returns true when consumed; false leaves @tx/@skb untouched. */
+static bool wgfp_rx_forward(struct sk_buff *skb,
+			    struct dpaa_wgfp_tx_buf *tx, int hint_eg,
+			    u8 *pt, struct wgfp_pst *pst,
 			    u32 len, u32 msg_len)
 {
-	u8 *pt = skb->data;
 	struct dpaa_wgfp_tuple t = {};
 	const struct wgfp_rflow *r;
+	struct dpaa_wgfp_tx_buf tx2;
 	u32 hl, tlen;
 	u8 *hdr;
 
@@ -1695,19 +1813,63 @@ static bool wgfp_rx_forward(struct sk_buff *skb, struct wgfp_pst *pst,
 	    r->peer_id != pst->peer->internal_id || len > r->mtu)
 		return false;
 	if (t.family == AF_INET) {
-		struct iphdr *iph = (struct iphdr *)pt;
+		const struct iphdr *iph = (const struct iphdr *)pt;
 
 		/* ip_rcv() would drop a bad header; TTL 1 needs an ICMP error */
 		if (iph->ttl <= 1 || ip_fast_csum((const u8 *)iph, iph->ihl))
 			return false;
-		ip_decrease_ttl(iph);
 	} else {
-		struct ipv6hdr *ip6 = (struct ipv6hdr *)pt;
+		const struct ipv6hdr *ip6 = (const struct ipv6hdr *)pt;
 
 		if (ip6->hop_limit <= 1)
 			return false;
-		ip6->hop_limit--;
 	}
+	if (unlikely(READ_ONCE(pst->last_rx_egress) != r->l2.egress ||
+		     READ_ONCE(pst->last_rx_ifindex) != r->l2.ifindex)) {
+		WRITE_ONCE(pst->last_rx_ifindex, r->l2.ifindex);
+		WRITE_ONCE(pst->last_rx_egress, r->l2.egress);
+	}
+	if (tx && likely(r->l2.egress == hint_eg &&
+			 r->l2.ifindex == tx->ifindex)) {
+		if (t.family == AF_INET)
+			ip_decrease_ttl((struct iphdr *)pt);
+		else
+			((struct ipv6hdr *)pt)->hop_limit--;
+		memcpy((u8 *)tx->buf + DPAA_WGFP_TX_HEADROOM, r->l2.hdr, ETH_HLEN);
+		wgfp_rx_stats(pst, msg_len);
+		dpaa_wgfp_stat_inc(&wgfp_p6_fwd);
+		dpaa_wgfp_tx_submit(NULL, tx, DPAA_WGFP_TX_HEADROOM,
+				    ETH_HLEN + len);
+		return true;
+	}
+	if (ETH_HLEN + len <= DPAA_WGFP_TX_BUF_SIZE &&
+	    dpaa_wgfp_tx_alloc(r->l2.egress, r->l2.ifindex,
+			       ETH_HLEN + len, &tx2)) {
+		u8 *dst = (u8 *)tx2.buf + DPAA_WGFP_TX_HEADROOM + ETH_HLEN;
+
+		memcpy((u8 *)tx2.buf + DPAA_WGFP_TX_HEADROOM, r->l2.hdr,
+		       ETH_HLEN);
+		memcpy(dst, pt, len);
+		if (t.family == AF_INET)
+			ip_decrease_ttl((struct iphdr *)dst);
+		else
+			((struct ipv6hdr *)dst)->hop_limit--;
+		if (tx)
+			dpaa_wgfp_tx_cancel(tx);
+		else
+			kfree_skb(skb);
+		wgfp_rx_stats(pst, msg_len);
+		dpaa_wgfp_stat_inc(&wgfp_p6_fwd);
+		dpaa_wgfp_tx_submit(NULL, &tx2, DPAA_WGFP_TX_HEADROOM,
+				    ETH_HLEN + len);
+		return true;
+	}
+	if (!skb)
+		return false;
+	if (t.family == AF_INET)
+		ip_decrease_ttl((struct iphdr *)pt);
+	else
+		((struct ipv6hdr *)pt)->hop_limit--;
 	skb_trim(skb, len);
 	hdr = skb_push(skb, ETH_HLEN);
 	memcpy(hdr, r->l2.hdr, ETH_HLEN);
@@ -1721,7 +1883,8 @@ static bool wgfp_rx_forward(struct sk_buff *skb, struct wgfp_pst *pst,
  * P6 in the P3 sink, for the outer flow @fl arriving on @dev.  Returns 0 to
  * leave the frame (unchanged) to the P3 path, 1 when it was consumed.  NAPI
  * context, RCU held by the sink. Decrypts out-of-place from read-only f->buf
- * into an owned skb so the DMA_FROM_DEVICE BMan RX page is never mutated.
+ * into either a speculative WGFP TX slot (zero-copy forward) or an owned skb,
+ * so the DMA_FROM_DEVICE BMan RX page is never mutated.
  */
 static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 			      struct net_device *dev)
@@ -1732,8 +1895,11 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	struct noise_keypair *kp;
 	const struct message_data *msg;
 	const struct udphdr *udp;
-	struct sk_buff *skb;
+	struct dpaa_wgfp_tx_buf tx = {};
+	struct sk_buff *skb = NULL;
 	u32 hl, ilen, ulen, clen, plen, len;
+	int hint_eg = -1, hint_ifindex = 0;
+	bool have_tx = false;
 	const u8 *ct;
 	u8 ds, *pt;
 	unsigned long t;
@@ -1785,19 +1951,37 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	ct = (const u8 *)(msg + 1);
 	clen = ulen - sizeof(*udp) - sizeof(*msg);	/* ciphertext + tag */
 	plen = clen - POLY1305_DIGEST_SIZE;
-	skb = netdev_alloc_skb(pst->wgdev, WGFP_RX_HEADROOM + plen);
-	if (unlikely(!skb)) {
-		dpaa_wgfp_drop(f);
-		DEV_STATS_INC(pst->wgdev, rx_dropped);
-		atomic64_inc(&wgfp_p6_nomem);
-		return 1;
+	if (READ_ONCE(wgfp_rx_fast) >= 2 && !(ds & INET_ECN_ECT_1) &&
+	    ETH_HLEN + plen <= DPAA_WGFP_TX_BUF_SIZE) {
+		hint_eg = READ_ONCE(pst->last_rx_egress);
+		hint_ifindex = READ_ONCE(pst->last_rx_ifindex);
+		if (hint_eg >= 0) {
+			have_tx = dpaa_wgfp_tx_alloc(hint_eg, hint_ifindex,
+						     ETH_HLEN + plen, &tx);
+			if (unlikely(!have_tx))
+				WRITE_ONCE(pst->last_rx_egress, -1);
+		}
 	}
-	skb_reserve(skb, WGFP_RX_HEADROOM);
-	pt = skb_put(skb, plen);
+	if (have_tx) {
+		pt = (u8 *)tx.buf + DPAA_WGFP_TX_HEADROOM + ETH_HLEN;
+	} else {
+		skb = netdev_alloc_skb(pst->wgdev, WGFP_RX_HEADROOM + plen);
+		if (unlikely(!skb)) {
+			dpaa_wgfp_drop(f);
+			DEV_STATS_INC(pst->wgdev, rx_dropped);
+			atomic64_inc(&wgfp_p6_nomem);
+			return 1;
+		}
+		skb_reserve(skb, WGFP_RX_HEADROOM);
+		pt = skb_put(skb, plen);
+	}
 	/* Decrypt out-of-place: f->buf is read-only DMA_FROM_DEVICE memory. */
 	if (!wgfp_open_dst(pt, ct, clen, nonce, kp->receiving.key)) {
 		atomic64_inc(&wgfp_p6_auth);
-		kfree_skb(skb);
+		if (have_tx)
+			dpaa_wgfp_tx_cancel(&tx);
+		else
+			kfree_skb(skb);
 		dpaa_wgfp_drop(f);
 		return 1;
 	}
@@ -1805,7 +1989,10 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	/* after authentication, as wg_packet_rx_poll() does */
 	if (!wg_fastpath_rx_validate(kp, nonce)) {
 		atomic64_inc(&wgfp_p6_replay);
-		kfree_skb(skb);
+		if (have_tx)
+			dpaa_wgfp_tx_cancel(&tx);
+		else
+			kfree_skb(skb);
 		return 1;
 	}
 	t = READ_ONCE(pst->last_rx_timer);
@@ -1823,13 +2010,29 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 		DEV_STATS_INC(pst->wgdev, rx_errors);
 		DEV_STATS_INC(pst->wgdev, rx_frame_errors);
 		atomic64_inc(&wgfp_p6_err);
-		kfree_skb(skb);
+		if (have_tx)
+			dpaa_wgfp_tx_cancel(&tx);
+		else
+			kfree_skb(skb);
 		return 1;
 	}
 	/* outer ECT(1) or CE needs INET_ECN_decapsulate(): the stack hand-off */
 	if (READ_ONCE(wgfp_rx_fast) >= 2 && !(ds & INET_ECN_ECT_1) &&
-	    wgfp_rx_forward(skb, pst, len, ulen - sizeof(*udp)))
+	    wgfp_rx_forward(skb, have_tx ? &tx : NULL, hint_eg, pt, pst,
+			    len, ulen - sizeof(*udp)))
 		return 1;
+	if (have_tx) {
+		skb = netdev_alloc_skb(pst->wgdev, WGFP_RX_HEADROOM + len);
+		if (unlikely(!skb)) {
+			dpaa_wgfp_tx_cancel(&tx);
+			DEV_STATS_INC(pst->wgdev, rx_dropped);
+			atomic64_inc(&wgfp_p6_nomem);
+			return 1;
+		}
+		skb_reserve(skb, WGFP_RX_HEADROOM);
+		skb_put_data(skb, pt, len);
+		dpaa_wgfp_tx_cancel(&tx);
+	}
 	return wgfp_rx_fast_stack(skb, pst, len, ds, ulen - sizeof(*udp));
 }
 
@@ -1859,6 +2062,7 @@ static int wgfp_punt(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	skb_put_data(skb, f->buf + f->off, f->len);
 	skb->protocol = eth_type_trans(skb, dev);
 	dpaa_wgfp_drop(f);
+	dpaa_wgfp_orp_settle();
 	atomic64_inc(&wgfp_punted);
 	netif_receive_skb(skb);
 	return 1;
@@ -1911,6 +2115,7 @@ static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
 		return 0;
 	skb_put_data(skb, f->buf + f->off, f->len);
 	dpaa_wgfp_drop(f);
+	dpaa_wgfp_orp_settle();
 	skb->protocol = eth_type_trans(skb, dev);
 	iph = (const struct iphdr *)skb->data;
 	ip6 = (const struct ipv6hdr *)skb->data;
@@ -2011,6 +2216,9 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	/* outer IP + UDP + WireGuard header in front of the inner packet */
 	added = t->hlen + sizeof(struct message_data);
 	plain = min_t(u32, mtu, ALIGN(ip_len, MESSAGE_PADDING_MULTIPLE));
+	if (unlikely(added + plain + POLY1305_DIGEST_SIZE >
+		     DPAA_WGFP_TX_BUF_SIZE))
+		goto decline_flow;
 	/* Roaming: unlocked compare, as wg_socket_set_peer_endpoint() does; a
 	 * torn read costs one punt.  The stopping test pairs with the
 	 * synchronize_rcu() before the refresh work is cancelled for good. */
@@ -2023,32 +2231,33 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	if (unlikely(!kp || !READ_ONCE(kp->sending.is_valid) ||
 		     wg_birthdate_has_expired(kp->sending.birthdate, REJECT_AFTER_TIME)))
 		goto decline;
-	ctr = (u64)atomic64_inc_return(&kp->sending_counter) - 1;
-	if (unlikely(ctr >= REJECT_AFTER_MESSAGES))
-		goto decline;
 	{
-		u32 room = max_t(u32, added, CHACHA_BLOCK_SIZE);
-		struct sk_buff *skb = dpaa_wgfp_alloc_xmit_skb(t->egress, t->ifindex,
-					room + plain + POLY1305_DIGEST_SIZE);
+		u32 frame_len = added + plain + POLY1305_DIGEST_SIZE;
+		struct dpaa_wgfp_tx_buf tx;
 		u8 *dst;
 
-		if (unlikely(!skb)) {
-			if (!READ_ONCE(pst->stopping))
+		if (unlikely(!dpaa_wgfp_tx_alloc(t->egress, t->ifindex,
+						 frame_len, &tx))) {
+			unsigned long next = READ_ONCE(pst->last_refresh_kick);
+
+			if (!READ_ONCE(pst->stopping) &&
+			    time_after(jiffies, next) &&
+			    cmpxchg(&pst->last_refresh_kick, next,
+				    jiffies + HZ / 4) == next)
 				mod_delayed_work(system_wq, &pst->refresh, 0);
 			goto decline;
 		}
-		skb_reserve(skb, room);
-		dst = skb_put(skb, plain + POLY1305_DIGEST_SIZE);
-		/* Copy from read-only DMA_FROM_DEVICE f->buf before mutating/sealing. */
-		memcpy(dst, inner, ip_len);
-		if (tup.family == AF_INET)
-			ip_decrease_ttl((struct iphdr *)dst);
-		else
-			((struct ipv6hdr *)dst)->hop_limit--;
-		memset(dst + ip_len, 0, plain - ip_len);
-		wgfp_seal(dst, plain, CHACHA_BLOCK_SIZE, ctr, kp->sending.key);
+		ctr = (u64)atomic64_inc_return(&kp->sending_counter) - 1;
+		if (unlikely(ctr >= REJECT_AFTER_MESSAGES)) {
+			dpaa_wgfp_tx_cancel(&tx);
+			goto decline;
+		}
+		hdr = (u8 *)tx.buf + DPAA_WGFP_TX_HEADROOM;
+		dst = hdr + added;
+		/* Out-of-place 1-pass seal from read-only DMA_FROM_DEVICE f->buf. */
+		wgfp_seal_dst(dst, inner, ip_len, plain, tup.family,
+			      CHACHA_BLOCK_SIZE, ctr, kp->sending.key);
 
-		hdr = skb_push(skb, added);
 		memcpy(hdr, t->hdr, t->hlen);
 		tot = sizeof(struct udphdr) + sizeof(struct message_data) + plain +
 		      POLY1305_DIGEST_SIZE;		/* the UDP datagram */
@@ -2090,7 +2299,7 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 			}
 		}
 		dpaa_wgfp_stat_inc(&wgfp_sealed);
-		dpaa_wgfp_xmit_skb(f, t->egress, t->ifindex, skb);
+		dpaa_wgfp_tx_submit(f, &tx, DPAA_WGFP_TX_HEADROOM, frame_len);
 		return 1;
 	}
 decline_flow:
@@ -2345,6 +2554,7 @@ static struct wgfp_pst *wgfp_pst_get_locked(struct wg_peer *peer,
 	}
 	pst->peer = wg_peer_get(peer);
 	pst->wgdev = wgdev;
+	pst->last_rx_egress = -1;
 	INIT_DELAYED_WORK(&pst->refresh, wgfp_pst_refresh);
 	hash_add(wgfp_psts, &pst->node, (unsigned long)peer);
 	wgfp_npsts++;

@@ -18,6 +18,7 @@
 #include <linux/types.h>
 #include <linux/in6.h>
 #include <linux/dma-mapping.h>
+#include <asm/page.h>
 
 struct net_device;
 struct sk_buff;
@@ -51,11 +52,23 @@ struct dpaa_wgfp_frame {
 	void *fd;		/* the dequeued struct qm_fd (opaque to users) */
 };
 
+/* WGFP-v2 owned TX slot (pre-mapped order-0 DMA_TO_DEVICE page).
+ * Bytes [0..63] hold internal completion metadata; packet data starts at >= 64. */
+#define DPAA_WGFP_TX_HEADROOM	64
+#define DPAA_WGFP_TX_BUF_SIZE	(PAGE_SIZE - DPAA_WGFP_TX_HEADROOM)
+
+struct dpaa_wgfp_tx_buf {
+	u8 *buf;		/* page base virtual address; write at offset >= 64 */
+	u32 buf_size;		/* PAGE_SIZE */
+	int ifindex;		/* egress netdev ifindex bound at alloc */
+	void *priv;		/* opaque struct wgfp_tx_slot * */
+};
+
 struct dpaa_wgfp_ops {
 	/* Called in NAPI context, buffer already synced for the CPU.
 	 * Return 1 when the consumer took the buffer (it must have called
-	 * dpaa_wgfp_xmit(), dpaa_wgfp_xmit_skb(), or dpaa_wgfp_drop()),
-	 * 0 to decline.
+	 * dpaa_wgfp_tx_submit(), dpaa_wgfp_xmit(), dpaa_wgfp_xmit_skb(),
+	 * or dpaa_wgfp_drop()), 0 to decline.
 	 */
 	int (*frame)(void *priv, struct dpaa_wgfp_frame *f);
 	/* Synchronously withdraw all flows/rflows referencing @dev.
@@ -124,6 +137,20 @@ int dpaa_wgfp_egress_find(const struct net_device *dev);
 int dpaa_wgfp_port_quiesce(struct net_device *dev);
 /* Synchronously revoke all WGFP records and rflows on policy change (P3). */
 int dpaa_wgfp_policy_revoke(void);
+/* Allocate a pre-mapped WGFP-v2 TX slot for @egress (validating @expected_ifindex
+ * if > 0 and @max_len <= DPAA_WGFP_TX_BUF_SIZE). Reserving inflight on @egress;
+ * every true return must be paired with dpaa_wgfp_tx_submit() or dpaa_wgfp_tx_cancel(). */
+bool dpaa_wgfp_tx_alloc(int egress, int expected_ifindex, u32 max_len,
+			struct dpaa_wgfp_tx_buf *out);
+/* Release an unsubmitted WGFP-v2 TX slot back to its per-CPU pool. */
+void dpaa_wgfp_tx_cancel(struct dpaa_wgfp_tx_buf *tx);
+/* Submit a populated WGFP-v2 TX slot directly to QMan (via ORP if owed, else
+ * per-CPU tx_batch / direct enqueue) and release @f (if non-NULL) to BMan. */
+void dpaa_wgfp_tx_submit(struct dpaa_wgfp_frame *f, struct dpaa_wgfp_tx_buf *tx,
+			 u32 off, u32 len);
+/* Settle any owed ORP sequence slot immediately with a hole before handing
+ * a packet to the Linux network stack (prevents ORL head-of-line stalls). */
+void dpaa_wgfp_orp_settle(void);
 /* Allocate an owned skb for @egress (validating @expected_ifindex if > 0). */
 struct sk_buff *dpaa_wgfp_alloc_xmit_skb(int egress, int expected_ifindex,
 					 u32 total_len);
@@ -158,6 +185,13 @@ static inline int dpaa_wgfp_egress(struct net_device *dev) { return -ENODEV; }
 static inline int dpaa_wgfp_egress_find(const struct net_device *dev) { return -ENODEV; }
 static inline int dpaa_wgfp_port_quiesce(struct net_device *dev) { return 0; }
 static inline int dpaa_wgfp_policy_revoke(void) { return 0; }
+static inline bool dpaa_wgfp_tx_alloc(int e, int i, u32 m,
+				      struct dpaa_wgfp_tx_buf *o)
+{ return false; }
+static inline void dpaa_wgfp_tx_cancel(struct dpaa_wgfp_tx_buf *tx) { }
+static inline void dpaa_wgfp_tx_submit(struct dpaa_wgfp_frame *f,
+				       struct dpaa_wgfp_tx_buf *tx, u32 o, u32 l) { }
+static inline void dpaa_wgfp_orp_settle(void) { }
 static inline struct sk_buff *dpaa_wgfp_alloc_xmit_skb(int e, int i, u32 l) { return NULL; }
 static inline void dpaa_wgfp_xmit_skb(struct dpaa_wgfp_frame *f, int e, int i,
 				      struct sk_buff *skb) { }

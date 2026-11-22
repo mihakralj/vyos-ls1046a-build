@@ -71,6 +71,7 @@ struct qm_mcc_initfq {
 		u16 fq_ctrl;
 		u16 ics_cred;
 		u8 cgid;
+		u32 context_b;
 		struct { struct { u8 exclusive; } stashing; } context_a;
 	} fqd;
 };
@@ -78,7 +79,7 @@ struct qm_mcc_initfq {
 enum {
 	FQ_TYPE_RX_DEFAULT = 1, FQ_TYPE_RX_ERROR, FQ_TYPE_RX_PCD, FQ_TYPE_TX,
 	FQ_TYPE_TX_CONFIRM, FQ_TYPE_TX_CONF_MQ, FQ_TYPE_TX_ERROR,
-	FQ_TYPE_TX_NO_CONFIRM
+	FQ_TYPE_TX_NO_CONFIRM, FQ_TYPE_TX_WGFP
 };
 enum { NETREG_REGISTERED, NETREG_UNREGISTERING, NETREG_UNREGISTERED };
 #define TX 1
@@ -96,6 +97,7 @@ enum { NETREG_REGISTERED, NETREG_UNREGISTERING, NETREG_UNREGISTERED };
 #define QM_INITFQ_WE_TDTHRESH 16
 #define QM_INITFQ_WE_CONTEXTA 32
 #define QM_INITFQ_WE_ICSCRED 64
+#define QM_INITFQ_WE_CONTEXTB 128
 #define QM_FQCTRL_PREFERINCACHE 1
 #define QM_FQCTRL_AVOIDBLOCK 2
 #define QM_FQCTRL_CGE 4

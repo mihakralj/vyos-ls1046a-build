@@ -59,6 +59,8 @@ static bool wgfp_pool_failed;
 static int wgfp_lock, wgfp_neg;
 static void *wgfp_ops;
 static u64 wgfp_xmit_ok, wgfp_xmit_fail, wgfp_xmit_ern;
+static u64 wgfp_xmit_conf_ok, wgfp_xmit_no_slot, wgfp_xmit_tx_err, wgfp_xmit_dup_comp;
+static u64 wgfp_xmit_ern_cgr_td, wgfp_xmit_ern_orp_late, wgfp_xmit_ern_orp_early, wgfp_xmit_ern_other;
 u64 wgfp_xmit_frame_wait_fail = 1, wgfp_xmit_poll_wait_fail = 2;
 u64 wgfp_xmit_invalid_egress = 3, wgfp_xmit_orp_wait_fail = 4;
 static u64 wgfp_xmit_nomem, wgfp_xmit_qdisc_drop, wgfp_xmit_cn;

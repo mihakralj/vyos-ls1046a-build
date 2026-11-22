@@ -3156,6 +3156,9 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_316.py" 2>&1
     # F-320: contain DPAA FQ teardown failures and retain non-devm parent resources.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_320.py" 2>&1
+    # F-322: WGFP-v2 confirmed TX FQ on offload_cgr, batched BMan release, and bpid=0xff guards.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_322.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f322-fixup.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-fq-lifetime 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-offload-fq.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-containment.py" "$(pwd)" --require-offload-cgr 2>&1
