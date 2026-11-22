@@ -12,6 +12,7 @@
 
 typedef uint16_t u16;
 typedef uint32_t u32;
+typedef uint64_t u64;
 typedef unsigned int uint;
 
 #define CGR_NUM 256
@@ -25,10 +26,23 @@ typedef unsigned int uint;
 #define QM_CGR_EN 1
 #define QMAN_CGR_MODE_FRAME 1
 #define MAC_10000FD 1
+#define SPEED_UNKNOWN (-1)
+#define SPEED_1000 1000
+#define SPEED_10000 10000
+#define ETH_DATA_LEN 1500
+#define ETH_HLEN 14
+#define ETH_FCS_LEN 4
+#define VLAN_HLEN 4
+#define FSL_DPAA_ETH_MAX_BUF_COUNT 1280
 #define DPAA_CS_THRESHOLD_10G 100
 #define DPAA_CS_THRESHOLD_1G 10
 #define cpu_to_be16(x) (x)
 #define be32_to_cpu(x) (x)
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x, v) ((x) = (v))
+#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
+#define div64_u64(a, b) ((uint64_t)(a) / (uint64_t)(b))
+#define min_t(type, a, b) ((type)(a) < (type)(b) ? (type)(a) : (type)(b))
 #define max_t(type, a, b) ((type)(a) > (type)(b) ? (type)(a) : (type)(b))
 #define clamp_t(type, v, lo, hi) \
 	((type)(v) < (type)(lo) ? (type)(lo) : \
@@ -38,8 +52,27 @@ typedef unsigned int uint;
 #define pr_debug(...) ((void)0)
 #define pr_err(...) ((void)0)
 #define dev_dbg(...) ((void)0)
+#define dev_info(...) ((void)0)
+#define netdev_err(...) (error_logs++)
+#define netdev_info(...) ((void)0)
 #define pr_err_ratelimited(...) (error_logs++)
 #define netif_msg_drv(priv) false
+
+struct mutex { pthread_mutex_t m; };
+static void mutex_init(struct mutex *lock)
+{
+	assert(!pthread_mutex_init(&lock->m, NULL));
+}
+#ifdef OFFLOAD_CGR
+static void mutex_lock(struct mutex *lock)
+{
+	assert(!pthread_mutex_lock(&lock->m));
+}
+static void mutex_unlock(struct mutex *lock)
+{
+	assert(!pthread_mutex_unlock(&lock->m));
+}
+#endif
 
 struct list_head {
 	struct list_head *next, *prev;
@@ -52,6 +85,7 @@ struct device {
 struct net_device {
 	struct device dev;
 	int stops, wakes;
+	unsigned int mtu;
 };
 
 struct qman_portal;
@@ -75,6 +109,7 @@ struct mac_device {
 };
 
 struct dpaa_bp {
+	size_t size;
 	u32 config_count;
 };
 
@@ -88,6 +123,10 @@ struct dpaa_priv {
 		u32 congested_jiffies;
 	} cgr_data;
 	struct dpaa_cgr_context *ingress_cgr;
+	struct dpaa_cgr_context *offload_cgr;
+	struct mutex offload_cgr_lock;
+	int offload_cgr_speed;
+	u16 rx_headroom;
 	bool use_ingress_cgr;
 };
 
@@ -112,10 +151,13 @@ static struct portal_config configs[2];
 static int current_cpu, references, preempt_count;
 static int query_calls, modify_calls, query_fail_at, modify_fail_at;
 static int alloc_error, release_error, release_calls, error_logs;
-static int ctx_allocs, ctx_frees;
+static int ctx_allocs, ctx_frees, update_calls, update_error;
+static int possible_cpus = 2;
+static struct qm_mcc_initcgr last_modify_opts, last_update_opts;
 static bool ipi_fails, allocation_fails, allocated_ids[CGR_NUM];
 static u32 jiffies = 100;
 static uint dpaa_ingress_quarters = 2;
+static uint dpaa_offload_queue_us = 2000;
 static pthread_mutex_t gate_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gate_cond = PTHREAD_COND_INITIALIZER;
 static bool block_callback, callback_entered, release_callback;
@@ -172,7 +214,7 @@ static void lock_irqsave(pthread_mutex_t *lock, unsigned long *flags)
 static void preempt_disable(void) { preempt_count++; }
 static void preempt_enable(void) { assert(preempt_count > 0); preempt_count--; }
 static int smp_processor_id(void) { return current_cpu; }
-static int num_possible_cpus(void) { return 2; }
+static int num_possible_cpus(void) { return possible_cpus; }
 
 static struct qman_portal *get_affine_portal(void)
 {
@@ -213,8 +255,21 @@ static int qm_modify_cgr(struct qman_cgr *cgr, u32 flags,
 			 struct qm_mcc_initcgr *opts)
 {
 	modify_calls++;
+	if (opts)
+		last_modify_opts = *opts;
 	return modify_calls == modify_fail_at ? -ETIMEDOUT : 0;
 }
+
+#ifdef OFFLOAD_CGR
+static int qman_update_cgr_safe(struct qman_cgr *cgr,
+				struct qm_mcc_initcgr *opts)
+{
+	update_calls++;
+	if (opts)
+		last_update_opts = *opts;
+	return update_error;
+}
+#endif
 
 static void qm_cgr_cscn_targ_set(struct cgr_data *data, int portal_id, u32 old) {}
 static void qm_cgr_cscn_targ_clear(struct cgr_data *data, int portal_id, u32 old) {}
@@ -224,8 +279,24 @@ static bool qman_cgrs_get(struct qman_cgrs *cgrs, unsigned int id)
 }
 static void qm_cgr_cs_thres_set64(u32 *threshold, uint64_t value, int round)
 {
-	*threshold = value;
+	u32 e = 0;
+	int oddbit = 0;
+
+	while (value > 0xff) {
+		oddbit = value & 1;
+		value >>= 1;
+		e++;
+		if (round && oddbit)
+			value++;
+	}
+	*threshold = (u32)(((value & 0xff) << 5) | (e & 0x1f));
 }
+#ifdef OFFLOAD_CGR
+static u64 qm_cgr_cs_thres_get64(const u32 *threshold)
+{
+	return (u64)((*threshold >> 5) & 0xff) << (*threshold & 0x1f);
+}
+#endif
 
 static int qman_alloc_cgrid(u32 *id)
 {
@@ -318,7 +389,11 @@ static void reset(void)
 	current_cpu = references = preempt_count = 0;
 	query_calls = modify_calls = query_fail_at = modify_fail_at = 0;
 	alloc_error = release_error = release_calls = error_logs = 0;
-	ctx_allocs = ctx_frees = 0;
+	ctx_allocs = ctx_frees = update_calls = update_error = 0;
+	possible_cpus = 2;
+	dpaa_offload_queue_us = 2000;
+	memset(&last_modify_opts, 0, sizeof(last_modify_opts));
+	memset(&last_update_opts, 0, sizeof(last_update_opts));
 	ipi_fails = allocation_fails = false;
 	memset(allocated_ids, 0, sizeof(allocated_ids));
 	block_callback = callback_entered = release_callback = false;
@@ -329,9 +404,13 @@ static void setup(struct fixture *f)
 {
 	memset(f, 0, sizeof(*f));
 	f->netdev.dev.parent = &f->parent;
+	f->netdev.mtu = ETH_DATA_LEN;
 	f->priv.net_dev = &f->netdev;
 	f->priv.mac_dev = &f->mac;
 	f->priv.dpaa_bp = &f->bp;
+	f->priv.rx_headroom = 256;
+	mutex_init(&f->priv.offload_cgr_lock);
+	f->bp.size = 3584;
 	f->bp.config_count = 100;
 }
 
@@ -574,6 +653,135 @@ static void concurrent_callback(void)
 	assert(ctx_allocs == ctx_frees && !references && !preempt_count);
 }
 
+#ifdef OFFLOAD_CGR
+static void offload_cgr_thresholds(void)
+{
+	struct fixture f;
+
+	reset();
+	possible_cpus = 4;
+	setup(&f);
+	f.bp.config_count = 1280;
+	f.bp.size = 3584;
+	f.priv.rx_headroom = 256;
+	f.mac.phylink_config.mac_capabilities = MAC_10000FD;
+
+	/* 10G @ 2000 us: exact target frames and pool-cap safety */
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 1500) == 1625);
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 3600) == 687);
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 9000) == 276);
+	/* Unknown speed falls back to MAC capabilities */
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_UNKNOWN, 1500) == 1625);
+	f.mac.phylink_config.mac_capabilities = 0;
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_UNKNOWN, 1500) == 162);
+	/* 1G @ 2000 us: 1500 -> 162, 9000 -> floor 32 */
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_1000, 1500) == 162);
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_1000, 9000) == 32);
+
+	/* Cap at half the RX pool (5120 / 2 = 2560 bufs) even at max queue_us */
+	dpaa_offload_queue_us = 10000;
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 1500) == 2560);
+	/* S/G boundary crossovers: 3302->1 buf (2560), 3303->3 bufs (853),
+	 * 6886->3 bufs (853), 6887->4 bufs (640), 9600->4 bufs (640) */
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 3302) == 2560);
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 3303) == 853);
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 3600) == 853);
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 6886) == 853);
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 6887) == 640);
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 9000) == 640);
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 9600) == 640);
+	/* MTU < 1500 clamps to 1500; speed 0 falls back to MAC capability */
+	dpaa_offload_queue_us = 2000;
+	f.mac.phylink_config.mac_capabilities = MAC_10000FD;
+	assert(dpaa_offload_cgr_frames(&f.priv, 0, 1280) == 1625);
+	/* NULL dpaa_bp falls back consistently to 3584 / 1280*4 */
+	f.priv.dpaa_bp = NULL;
+	assert(dpaa_offload_cgr_frames(&f.priv, SPEED_10000, 1500) == 1625);
+}
+
+static void offload_cgr_lifecycle_and_updates(void)
+{
+	struct fixture f;
+	struct dpaa_cgr_context *ctx;
+	u32 id;
+
+	reset();
+	possible_cpus = 4;
+	setup(&f);
+	f.bp.config_count = 1280;
+	f.mac.phylink_config.mac_capabilities = MAC_10000FD;
+
+	/* Alloc / create faults obey F-300 containment */
+	allocation_fails = true;
+	assert(dpaa_offload_cgr_init(&f.priv) == -ENOMEM);
+	assert(!f.priv.offload_cgr);
+	allocation_fails = false;
+
+	alloc_error = -ENOSPC;
+	assert(dpaa_offload_cgr_init(&f.priv) == -ENOSPC);
+	assert(!f.priv.offload_cgr && ctx_allocs == 1 && ctx_frees == 1);
+	alloc_error = 0;
+
+	modify_fail_at = 1;
+	assert(dpaa_offload_cgr_init(&f.priv) == -ETIMEDOUT);
+	assert(!f.priv.offload_cgr && allocated_ids[7] && !release_calls);
+	modify_fail_at = 0;
+
+	/* Update is a safe no-op when offload_cgr is absent */
+	dpaa_offload_cgr_update(&f.priv, SPEED_10000, 9000);
+	assert(!update_calls);
+
+	/* Successful init: frame mode, CSTD enabled, CSCN disabled, cb NULL */
+	assert(!dpaa_offload_cgr_init(&f.priv));
+	ctx = f.priv.offload_cgr;
+	assert(ctx && !ctx->cgr.cb);
+	id = ctx->cgr.cgrid;
+	assert(id == 8);
+	assert(last_modify_opts.cgr.mode == QMAN_CGR_MODE_FRAME);
+	assert(last_modify_opts.cgr.cstd_en == QM_CGR_EN);
+	assert(last_modify_opts.cgr.cscn_en == 0);
+	assert((last_modify_opts.we_mask &
+		(QM_CGR_WE_MODE | QM_CGR_WE_CS_THRES |
+		 QM_CGR_WE_CSCN_EN | QM_CGR_WE_CSTD_EN)) ==
+	       (QM_CGR_WE_MODE | QM_CGR_WE_CS_THRES |
+		QM_CGR_WE_CSCN_EN | QM_CGR_WE_CSTD_EN));
+	assert(qm_cgr_cs_thres_get64(&last_modify_opts.cgr.cs_thres) == 1624);
+
+	/* Speed and MTU transitions update threshold via qman_update_cgr_safe */
+	f.netdev.mtu = 9000;
+	dpaa_offload_cgr_update(&f.priv, SPEED_UNKNOWN, 9000);
+	assert(update_calls == 1);
+	assert(last_update_opts.we_mask == QM_CGR_WE_CS_THRES);
+	assert(qm_cgr_cs_thres_get64(&last_update_opts.cgr.cs_thres) == 276);
+
+	dpaa_offload_cgr_update(&f.priv, SPEED_1000, 0);
+	assert(update_calls == 2);
+	assert(qm_cgr_cs_thres_get64(&last_update_opts.cgr.cs_thres) == 32);
+
+	f.netdev.mtu = 1500;
+	dpaa_offload_cgr_update(&f.priv, SPEED_UNKNOWN, 1500);
+	assert(update_calls == 3);
+	assert(qm_cgr_cs_thres_get64(&last_update_opts.cgr.cs_thres) == 162);
+
+	/* speed=0 preserves cached speed; failed update does not overwrite cached speed */
+	dpaa_offload_cgr_update(&f.priv, 0, 1500);
+	assert(update_calls == 4 && f.priv.offload_cgr_speed == SPEED_1000);
+	assert(qm_cgr_cs_thres_get64(&last_update_opts.cgr.cs_thres) == 162);
+
+	update_error = -ETIMEDOUT;
+	dpaa_offload_cgr_update(&f.priv, SPEED_10000, 0);
+	assert(update_calls == 5 && f.priv.offload_cgr_speed == SPEED_1000);
+	update_error = 0;
+
+	/* Failed delete quarantines owner & retains ID */
+	query_fail_at = query_calls + 1;
+	dpaa_cgr_release(&f.parent, &f.priv.offload_cgr);
+	assert(!f.priv.offload_cgr && linked(0, &ctx->cgr) && allocated_ids[id]);
+	cleanup_quarantine(0, ctx);
+	assert(ctx_allocs == ctx_frees && !references && !preempt_count);
+}
+#endif
+
 int main(void)
 {
 	for (int cpu = 0; cpu < 2; cpu++)
@@ -591,6 +799,10 @@ int main(void)
 	failed_deletion(1, OFFLINE_FAILURE);
 	partial_creation_and_id_retention();
 	concurrent_callback();
+#ifdef OFFLOAD_CGR
+	offload_cgr_thresholds();
+	offload_cgr_lifecycle_and_updates();
+#endif
 	for (int cpu = 0; cpu < 2; cpu++)
 		assert(!pthread_mutex_destroy(&qman_affine_portal[cpu].cgr_lock));
 	puts("CGR containment: cleanup, faults, offline dispatch and callback synchronization passed");

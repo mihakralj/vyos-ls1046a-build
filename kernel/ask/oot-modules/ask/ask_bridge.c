@@ -158,15 +158,19 @@ static bool ask_bridge_blocking_registered;
 static bool ask_bridge_netdev_registered;
 static bool ask_bridge_hook_registered;
 
+/*
+ * One unsettled role generation per port, reconciled to the port's live
+ * membership. needs_prepare: the FE detach did not complete (failed join, or
+ * a leave the kernel completed despite our failure). policy_seq 0 means
+ * family_mask is unset and the live family is used.
+ */
 struct ask_bridge_role_state {
 	bool pending;
-	bool linking;
+	bool needs_prepare;
 	int dev_ifindex;
-	int upper_ifindex;
 	u64 generation;
 	u64 policy_seq;
 	u8 family_mask;
-	enum fman_pcd_fe_profile profile;
 };
 
 static struct ask_bridge_role_state ask_bridge_role[256];
@@ -473,8 +477,10 @@ static int ask_bridge_rec_del(struct ask_bridge_rec *r)
 	if (r->unsettled && !r->dead)
 		return -EBUSY;
 	if (!r->dead) {
-		rc = ask_hw_l2_record(r->port, r->key, 0, r->act, r->vid,
+		rc = ask_hw_l2_record(r->port, r->key, r->fqid, r->act, r->vid,
 				      r->fe_token, false);
+		if (rc == -EAGAIN)
+			return rc;
 		if (rc) {
 			r->unsettled = true;
 			pr_warn_ratelimited("ask: bridge: delete %pM>%pM tci 0x%04x on port 0x%02x: %d; retaining unsettled record\n",
@@ -483,6 +489,8 @@ static int ask_bridge_rec_del(struct ask_bridge_rec *r)
 					    r->port, rc);
 			return rc;
 		}
+	} else if (!r->unsettled && r->fqid) {
+		ask_hw_l2_fq_put(r->fqid);
 	}
 	list_del(&r->node);
 	ask_bridge_n_recs--;
@@ -716,8 +724,9 @@ static void ask_bridge_work_fn(struct work_struct *w)
 	unsigned int i, n = 0;
 
 	rtnl_lock();
-	mutex_lock(&ask_bridge_lock);
+	/* Before ask_bridge_lock: a role prepare re-enters it via quiesce. */
 	ask_bridge_reconcile_roles();
+	mutex_lock(&ask_bridge_lock);
 	if (!ask_bridge_vlan_paused) {
 		spin_lock_bh(&ask_bridge_cand_lock);
 		n = ask_bridge_n_cand;
@@ -931,7 +940,7 @@ static struct notifier_block ask_bridge_blocking_nb = {
  * failed delete stays listed and vetoes the upper-device change: asking FMan
  * to switch profiles with an uncertain bridge owner is never safe.
  */
-static int ask_bridge_port_quiesce(u8 hw_port_id)
+int ask_bridge_dev_quiesce(u8 hw_port_id, int ifindex)
 {
 	struct ask_bridge_rec *r, *tmp;
 	int rc = 0;
@@ -939,13 +948,23 @@ static int ask_bridge_port_quiesce(u8 hw_port_id)
 	ASSERT_RTNL();
 	mutex_lock(&ask_bridge_lock);
 	list_for_each_entry(r, &ask_bridge_recs, node) {
-		if (r->port == hw_port_id && r->unsettled && !r->dead) {
+		bool match = (hw_port_id != 0xff && r->port == hw_port_id) ||
+			     (ifindex > 0 &&
+			      (r->in_ifindex == ifindex ||
+			       r->out_ifindex == ifindex));
+
+		if (match && r->unsettled && !r->dead) {
 			rc = -EBUSY;
 			goto out;
 		}
 	}
 	list_for_each_entry_safe(r, tmp, &ask_bridge_recs, node) {
-		if (r->port != hw_port_id)
+		bool match = (hw_port_id != 0xff && r->port == hw_port_id) ||
+			     (ifindex > 0 &&
+			      (r->in_ifindex == ifindex ||
+			       r->out_ifindex == ifindex));
+
+		if (!match)
 			continue;
 		rc = ask_bridge_rec_del(r);
 		if (rc)
@@ -956,44 +975,80 @@ out:
 	return rc;
 }
 
+int ask_bridge_port_quiesce(u8 hw_port_id)
+{
+	return ask_bridge_dev_quiesce(hw_port_id, 0);
+}
+
 /*
- * Reconcile a generated PRECHANGEUPPER detachment.  If another notifier
- * vetoed the topology change, this restores the profile of the live
- * membership; otherwise it completes the requested profile.  A commit
- * failure leaves the generation pending and admission closed.
+ * Settle a pending role generation to the profile of the port's live
+ * membership: finish a detach that did not complete, then engage.  Errors
+ * that a newer policy made final (operator engage/disengage, retained FE,
+ * vanished device) drop the generation; transient ones keep it pending with
+ * admission closed.  Called under rtnl, never under ask_bridge_lock (the
+ * prepare re-enters it through owner quiesce).
  */
+static void ask_bridge_reconcile_port(unsigned int port_id)
+{
+	struct ask_bridge_role_state *state = &ask_bridge_role[port_id];
+	enum fman_pcd_fe_profile profile;
+	struct net_device *dev;
+	bool detached;
+	u8 family, port;
+	u64 seq;
+	int rc = 0;
+
+	ASSERT_RTNL();
+	if (!state->pending)
+		return;
+	dev = __dev_get_by_index(&init_net, state->dev_ifindex);
+	if (!dev || ask_hw_dev_port(dev, &port) || port != port_id) {
+		ask_pr_info("bridge: role generation %llu port 0x%02x device gone; dropped\n",
+			    state->generation, port_id);
+		state->pending = false;
+		return;
+	}
+	profile = ask_bridge_port_profile(dev);
+	family = state->family_mask;
+	seq = state->policy_seq;
+	if (state->needs_prepare) {
+		rc = ask_hw_offload_role_prepare(port_id, profile, true,
+						 &family, &detached, &seq,
+						 state->policy_seq);
+		/* Keep the saved family across a failure that closed it. */
+		if (seq) {
+			state->family_mask = family;
+			state->policy_seq = seq;
+		}
+		if (!rc)
+			state->needs_prepare = false;
+	}
+	if (!rc)
+		rc = ask_hw_offload_role_commit(port_id, profile, family, seq);
+	if (!rc) {
+		if (family)
+			ask_pr_info("bridge: role generation %llu port 0x%02x reconciled to profile %d\n",
+				    state->generation, port_id, profile);
+		else
+			ask_pr_info("bridge: role generation %llu port 0x%02x idle; cleared\n",
+				    state->generation, port_id);
+		state->pending = false;
+	} else if (rc == -ESTALE || rc == -EACCES || rc == -ESHUTDOWN) {
+		ask_pr_err("bridge: role generation %llu port 0x%02x abandoned: %d\n",
+			   state->generation, port_id, rc);
+		state->pending = false;
+	} else {
+		pr_err_ratelimited("ask: bridge: role generation %llu port 0x%02x reconcile failed: %d; admission remains closed\n",
+				   state->generation, port_id, rc);
+	}
+}
+
 static void ask_bridge_reconcile_roles(void)
 {
 	unsigned int port_id;
 
-	ASSERT_RTNL();
-	for (port_id = 0; port_id < ARRAY_SIZE(ask_bridge_role); port_id++) {
-		struct ask_bridge_role_state *state = &ask_bridge_role[port_id];
-		struct net_device *dev;
-		enum fman_pcd_fe_profile profile;
-		int rc;
-
-		if (!state->pending)
-			continue;
-		dev = __dev_get_by_index(&init_net, state->dev_ifindex);
-		if (!dev) {
-			ask_pr_err("bridge: role generation %llu port 0x%02x has no device; admission remains closed\n",
-				   state->generation, port_id);
-			continue;
-		}
-		profile = ask_bridge_port_profile(dev);
-		rc = ask_hw_offload_role_commit(port_id, profile,
-						state->family_mask,
-						state->policy_seq);
-		if (rc) {
-			ask_pr_err("bridge: role generation %llu port 0x%02x reconcile failed: %d\n",
-				   state->generation, port_id, rc);
-			continue;
-		}
-		ask_pr_info("bridge: role generation %llu port 0x%02x reconciled to profile %d\n",
-			    state->generation, port_id, profile);
-		state->pending = false;
-	}
+	for (port_id = 0; port_id < ARRAY_SIZE(ask_bridge_role); port_id++)
+		ask_bridge_reconcile_port(port_id);
 }
 
 /*
@@ -1007,7 +1062,7 @@ static int ask_bridge_role_prechange(struct net_device *dev,
 	struct ask_bridge_role_state *state;
 	enum fman_pcd_fe_profile profile;
 	u8 port, family = 0;
-	u64 policy_seq;
+	u64 policy_seq = 0;
 	bool detached = false;
 	int rc;
 
@@ -1016,6 +1071,14 @@ static int ask_bridge_role_prechange(struct net_device *dev,
 		return NOTIFY_OK;
 	profile = ask_bridge_profile_for(info->linking ?
 					 info->upper_dev : NULL);
+	state = &ask_bridge_role[port];
+
+	/* One role generation at a time: settle the previous one first. */
+	ask_bridge_reconcile_port(port);
+	if (state->pending) {
+		rc = -EBUSY;
+		goto fail;
+	}
 
 	/*
 	 * Leaving while L2-owned records exist requires identified withdrawal
@@ -1024,32 +1087,40 @@ static int ask_bridge_role_prechange(struct net_device *dev,
 	if (!info->linking) {
 		rc = ask_bridge_port_quiesce(port);
 		if (rc)
-			goto veto;
+			goto record;
 	}
 	rc = ask_hw_offload_role_prepare(port, profile, true, &family,
 					 &detached, &policy_seq, 0);
-	if (rc)
-		goto veto;
+	if (rc) {
+		if (rc == -ESTALE || rc == -EACCES || rc == -ESHUTDOWN)
+			goto fail;
+		goto record;
+	}
 	if (!detached)
 		return NOTIFY_OK;
 
-	state = &ask_bridge_role[port];
+	state->needs_prepare = false;
+	goto pending;
+
+record:
+	/* The prepare may have closed the family; reconcile must reopen it. */
+	state->needs_prepare = true;
+pending:
 	state->pending = true;
-	state->linking = info->linking;
 	state->dev_ifindex = dev->ifindex;
-	state->upper_ifindex = info->upper_dev->ifindex;
-	state->family_mask = family;
-	state->profile = profile;
+	state->family_mask = policy_seq ? family : 0;
 	state->policy_seq = policy_seq;
 	state->generation = ++ask_bridge_role_generation;
 	ask_bridge_kick();
-	return NOTIFY_OK;
-
-veto:
-	ask_pr_err("bridge: veto %s %s %s: FE role prechange failed: %d\n",
-		   netdev_name(dev), info->linking ? "join" : "leave",
-		   netdev_name(info->upper_dev), rc);
-	return notifier_from_errno(rc);
+	if (!rc)
+		return NOTIFY_OK;
+fail:
+	ask_pr_err("bridge: %s %s %s: FE role prechange failed: %d%s\n",
+		   info->linking ? "veto" : "reconcile after",
+		   netdev_name(dev), netdev_name(info->upper_dev), rc,
+		   info->linking ? "" : " (leave proceeds)");
+	/* The kernel ignores an unlink veto; an errno would only cut the chain. */
+	return info->linking ? notifier_from_errno(rc) : NOTIFY_OK;
 }
 
 static int ask_bridge_netdev_notifier(struct notifier_block *nb,
@@ -1057,31 +1128,16 @@ static int ask_bridge_netdev_notifier(struct notifier_block *nb,
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	struct netdev_notifier_changeupper_info *info = ptr;
-	struct ask_bridge_role_state *state;
 	u8 port;
-	int rc;
 
 	if (event == NETDEV_PRECHANGEUPPER)
 		return ask_bridge_role_prechange(dev, info);
 	if (event != NETDEV_CHANGEUPPER)
 		return NOTIFY_DONE;
+	/* Membership is final now: settle this port's generation to it. */
 	if (info->upper_dev && netif_is_bridge_master(info->upper_dev) &&
-	    !ask_hw_dev_port(dev, &port)) {
-		state = &ask_bridge_role[port];
-		if (state->pending &&
-		    state->dev_ifindex == dev->ifindex &&
-		    state->upper_ifindex == info->upper_dev->ifindex &&
-		    state->linking == info->linking) {
-			rc = ask_hw_offload_role_commit(port, state->profile,
-							state->family_mask,
-							state->policy_seq);
-			if (rc)
-				ask_pr_err("bridge: role generation %llu port 0x%02x commit failed: %d; reconciliation pending\n",
-					   state->generation, port, rc);
-			else
-				state->pending = false;
-		}
-	}
+	    !ask_hw_dev_port(dev, &port))
+		ask_bridge_reconcile_port(port);
 	ask_bridge_kick();
 	return NOTIFY_DONE;
 }

@@ -70,6 +70,12 @@ attribute-sets:
         type: u32
       - name: max-flows
         type: u32
+      - name: policy-epoch
+        type: u64
+      - name: revoke-state
+        type: u8
+      - name: unresolved-flows
+        type: u32
   -
     name: muram
     name-prefix: ask-muram-attr-

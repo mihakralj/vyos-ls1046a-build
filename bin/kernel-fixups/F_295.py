@@ -90,6 +90,7 @@ NEW_ALLOC_ERROR = (
 )
 OLD_PROBE = "\t\terr = dpaa_fq_init(dpaa_fq, false);\n"
 NEW_PROBE = "\t\terr = dpaa_fq_init(dpaa_fq, false, NULL);\n"
+NEW_PROBE_F320 = "\t\terr = dpaa_fq_init(dpaa_fq, false, &retain_failed_fq);\n"
 
 
 def replace_once(source, old, new, label):
@@ -109,10 +110,11 @@ def main():
                 ("allocator declarations", NEW_DECL),
                 ("allocator checks", NEW_CHECK),
                 ("allocator error", NEW_ALLOC_ERROR),
-                ("probe call", NEW_PROBE),
             ):
                 if source.count(fragment) != 1:
                     raise ValueError(f"partially applied fix: {label}")
+            if source.count(NEW_PROBE) + source.count(NEW_PROBE_F320) != 1:
+                raise ValueError("partially applied fix: probe call")
             print("### F-295: already applied")
             return 0
 

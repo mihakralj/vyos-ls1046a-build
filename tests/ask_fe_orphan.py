@@ -13,7 +13,7 @@ HARNESS = ROOT / "tests/dut/ask_fe_orphan.c"
 
 def test_failed_fe_delete_retains_owner_and_blocks_reinsert(tmp_path):
     source = SOURCE.read_text()
-    start = source.index("struct ask_fe_orphan {")
+    start = source.index("#define ASK_FE_CAP_VLAN")
     end = source.index("\n}", source.index("static void ask_fe_orphan_exit(", start)) + 2
     (tmp_path / "ask_fe_orphan_body.h").write_text(source[start:end])
     start = source.index("static int ask_flow_fe_owner_status(")
@@ -22,9 +22,12 @@ def test_failed_fe_delete_retains_owner_and_blocks_reinsert(tmp_path):
     start = source.index("struct ask_flush_victim {")
     end = source.index("/* Process context only.", start)
     flush = source[start:end]
-    start = source.index("static int __ask_flow_flush_matching(", end)
+    start = source.index("static int __ask_flow_flush_matching_status(", end)
     end = source.index("static void ask_pppoe_flush_fn(", start)
     (tmp_path / "ask_fe_flush_body.h").write_text(flush + source[start:end])
+    start = source.index("static bool ask_nat44_withdraw_unresolved;", end)
+    end = source.index("/* T-M6-SP4: is PPPoE offload armed", start)
+    (tmp_path / "ask_fe_nat_frag_flush_body.h").write_text(source[start:end])
     binary = tmp_path / "ask_fe_orphan"
     subprocess.run(
         [
@@ -38,3 +41,4 @@ def test_failed_fe_delete_retains_owner_and_blocks_reinsert(tmp_path):
     subprocess.run([str(binary), "sw-remove-failure"], check=True, timeout=30)
     subprocess.run([str(binary), "pppoe"], check=True, timeout=30)
     subprocess.run([str(binary), "pppoe-sw-remove-failure"], check=True, timeout=30)
+    subprocess.run([str(binary), "cap-scope"], check=True, timeout=30)

@@ -63,9 +63,11 @@ def build_harness(tmp_path, *, omit_worker_guards=False,
             guard, "if (false && !ask_flow_pending_eligible(p))\n\t\t\t\tgoto resolved_next;"
         )
     if refresh_repark_epoch:
-        old = "p->pppoe_session_epoch) == 0)"
+        old = "p->pppoe_session_epoch,\n\t\t\t\t\t\t     p->policy_epoch) == 0)"
         assert resolved.count(old) == 1
-        resolved = resolved.replace(old, "ask_pppoe_session_snapshot()) == 0)")
+        resolved = resolved.replace(
+            old, "ask_pppoe_session_snapshot(),\n\t\t\t\t\t\t     p->policy_epoch) == 0)"
+        )
     (tmp_path / "pending_workers.h").write_text(resolved + "\n" + poll)
 
     start = source.index("static int __ask_flow_capability_flush(")

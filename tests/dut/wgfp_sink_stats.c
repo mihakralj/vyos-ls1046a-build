@@ -45,7 +45,7 @@ struct qm_mcr_queryfq_np {
 	uint32_t frm_cnt, byte_cnt;
 };
 struct seq_file {
-	char buf[2048];
+	char buf[4096];
 	size_t len;
 };
 
@@ -59,6 +59,11 @@ static bool wgfp_pool_failed;
 static int wgfp_lock, wgfp_neg;
 static void *wgfp_ops;
 static u64 wgfp_xmit_ok, wgfp_xmit_fail, wgfp_xmit_ern;
+static u64 wgfp_xmit_conf_ok, wgfp_xmit_no_slot, wgfp_xmit_tx_err, wgfp_xmit_dup_comp;
+static u64 wgfp_xmit_ern_cgr_td, wgfp_xmit_ern_orp_late, wgfp_xmit_ern_orp_early, wgfp_xmit_ern_other;
+u64 wgfp_xmit_frame_wait_fail = 1, wgfp_xmit_poll_wait_fail = 2;
+u64 wgfp_xmit_invalid_egress = 3, wgfp_xmit_orp_wait_fail = 4;
+static u64 wgfp_xmit_nomem, wgfp_xmit_qdisc_drop, wgfp_xmit_cn;
 static u64 wgfp_rx_enq_fail, wgfp_rx_ern;
 static bool wgfp_spread;
 #define WGFP_ORP_TD_MIN (64 * 1024)
@@ -71,6 +76,7 @@ static unsigned int wgfp_prefetch = 2;
 static unsigned int wgfp_prefetch_max;
 static bool wgfp_threaded;
 static u64 wgfp_orp_frames, wgfp_orp_holes, wgfp_orp_wait_fail, wgfp_orp_hole_ern;
+static unsigned int query_count;
 
 static void mutex_lock(int *lock) { (void)lock; }
 static void mutex_unlock(int *lock) { (void)lock; }
@@ -80,6 +86,7 @@ static unsigned int qman_fq_fqid(struct qman_fq *fq) { return fq->fqid; }
 
 static int qman_query_fq_np(struct qman_fq *fq, struct qm_mcr_queryfq_np *np)
 {
+	query_count++;
 	if (fq->fqid == 0x2bf)
 		return -ETIMEDOUT;
 	np->state = 0x15;
@@ -114,10 +121,16 @@ static void seq_putc(struct seq_file *m, char c)
 int main(void)
 {
 	struct seq_file output = {};
+	struct seq_file software = {};
 	struct wgfp_sink_pc orp_pc = { .frames = 7, .bytes = 700 };
 
 	wgfp_nports = 1;
 	wgfp_ports[0].ifindex = 6;
+	wgfp_ports[0].nsinks = 2;
+	wgfp_ports[0].sink[0].fq.fqid = 0x301;
+	wgfp_ports[0].sink[1].fq.fqid = 0x302;
+	wgfp_ports[0].dist = true;
+	wgfp_ports[0].dist_sink.fq.fqid = 0x303;
 	wgfp_ports[0].orp = true;
 	static struct wgfp_sink orp_sink;
 
@@ -132,6 +145,8 @@ int main(void)
 	wgfp_global[1].cpu = 1;
 	assert(wgfp_stats_show(&output, NULL) == 0);
 	assert(strstr(output.buf, "frm_cnt_encoding=host\n"));
+	assert(strstr(output.buf, " xmit_frame_wait_fail=1 xmit_poll_wait_fail=2"
+		      " xmit_invalid_egress=3 xmit_orp_wait_fail=4 "));
 	assert(strstr(output.buf, " spread=0 orp_td=6291456 orp_stash=0 sink_stash=0 prefetch=2 prefetch_max=0 threaded=0 tx_batch=0 orp_frames="));
 	assert(strstr(output.buf,
 		      "sink0 port=0 kind=global cpu=0 fqid=0x2be frames=0 bytes=0 errs=0 sg=0 irqs=0"
@@ -140,5 +155,20 @@ int main(void)
 		      "sink1 port=0 kind=global cpu=1 fqid=0x2bf frames=0 bytes=0 errs=0 sg=0 irqs=0"
 		      " query_err=-110\n"));
 	assert(strstr(output.buf, "port=6 kind=orp cpu=-1 fqid=0x300 frames=8 bytes=800 "));
+	assert(query_count == 6);
+
+	query_count = 0;
+	assert(wgfp_stats_sw_show(&software, NULL) == 0);
+	assert(query_count == 0);
+	assert(strstr(software.buf, "frm_cnt_encoding=none\n"));
+	assert(strstr(software.buf,
+		      "sink0 port=0 kind=global cpu=0 fqid=0x2be frames=0 bytes=0 errs=0 sg=0 irqs=0\n"));
+	assert(strstr(software.buf, "port=6 kind=worker cpu=0 fqid=0x301 "));
+	assert(strstr(software.buf, "port=6 kind=worker cpu=0 fqid=0x302 "));
+	assert(strstr(software.buf, "port=6 kind=dist cpu=0 fqid=0x303 "));
+	assert(strstr(software.buf, "port=6 kind=orp cpu=-1 fqid=0x300 frames=8 bytes=800 "));
+	assert(!strstr(software.buf, " query_err="));
+	assert(!strstr(software.buf, " frm_cnt="));
+	assert(!strstr(software.buf, " state="));
 	return 0;
 }

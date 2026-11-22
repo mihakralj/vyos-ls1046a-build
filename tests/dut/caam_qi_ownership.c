@@ -69,17 +69,34 @@ static const dma_addr_t mapped_addr = 0xabcdefU;
 static const dma_addr_t descriptor_addr = 0x123456U;
 
 #ifdef TEST_CAAM_RELEASE
+#define CAAM_MAX_KEY_SIZE 64
 enum { ENCRYPT, DECRYPT, NUM_OP };
 struct caam_ctx {
 	struct device *jrdev;
-	unsigned char key[64];
+#ifdef TEST_CAAM_INDEP_KEY
+	unsigned char *key;
+#else
+	unsigned char key[CAAM_MAX_KEY_SIZE];
+#endif
 	dma_addr_t key_dma;
 	int dir;
 	struct caam_drv_ctx *drv_ctx[NUM_OP];
 };
 static struct device jrdev = { .parent = &device };
+#ifdef TEST_CAAM_INDEP_KEY
+static unsigned char tfm_key_buf[CAAM_MAX_KEY_SIZE];
+static int key_free_calls;
+static void kfree_sensitive(const void *ptr)
+{
+	assert(ptr == tfm_key_buf);
+	key_free_calls++;
+}
+#endif
 static struct caam_ctx tfm_ctx = {
 	.jrdev = &jrdev,
+#ifdef TEST_CAAM_INDEP_KEY
+	.key = tfm_key_buf,
+#endif
 	.drv_ctx = { &ctx, NULL },
 };
 static const dma_addr_t key_addr = 0x654321U;
@@ -117,7 +134,7 @@ void dma_unmap_single(struct device *dev, dma_addr_t addr, size_t size,
 		descriptor_unmap_calls++;
 #ifdef TEST_CAAM_RELEASE
 	} else if (addr == key_addr) {
-		assert(size == sizeof(tfm_ctx.key));
+		assert(size == CAAM_MAX_KEY_SIZE);
 		key_unmap_calls++;
 #endif
 	} else {
@@ -290,6 +307,17 @@ static void caam_jr_free(struct device *dev)
 	jr_free_calls++;
 }
 
+#ifdef TEST_CAAM_INDEP_KEY
+static int leaf_control_drv_ctx_rel(struct caam_drv_ctx *owner)
+{
+	if (owner) {
+		assert(owner == &ctx);
+		leaf_control_calls++;
+		return -ETIMEDOUT;
+	}
+	return 0;
+}
+#else
 static void leaf_control_drv_ctx_rel(struct caam_drv_ctx *owner)
 {
 	if (owner) {
@@ -297,6 +325,7 @@ static void leaf_control_drv_ctx_rel(struct caam_drv_ctx *owner)
 		leaf_control_calls++;
 	}
 }
+#endif
 
 #include "caam_qi_exit_body.h"
 #endif
@@ -329,6 +358,10 @@ static void reset(void)
 	tfm_ctx.key_dma = key_addr;
 	tfm_ctx.dir = DMA_BIDIRECTIONAL;
 	key_unmap_calls = jr_free_calls = leaf_control_calls = 0;
+#ifdef TEST_CAAM_INDEP_KEY
+	tfm_ctx.key = tfm_key_buf;
+	key_free_calls = 0;
+#endif
 #endif
 }
 
@@ -427,14 +460,32 @@ static int check_release(void)
 	reset();
 	retire_result = -ETIMEDOUT;
 	caam_exit_common(&tfm_ctx);
+#ifdef TEST_CAAM_INDEP_KEY
+	failures += check(!key_unmap_calls && !key_free_calls && !jr_free_calls,
+			  "failed release retains crypto parent");
+#else
 	failures += check(!key_unmap_calls && !jr_free_calls,
 			  "failed release retains crypto parent");
+#endif
 
 	reset();
 	caam_exit_common_leaf_control(&tfm_ctx);
 	assert(leaf_control_calls == 1 && !fq_free_calls && !ctx_free_calls);
+#ifdef TEST_CAAM_INDEP_KEY
+	failures += check(!key_unmap_calls && !key_free_calls && !jr_free_calls,
+			  "simulated leaf retention protects crypto parent");
+
+	reset();
+	caam_exit_common(&tfm_ctx);
+	failures += check(destroy_calls == 1 && fq_free_calls == 1 &&
+			  descriptor_unmap_calls == 1 && ctx_free_calls == 1 &&
+			  key_unmap_calls == 1 && key_free_calls == 1 &&
+			  jr_free_calls == 1,
+			  "successful parent release frees DMA key and job ring");
+#else
 	failures += check(!key_unmap_calls && !jr_free_calls,
 			  "simulated leaf retention protects crypto parent");
+#endif
 
 	printf("CAAM QI release gate: %d uncontained case(s)\n", failures);
 	return failures ? 1 : 0;

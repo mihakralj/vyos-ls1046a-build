@@ -28,6 +28,7 @@ struct fman_pcd_ehash_table {
 	struct list_head node;
 	struct list_head flows, quarantined_flows, quarantined_cu;
 	bool poisoned, draining;
+	bool per_port;
 };
 struct fman_pcd_fe_port { struct fman_pcd_ehash_table *table_v4; };
 struct fman_pcd {
@@ -175,6 +176,9 @@ static void reset(struct fman_keygen *kg, struct fman_port *port,
 	*fm = (struct fman) { .keygen = kg, .port = port };
 	*pcd = (struct fman_pcd) { .fman = fm, .port_present = true };
 	pcd->port.table_v4 = &pcd->table;
+	pcd->table.per_port = true;
+	pcd->shared_table.per_port = false;
+	pcd->other_table.per_port = true;
 	tables[0] = &pcd->table;
 	tables[1] = &pcd->shared_table;
 	tables[2] = &pcd->other_table;
@@ -242,8 +246,8 @@ int main(void)
 		       !port_calls && !table_calls && !released);
 	}
 
-	/* A nonzero table index can refer to shared or another port's table;
-	 * its records and uncertain generations have no ingress identity. */
+	/* Shared (!per_port) tables always block disarm; under F-321 an
+	 * unrelated port's per_port table does not block this port's disarm. */
 	for (unsigned int index = 1; index < table_count; index++) {
 		for (int busy_state = 0; busy_state < 5; busy_state++) {
 			struct fman_pcd_ehash_table *t;
@@ -258,10 +262,20 @@ int main(void)
 			case 4: t->draining = true; break;
 			}
 			failure = NONE;
-			assert(__fman_pcd_fe_arm_disengage(&pcd, 0x10) == -EBUSY);
-			assert(test_bit(0x10, pcd.fe_port_armed));
-			assert(!test_bit(0x10, pcd.fe_port_faulted));
-			assert(!setup_calls && !cc_calls && !port_calls && !released);
+#ifdef FMAN_F321
+			if (t->per_port) {
+				assert(__fman_pcd_fe_arm_disengage(&pcd, 0x10) == 0);
+				assert(!test_bit(0x10, pcd.fe_port_armed));
+				assert(!test_bit(0x10, pcd.fe_port_faulted));
+				assert(released == 1);
+			} else
+#endif
+			{
+				assert(__fman_pcd_fe_arm_disengage(&pcd, 0x10) == -EBUSY);
+				assert(test_bit(0x10, pcd.fe_port_armed));
+				assert(!test_bit(0x10, pcd.fe_port_faulted));
+				assert(!setup_calls && !cc_calls && !port_calls && !released);
+			}
 		}
 	}
 

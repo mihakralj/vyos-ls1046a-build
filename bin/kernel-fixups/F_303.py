@@ -29,6 +29,9 @@ REPLACEMENTS = (
 def main():
     try:
         source = QMAN.read_text()
+        if "F-319: serialize QMan portal MC" in source:
+            print("### F-303: already applied (superseded by F-319)")
+            return 0
         if source.count("int qman_shutdown_fq(") != 1:
             raise ValueError("ambiguous QMan shutdown function")
         start = source.index("int qman_shutdown_fq(")

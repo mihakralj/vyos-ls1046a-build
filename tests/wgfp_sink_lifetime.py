@@ -74,33 +74,62 @@ REGISTER_HARNESS = r"""
 #define min_t(t, a, b) ((t)(a) < (t)(b) ? (t)(a) : (t)(b))
 #define rcu_access_pointer(p) (p)
 #define rcu_assign_pointer(p, v) ((p) = (v))
-struct dpaa_wgfp_ops { int unused; };
+#define rcu_dereference_protected(p, c) ((void)(c), (p))
+#define lockdep_is_held(l) (*(l))
+struct net_device { int ifindex; };
+struct dpaa_wgfp_ops {
+	int (*port_quiesce)(void *priv, struct net_device *dev);
+	int (*policy_revoke)(void *priv);
+};
 static const struct dpaa_wgfp_ops __rcu *wgfp_ops;
 static void *wgfp_ops_priv;
 static unsigned int wgfp_per_port;
-static int wgfp_lock, lock_held;
+static int wgfp_lock, wgfp_ops_quiesce_lock;
 static int num_online_cpus(void) { return 1; }
-static void mutex_lock(int *m) { (void)m; assert(!lock_held); lock_held = 1; }
-static void mutex_unlock(int *m) { (void)m; assert(lock_held); lock_held = 0; }
+static void mutex_lock(int *m) { assert(!*m); *m = 1; }
+static void mutex_unlock(int *m) { assert(*m); *m = 0; }
 /* An old reader still in flight: it already loaded the old ops and loads
  * priv now.  A register that can run here must be excluded by wgfp_lock. */
 static const struct dpaa_wgfp_ops new_ops;
-static int new_priv, gp_checked;
+static int new_priv, gp_checked, quiesce_calls, revoke_calls;
+static int dummy_quiesce(void *priv, struct net_device *dev)
+{
+	(void)priv;
+	assert(wgfp_ops_quiesce_lock && !wgfp_lock);
+	quiesce_calls += dev->ifindex;
+	return 0;
+}
+static int dummy_revoke(void *priv)
+{
+	(void)priv;
+	assert(wgfp_ops_quiesce_lock && !wgfp_lock);
+	revoke_calls++;
+	return 0;
+}
 static void synchronize_rcu(void)
 {
 	gp_checked = 1;
-	assert(lock_held && "register could republish priv during the grace period");
+	assert(wgfp_lock && wgfp_ops_quiesce_lock &&
+	       "register could republish priv during the grace period");
 }
 #include "wgfp_register_body.h"
 int main(void)
 {
-	static const struct dpaa_wgfp_ops old_ops;
+	static const struct dpaa_wgfp_ops old_ops = {
+		.port_quiesce = dummy_quiesce,
+		.policy_revoke = dummy_revoke,
+	};
 	static int old_priv;
+	struct net_device dev = { .ifindex = 7 };
 	assert(dpaa_wgfp_register(&old_ops, &old_priv) == 0);
 	assert(dpaa_wgfp_register(&new_ops, &new_priv) == -EBUSY);
+	assert(dpaa_wgfp_port_quiesce(&dev) == 0 && quiesce_calls == 7);
+	assert(dpaa_wgfp_policy_revoke() == 0 && revoke_calls == 1);
 	dpaa_wgfp_unregister();
-	assert(gp_checked && !lock_held && wgfp_ops == NULL);
+	assert(gp_checked && !wgfp_lock && !wgfp_ops_quiesce_lock && wgfp_ops == NULL);
 	assert(wgfp_per_port == 1);
+	assert(dpaa_wgfp_port_quiesce(&dev) == 0 && quiesce_calls == 7);
+	assert(dpaa_wgfp_policy_revoke() == 0 && revoke_calls == 1);
 	assert(dpaa_wgfp_register(&new_ops, &new_priv) == 0);
 	assert(wgfp_ops_priv == &new_priv);
 	return 0;

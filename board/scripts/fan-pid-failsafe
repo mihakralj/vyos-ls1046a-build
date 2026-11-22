@@ -1,0 +1,133 @@
+#!/usr/bin/python3
+import array
+import fcntl
+import os
+import re
+import struct
+import subprocess
+import sys
+import time
+
+
+COMPATIBLE = '/proc/device-tree/compatible'
+I2C_DEVICES = '/sys/bus/i2c/devices'
+I2C_DRIVER = '/sys/bus/i2c/drivers/emc2305'
+DEV_DIR = '/dev'
+I2C_ADDRESS = 0x2e
+I2C_SLAVE_FORCE = 0x0706
+I2C_SMBUS = 0x0720
+I2C_SMBUS_READ = 1
+I2C_SMBUS_BYTE_DATA = 2
+DUTY_REGISTERS = (0x30, 0x40)
+PWM_MAX = 255
+MAX_ATTEMPTS = 3
+RETRY_DELAY = 0.2
+
+
+def bound_device():
+    if not os.path.isdir(I2C_DRIVER):
+        raise RuntimeError('emc2305 driver is unavailable')
+    driver = os.path.realpath(I2C_DRIVER)
+    matches = []
+    for entry in os.listdir(I2C_DEVICES):
+        match = re.fullmatch(r'(\d+)-002e', entry)
+        if not match:
+            continue
+        device = os.path.join(I2C_DEVICES, entry)
+        link = os.path.join(device, 'driver')
+        if os.path.islink(link) and os.path.realpath(link) == driver:
+            stat = os.stat(device)
+            matches.append((int(match.group(1)), os.path.realpath(device), stat.st_dev, stat.st_ino))
+    if len(matches) != 1:
+        raise RuntimeError(f'expected one bound emc2305 at 0x2e, found {len(matches)}')
+    return matches[0]
+
+
+def open_i2c(bus):
+    device = os.path.join(DEV_DIR, f'i2c-{bus}')
+    if not os.path.exists(device):
+        subprocess.run(['/sbin/modprobe', 'i2c-dev'], timeout=1, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        fcntl.ioctl(fd, I2C_SLAVE_FORCE, I2C_ADDRESS)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def write_max(fd, register):
+    if register not in DUTY_REGISTERS:
+        raise ValueError(f'unsafe duty register 0x{register:02x}')
+    if os.write(fd, bytes((register, PWM_MAX))) != 2:
+        raise OSError('short I2C write')
+
+
+def read_pwm(fd, register):
+    data = array.array('B', [0] * 34)
+    request = bytearray(struct.pack('@BBIP', I2C_SMBUS_READ, register,
+                                    I2C_SMBUS_BYTE_DATA, data.buffer_info()[0]))
+    fcntl.ioctl(fd, I2C_SMBUS, request, True)
+    return data[0]
+
+
+def set_verified_max(register, device):
+    if bound_device() != device:
+        raise RuntimeError('emc2305 binding changed before open')
+    fd = open_i2c(device[0])
+    try:
+        if bound_device() != device:
+            raise RuntimeError('emc2305 binding changed before write')
+        write_max(fd, register)
+        value = read_pwm(fd, register)
+        if bound_device() != device:
+            raise RuntimeError('emc2305 binding changed during readback')
+        if value != PWM_MAX:
+            raise RuntimeError(f'readback was {value}, expected {PWM_MAX}')
+    finally:
+        os.close(fd)
+
+
+def main():
+    try:
+        with open(COMPATIBLE, 'rb') as compatible:
+            board = compatible.read().split(b'\0')
+    except OSError as error:
+        print(f'fan-pid-failsafe: cannot read board compatibility: {error}', file=sys.stderr, flush=True)
+        return 1
+    if b'mono,gateway-dk' not in board:
+        print('fan-pid-failsafe: not a Mono Gateway DK, skipping', file=sys.stderr, flush=True)
+        return 0
+
+    pending = set(DUTY_REGISTERS)
+    device = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        for register in DUTY_REGISTERS:
+            if register not in pending:
+                continue
+            try:
+                if device is None:
+                    device = bound_device()
+                set_verified_max(register, device)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                print(f'fan-pid-failsafe: register 0x{register:02x} attempt '
+                      f'{attempt}/{MAX_ATTEMPTS} failed: {error}', file=sys.stderr, flush=True)
+            else:
+                pending.remove(register)
+                print(f'fan-pid-failsafe: register 0x{register:02x} verified at {PWM_MAX}',
+                      file=sys.stderr, flush=True)
+        if not pending:
+            return 0
+        if attempt < MAX_ATTEMPTS:
+            time.sleep(RETRY_DELAY)
+
+    for register in DUTY_REGISTERS:
+        if register in pending:
+            print(f'fan-pid-failsafe: register 0x{register:02x} could not be verified after '
+                  f'{MAX_ATTEMPTS} attempts', file=sys.stderr, flush=True)
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

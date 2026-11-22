@@ -63,6 +63,8 @@
 #include <soc/fsl/qman.h>
 
 #include "fman_port.h"
+
+void dpaa_wgfp_egress_deactivate(struct net_device *dev);
 #include "mac.h"
 #include "dpaa_eth.h"
 #include "dpaa_ceetm.h"
@@ -463,6 +465,11 @@ static int dpaa_ceetm_htb_create(struct net_device *net_dev,
 	ceetm->defcls = opt->classid;
 
 	dpaa_ceetm_prescaler_once(dcp);
+
+	/* Drain and deactivate any WGFP confirmed TX FQ on this port before
+	 * CEETM claims the sub-portal (conventional WQ FQs stop dequeuing once
+	 * CEETM owns the sub-portal). */
+	dpaa_wgfp_egress_deactivate(net_dev);
 
 	err = qman_ceetm_sp_claim(&ceetm->sp, dcp, sp_id);
 	if (err) {

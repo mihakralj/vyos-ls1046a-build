@@ -67,10 +67,12 @@ def verify(source):
     mapping = init.find("dma_map_single(")
     error = init.find("dma_mapping_error(")
     commit = init.find("\tqm_mc_commit(&p->p, myverb);", start)
+    premap_f319 = PREMAP.replace("\t\t}\n\t}\n", "\t\t}\n\t\tmapped = true;\n\t}\n")
     return (
         source.count(MARKER) == 1
         and init.count(DECL_NEW) == 1
-        and init.count(PREMAP) == 1
+        and (init.count(PREMAP) == 1 or
+             ("F-319: serialize QMan portal MC" in source and init.count(premap_f319) == 1))
         and init.count(INNER_NEW) == 1
         and len(re.findall(r"\bdma_addr_t\s+phys_fq\b", init)) == 1
         and init.count("dma_map_single(") == 1

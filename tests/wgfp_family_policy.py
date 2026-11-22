@@ -48,6 +48,8 @@ static unsigned long ask_hw_port_l2[4];
 static bool test_bit(unsigned int n, const unsigned long *b) { return b[n / 64] >> (n % 64) & 1; }
 static u8 ask_hw_port_family[64];
 static u8 ask_hw_port_family_get(u8 id) { return id < 64 ? ask_hw_port_family[id] : 0; }
+static bool policy_fenced;
+static bool ask_flow_policy_admission_fenced(void) { return policy_fenced; }
 @DEFS@
 @WGFP@
 @ASK@
@@ -72,6 +74,10 @@ int main(void)
 	ask_hw_port_l2[0] |= 1ul << 0x11;		/* L2 (bridge) port: no routed WGFP */
 	CHECK(!dpaa_wgfp_family_ok(&eth4, AF_INET));
 	ask_hw_port_l2[0] = 0;
+	policy_fenced = true;				/* policy revocation fence blocks WGFP */
+	CHECK(!dpaa_wgfp_family_ok(&eth4, AF_INET) && !dpaa_wgfp_family_ok(&eth4, AF_INET6));
+	policy_fenced = false;
+	CHECK(dpaa_wgfp_family_ok(&eth4, AF_INET));
 	ask_hw_port_family[0x10] = 0;			/* offload removed from the port */
 	CHECK(!dpaa_wgfp_family_ok(&eth3, AF_INET));
 	dpaa_wgfp_set_family_policy(NULL);		/* ask.ko unload waits for callers */

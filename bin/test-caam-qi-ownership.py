@@ -27,14 +27,15 @@ def function(source, prefix):
 def run(kernel, sanitize, check_pending, check_release, check_eqcr, check_crypto,
         check_init):
     source = (kernel / "drivers/crypto/caam/qi.c").read_text()
-    body = "\n".join(
-        function(source, prefix) for prefix in (
-            "static int kill_fq",
-            "int caam_qi_enqueue",
-            "static int empty_caam_fq",
-            "void caam_drv_ctx_rel",
-        )
-    )
+    prefixes = [
+        "static int kill_fq",
+        "int caam_qi_enqueue",
+        "static int empty_caam_fq",
+    ]
+    if "int caam_drv_ctx_rel_checked(" in source:
+        prefixes.append("int caam_drv_ctx_rel_checked")
+    prefixes.append("void caam_drv_ctx_rel")
+    body = "\n".join(function(source, prefix) for prefix in prefixes)
     with tempfile.TemporaryDirectory(prefix="caam-qi-ownership-") as directory:
         path = Path(directory)
         (path / "caam_qi_ownership_body.h").write_text(body)
@@ -98,16 +99,34 @@ def run(kernel, sanitize, check_pending, check_release, check_eqcr, check_crypto
             alg = (kernel / "drivers/crypto/caam/caamalg_qi.c").read_text()
             api = (kernel / "crypto/api.c").read_text()
             exit_body = function(alg, "static void caam_exit_common")
-            if (
-                "u8 key[CAAM_MAX_KEY_SIZE];" not in alg
-                or "dma_map_single(dev, ctx->key, sizeof(ctx->key)," not in alg
-                or "ctx->cdata.key_dma = ctx->key_dma" not in alg
-                or alg.count("cra_ctxsize = sizeof(struct caam_ctx)") != 2
-                or exit_body.count("caam_drv_ctx_rel(") != 2
-                or "caam_exit_common(" not in function(alg, "static void caam_cra_exit")
-                or "caam_exit_common(" not in function(alg, "static void caam_aead_exit")
-            ):
-                raise ValueError("CAAM transform ownership changed; review the model")
+            indep_key = "u8 *key;" in alg
+            if indep_key:
+                if (
+                    "ctx->key = kzalloc(CAAM_MAX_KEY_SIZE, GFP_KERNEL);" not in alg
+                    or "dma_map_single(dev, ctx->key, CAAM_MAX_KEY_SIZE," not in alg
+                    or "sizeof(ctx->key)" in alg
+                    or "kfree_sensitive(ctx->key);" not in exit_body
+                    or "ctx->cdata.key_dma = ctx->key_dma" not in alg
+                    or alg.count("cra_ctxsize = sizeof(struct caam_ctx)") != 2
+                    or exit_body.count("caam_drv_ctx_rel_checked(") != 2
+                    or "caam_exit_common(" not in function(alg, "static void caam_cra_exit")
+                    or "caam_exit_common(" not in function(alg, "static void caam_aead_exit")
+                ):
+                    raise ValueError("CAAM F-318 transform ownership changed; review the model")
+                flags.append("-DTEST_CAAM_INDEP_KEY")
+                rel_sym = "caam_drv_ctx_rel_checked("
+            else:
+                if (
+                    "u8 key[CAAM_MAX_KEY_SIZE];" not in alg
+                    or "dma_map_single(dev, ctx->key, sizeof(ctx->key)," not in alg
+                    or "ctx->cdata.key_dma = ctx->key_dma" not in alg
+                    or alg.count("cra_ctxsize = sizeof(struct caam_ctx)") != 2
+                    or exit_body.count("caam_drv_ctx_rel(") != 2
+                    or "caam_exit_common(" not in function(alg, "static void caam_cra_exit")
+                    or "caam_exit_common(" not in function(alg, "static void caam_aead_exit")
+                ):
+                    raise ValueError("CAAM transform ownership changed; review the model")
+                rel_sym = "caam_drv_ctx_rel("
             destroy = function(api, "void crypto_destroy_tfm")
             exit_ops = function(api, "static void crypto_exit_ops")
             aead = (kernel / "crypto/aead.c").read_text()
@@ -130,7 +149,7 @@ def run(kernel, sanitize, check_pending, check_release, check_eqcr, check_crypto
             control = exit_body.replace(
                 "static void caam_exit_common(",
                 "static void caam_exit_common_leaf_control(", 1,
-            ).replace("caam_drv_ctx_rel(", "leaf_control_drv_ctx_rel(")
+            ).replace(rel_sym, "leaf_control_drv_ctx_rel(")
             (path / "caam_qi_exit_body.h").write_text(exit_body + "\n" + control)
             flags.append("-DTEST_CAAM_RELEASE")
         subprocess.run(

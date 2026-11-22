@@ -452,7 +452,10 @@ cp board/systemd/vyos-postinstall.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/vyos-post
 ### never run concurrently).
 cp board/scripts/fan-pid "$CHROOT/usr/local/bin/fan-pid"
 chmod +x "$CHROOT/usr/local/bin/fan-pid"
+cp board/scripts/fan-pid-failsafe "$CHROOT/usr/local/bin/fan-pid-failsafe"
+chmod +x "$CHROOT/usr/local/bin/fan-pid-failsafe"
 cp board/systemd/fan-pid.service "$CHROOT/etc/systemd/system/fan-pid.service"
+cp board/systemd/vyos-fan-reconcile.service "$CHROOT/etc/systemd/system/vyos-fan-reconcile.service"
 cp board/systemd/fan-pid.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fan-pid.conf"
 # udev rule: start fan-pid.service at the moment the kernel binds the
 # emc2305 driver to its i2c device. Defends against the multi-user.target

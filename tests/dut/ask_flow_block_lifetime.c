@@ -78,6 +78,20 @@ enum tc_setup_type { TC_SETUP_CLSFLOWER, TC_SETUP_BLOCK, TC_SETUP_FT };
 enum { FLOW_BLOCK_BIND, FLOW_BLOCK_UNBIND };
 enum { FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS = 1 };
 struct net_device { int ifindex; };
+typedef int netdevice_tracker;
+static int netdev_refs;
+static void netdev_hold(struct net_device *dev, netdevice_tracker *t, int gfp)
+{
+	(void)gfp;
+	assert(dev && t);
+	*t = dev->ifindex;
+	netdev_refs++;
+}
+static void netdev_put(struct net_device *dev, netdevice_tracker *t)
+{
+	assert(dev && t && *t == dev->ifindex && netdev_refs > 0);
+	netdev_refs--;
+}
 struct Qdisc { int unused; };
 struct flow_block { struct list_head cb_list; };
 struct flow_block_cb {
@@ -319,7 +333,7 @@ static void bind_existing(void)
 }
 static void assert_empty(void)
 {
-	assert(!module_refs && !priv_allocs && !callback_allocs);
+	assert(!module_refs && !priv_allocs && !callback_allocs && !netdev_refs);
 	assert(list_empty(&ask_flow_block_priv_list));
 	assert(list_empty(&ask_flow_block_cb_list));
 	assert(list_empty(&indirect_blocks));

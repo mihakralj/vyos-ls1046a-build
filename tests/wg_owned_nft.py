@@ -49,6 +49,24 @@ def test_owned_notrack_cleanup_preserves_other_tables(mode, expected):
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize(("family", "peer", "dut", "prefix"), [
+    ("4", "192.0.2.10", "192.0.2.1", "ip"),
+    ("6", "2001:db8::10", "2001:db8::1", "ip6"),
+])
+def test_peer_scoped_notrack_installs_and_removes_in_namespace(family, peer, dut, prefix):
+    result = run_in_namespace(
+        'nft add table inet foreign; '
+        f'sh "$1" add "$2" 3 51820 {family} {peer} {dut}; '
+        'nft list table inet "wgn$2"; '
+        'sh "$1" delete "$2"; '
+        'nft list table inet foreign >/dev/null; '
+        'if nft list table inet "wgn$2" >/dev/null 2>&1; then exit 1; fi'
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"{prefix} saddr {peer} {prefix} daddr {dut} udp sport 51820 udp dport 51820 notrack" in result.stdout
+    assert f"{prefix} saddr {dut} {prefix} daddr {peer} udp sport 51820 udp dport 51820 notrack" in result.stdout
+
+
 def test_existing_notrack_table_is_not_adopted():
     result = run_in_namespace(
         'nft "add table inet wgn$2 { comment \\"foreign\\"; }"; '

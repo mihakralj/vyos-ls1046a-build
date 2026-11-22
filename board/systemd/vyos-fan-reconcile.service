@@ -1,0 +1,15 @@
+[Unit]
+Description=Reconcile VyOS fan thermal configuration
+After=vyos-router.service
+ConditionPathExists=/proc/device-tree/compatible
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/libexec/vyos/conf_mode/system_hardware_fan.py --reconcile-daemon
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=multi-user.target

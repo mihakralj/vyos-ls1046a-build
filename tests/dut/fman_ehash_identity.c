@@ -132,7 +132,7 @@ fman_pcd_ehash_table_for_port(struct fman_pcd *pcd, u8 port)
 {
 	return pcd->table;
 }
-static struct fman_pcd_ehash_table *
+static __attribute__((unused)) struct fman_pcd_ehash_table *
 fman_pcd_ehash_table_by_index(struct fman_pcd *pcd, u8 index)
 {
 	return pcd->table;

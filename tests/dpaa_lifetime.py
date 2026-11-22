@@ -39,9 +39,9 @@ def test_current_source_reports_uncontained_device_and_fq_cases():
     result = run("--characterize")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "WGFP reused ifindex: NOT CONTAINED" in result.stdout
+    assert "WGFP reused ifindex: refused" in result.stdout
     assert "ASK reused ifindex: NOT CONTAINED" in result.stdout
-    assert "Egress characterization: 2 uncontained case(s)" in result.stdout
+    assert "Egress characterization: 1 uncontained case(s)" in result.stdout
     assert "pending retirement: NOT CONTAINED" in result.stdout
     assert "nonempty retired queue: NOT CONTAINED" in result.stdout
     assert "retire timeout: NOT CONTAINED" in result.stdout

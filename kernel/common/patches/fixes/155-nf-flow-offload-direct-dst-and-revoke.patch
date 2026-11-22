@@ -1,0 +1,554 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Sat, 21 Nov 2026 11:00:00 +0000
+Subject: [PATCH] netfilter: nf_flow_table: validate XMIT_DIRECT dst and add
+ fenced NAT-preserving revocation
+
+Hardware-offloaded Ethernet flowtables force FLOW_OFFLOAD_XMIT_DIRECT and
+previously discarded dst_cache because it shared a union with out. As a
+result, nf_flow_dst_check() always returned true, so route or policy-rule
+changes left stale flows forwarding in the software flowtable (and
+re-offloading via flow_offload_refresh()) even after the driver withdrew
+the hardware record.
+
+Move dst_cache and dst_cookie out of the union in struct flow_offload_tuple
+so FLOW_OFFLOAD_XMIT_DIRECT retains its route reference, validate dst_cache
+on both the software fast path and GC, defer dst_release() into the RCU
+free/quarantine callbacks to avoid pre-RCU reader NULL dereferences, and
+match XMIT_DIRECT out.ifidx/hw_ifidx, dst_dev_rcu(), and stale dsts in
+nf_flow_table_do_cleanup() so VLAN vif and bridge teardowns never leak a
+route reference.
+
+Add an admission fence (nf_flow_table_fence_begin/end, checked in
+nft_flow_offload_eval, flow_offload_add, and flow_offload_refresh), guard
+flow_offload_work_alloc/add/handler against NF_FLOW_HW_DEAD and concurrent
+NF_FLOW_TEARDOWN, make flow_offload_del() race-safe on concurrent unlink,
+and export nf_flow_table_revoke_match()/nf_flow_table_revoke_all() for
+NAT-preserving SW+HW revocation (excluding gc_work and draining softirq
+RCU readers before unlinking) with explicit unsettled-flow reporting.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+diff --git a/include/net/netfilter/nf_flow_table.h b/include/net/netfilter/nf_flow_table.h
+index 9778ef5..acf62b2 100644
+--- a/include/net/netfilter/nf_flow_table.h
++++ b/include/net/netfilter/nf_flow_table.h
+@@ -138,11 +138,11 @@ struct flow_offload_tuple {
+ 					encap_num:2,
+ 					in_vlan_ingress:2;
+ 	u16				mtu;
++	struct dst_entry		*dst_cache;
++	u32				dst_cookie;
+ 	union {
+ 		struct {
+-			struct dst_entry *dst_cache;
+ 			u32		ifidx;
+-			u32		dst_cookie;
+ 		};
+ 		struct {
+ 			u32		ifidx;
+@@ -156,6 +156,16 @@ struct flow_offload_tuple {
+ 	};
+ };
+ 
++static inline bool nf_flow_dst_check(struct flow_offload_tuple *tuple)
++{
++	struct dst_entry *dst = READ_ONCE(tuple->dst_cache);
++
++	if (!dst)
++		return true;
++
++	return dst_check(dst, tuple->dst_cookie) != NULL;
++}
++
+ struct flow_offload_tuple_rhash {
+ 	struct rhash_head		node;
+ 	struct flow_offload_tuple	tuple;
+@@ -296,6 +306,16 @@ void nf_flow_table_gc_run(struct nf_flowtable *flow_table);
+ void nf_flow_table_gc_cleanup(struct nf_flowtable *flowtable,
+ 			      struct net_device *dev);
+ void nf_flow_table_cleanup(struct net_device *dev);
++bool nf_flow_admission_fenced(void);
++void nf_flow_table_fence_begin(void);
++void nf_flow_table_fence_end(void);
++int nf_flow_table_revoke_match(struct net *net,
++			       bool (*match)(const struct flow_offload *flow,
++					     void *data),
++			       void *data, bool wait_hw,
++			       unsigned int *unresolved_out);
++int nf_flow_table_revoke_all(struct net *net, bool wait_hw,
++			     unsigned int *unresolved_out);
+ 
+ int nf_flow_table_init(struct nf_flowtable *flow_table);
+ void nf_flow_table_free(struct nf_flowtable *flow_table);
+@@ -344,6 +364,7 @@ void nf_flow_offload_stats(struct nf_flowtable *flowtable,
+ 			   struct flow_offload *flow);
+ 
+ void nf_flow_table_offload_flush(struct nf_flowtable *flowtable);
++void nf_flow_table_offload_flush_del(struct nf_flowtable *flowtable);
+ void nf_flow_table_offload_flush_cleanup(struct nf_flowtable *flowtable);
+ 
+ int nf_flow_table_offload_setup(struct nf_flowtable *flowtable,
+diff --git a/net/netfilter/nf_flow_table_core.c b/net/netfilter/nf_flow_table_core.c
+index 0b346a4..d3de438 100644
+--- a/net/netfilter/nf_flow_table_core.c
++++ b/net/netfilter/nf_flow_table_core.c
+@@ -16,6 +16,7 @@
+ 
+ static DEFINE_MUTEX(flowtable_lock);
+ static LIST_HEAD(flowtables);
++static atomic_t nf_flow_admission_fence = ATOMIC_INIT(0);
+ 
+ static void
+ flow_offload_fill_dir(struct flow_offload *flow,
+@@ -128,7 +129,8 @@ static int flow_offload_fill_route(struct flow_offload *flow,
+ 		       ETH_ALEN);
+ 		flow_tuple->out.ifidx = route->tuple[dir].out.ifindex;
+ 		flow_tuple->out.hw_ifidx = route->tuple[dir].out.hw_ifindex;
+-		dst_release(dst);
++		flow_tuple->dst_cache = dst;
++		flow_tuple->dst_cookie = dst ? flow_offload_dst_cookie(flow_tuple) : 0;
+ 		break;
+ 	case FLOW_OFFLOAD_XMIT_XFRM:
+ 	case FLOW_OFFLOAD_XMIT_NEIGH:
+@@ -137,6 +139,7 @@ static int flow_offload_fill_route(struct flow_offload *flow,
+ 		flow_tuple->dst_cookie = flow_offload_dst_cookie(flow_tuple);
+ 		break;
+ 	default:
++		dst_release(dst);
+ 		WARN_ON_ONCE(1);
+ 		break;
+ 	}
+@@ -148,9 +151,10 @@ static int flow_offload_fill_route(struct flow_offload *flow,
+ static void nft_flow_dst_release(struct flow_offload *flow,
+ 				 enum flow_offload_tuple_dir dir)
+ {
+-	if (flow->tuplehash[dir].tuple.xmit_type == FLOW_OFFLOAD_XMIT_NEIGH ||
+-	    flow->tuplehash[dir].tuple.xmit_type == FLOW_OFFLOAD_XMIT_XFRM)
+-		dst_release(flow->tuplehash[dir].tuple.dst_cache);
++	struct dst_entry *dst;
++
++	dst = xchg(&flow->tuplehash[dir].tuple.dst_cache, NULL);
++	dst_release(dst);
+ }
+ 
+ void flow_offload_route_init(struct flow_offload *flow,
+@@ -254,19 +258,14 @@ static void flow_offload_free_rcu(struct rcu_head *rcu_head)
+ {
+ 	struct flow_offload *flow = container_of(rcu_head, struct flow_offload, rcu_head);
+ 
++	if (flow->type == NF_FLOW_OFFLOAD_ROUTE)
++		flow_offload_route_release(flow);
+ 	nf_ct_put(flow->ct);
+ 	kfree(flow);
+ }
+ 
+ void flow_offload_free(struct flow_offload *flow)
+ {
+-	switch (flow->type) {
+-	case NF_FLOW_OFFLOAD_ROUTE:
+-		flow_offload_route_release(flow);
+-		break;
+-	default:
+-		break;
+-	}
+ 	call_rcu(&flow->rcu_head, flow_offload_free_rcu);
+ }
+ EXPORT_SYMBOL_GPL(flow_offload_free);
+@@ -328,6 +327,9 @@ int flow_offload_add(struct nf_flowtable *flow_table, struct flow_offload *flow)
+ {
+ 	int err;
+ 
++	if (unlikely(nf_flow_admission_fenced()))
++		return -EBUSY;
++
+ 	flow->timeout = nf_flowtable_time_stamp + flow_offload_get_timeout(flow);
+ 
+ 	err = rhashtable_insert_fast(&flow_table->rhashtable,
+@@ -370,7 +372,10 @@ void flow_offload_refresh(struct nf_flowtable *flow_table,
+ 		return;
+ 
+ 	if (likely(!nf_flowtable_hw_offload(flow_table)) ||
+-	    test_bit(NF_FLOW_CLOSING, &flow->flags))
++	    test_bit(NF_FLOW_CLOSING, &flow->flags) ||
++	    test_bit(NF_FLOW_TEARDOWN, &flow->flags) ||
++	    test_bit(NF_FLOW_HW_DYING, &flow->flags) ||
++	    nf_flow_admission_fenced())
+ 		return;
+ 
+ 	nf_flow_offload_add(flow_table, flow);
+@@ -380,9 +385,10 @@ EXPORT_SYMBOL_GPL(flow_offload_refresh);
+ static void flow_offload_del(struct nf_flowtable *flow_table,
+ 			     struct flow_offload *flow)
+ {
+-	rhashtable_remove_fast(&flow_table->rhashtable,
+-			       &flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].node,
+-			       nf_flow_offload_rhash_params);
++	if (rhashtable_remove_fast(&flow_table->rhashtable,
++				   &flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].node,
++				   nf_flow_offload_rhash_params))
++		return;
+ 	rhashtable_remove_fast(&flow_table->rhashtable,
+ 			       &flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].node,
+ 			       nf_flow_offload_rhash_params);
+@@ -577,7 +583,10 @@ static void nf_flow_offload_gc_step(struct nf_flowtable *flow_table,
+ 
+ 	if (nf_flow_has_expired(flow) ||
+ 	    nf_ct_is_dying(flow->ct) ||
+-	    nf_flow_custom_gc(flow_table, flow)) {
++	    nf_flow_custom_gc(flow_table, flow) ||
++	    (!teardown &&
++	     (!nf_flow_dst_check(&flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].tuple) ||
++	      !nf_flow_dst_check(&flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].tuple)))) {
+ 		flow_offload_teardown(flow);
+ 		teardown = true;
+ 	} else if (!teardown) {
+@@ -728,6 +737,30 @@ int nf_flow_table_init(struct nf_flowtable *flowtable)
+ }
+ EXPORT_SYMBOL_GPL(nf_flow_table_init);
+ 
++static bool nf_flow_tuple_uses_dev(struct flow_offload_tuple *t,
++				   const struct net_device *dev)
++{
++	struct dst_entry *dst;
++	u32 ifindex;
++
++	if (t->iifidx == dev->ifindex)
++		return true;
++	if (dev->ifindex > 0) {
++		ifindex = (u32)dev->ifindex;
++		if (t->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
++		    (t->out.ifidx == ifindex || t->out.hw_ifidx == ifindex))
++			return true;
++		if ((t->xmit_type == FLOW_OFFLOAD_XMIT_NEIGH ||
++		     t->xmit_type == FLOW_OFFLOAD_XMIT_XFRM) &&
++		    t->ifidx == ifindex)
++			return true;
++	}
++	dst = READ_ONCE(t->dst_cache);
++	if (dst && (dst_dev_rcu(dst) == dev || !nf_flow_dst_check(t)))
++		return true;
++	return false;
++}
++
+ static void nf_flow_table_do_cleanup(struct nf_flowtable *flow_table,
+ 				     struct flow_offload *flow, void *data)
+ {
+@@ -739,8 +772,8 @@ static void nf_flow_table_do_cleanup(struct nf_flowtable *flow_table,
+ 	}
+ 
+ 	if (net_eq(nf_ct_net(flow->ct), dev_net(dev)) &&
+-	    (flow->tuplehash[0].tuple.iifidx == dev->ifindex ||
+-	     flow->tuplehash[1].tuple.iifidx == dev->ifindex))
++	    (nf_flow_tuple_uses_dev(&flow->tuplehash[0].tuple, dev) ||
++	     nf_flow_tuple_uses_dev(&flow->tuplehash[1].tuple, dev)))
+ 		flow_offload_teardown(flow);
+ }
+ 
+@@ -763,6 +796,190 @@ void nf_flow_table_cleanup(struct net_device *dev)
+ }
+ EXPORT_SYMBOL_GPL(nf_flow_table_cleanup);
+ 
++bool nf_flow_admission_fenced(void)
++{
++	return atomic_read(&nf_flow_admission_fence) > 0;
++}
++EXPORT_SYMBOL_GPL(nf_flow_admission_fenced);
++
++void nf_flow_table_fence_begin(void)
++{
++	atomic_inc_return(&nf_flow_admission_fence);
++	smp_mb__after_atomic();
++}
++EXPORT_SYMBOL_GPL(nf_flow_table_fence_begin);
++
++void nf_flow_table_fence_end(void)
++{
++	smp_mb__before_atomic();
++	WARN_ON_ONCE(atomic_dec_return(&nf_flow_admission_fence) < 0);
++}
++EXPORT_SYMBOL_GPL(nf_flow_table_fence_end);
++
++struct nf_flow_revoke_ctx {
++	bool (*match)(const struct flow_offload *flow, void *data);
++	void *data;
++	unsigned int remaining;
++	bool need_rcu_sync;
++};
++
++static void nf_flow_table_revoke_step(struct nf_flowtable *flow_table,
++				      struct flow_offload *flow, void *data)
++{
++	struct nf_flow_revoke_ctx *ctx = data;
++
++	if (ctx->match && !ctx->match(flow, ctx->data))
++		return;
++
++	flow_offload_teardown(flow);
++	if (test_bit(NF_FLOW_HW, &flow->flags) &&
++	    !test_bit(NF_FLOW_HW_DYING, &flow->flags) &&
++	    !test_bit(NF_FLOW_HW_DEAD, &flow->flags))
++		nf_flow_offload_del(flow_table, flow);
++}
++
++static void nf_flow_table_revoke_settle_step(struct nf_flowtable *flow_table,
++					     struct flow_offload *flow,
++					     void *data)
++{
++	struct nf_flow_revoke_ctx *ctx = data;
++
++	if (ctx->match && !ctx->match(flow, ctx->data))
++		return;
++
++	/* Never unlink a flow that was not already torn down before the last
++	 * RCU grace period; softirq readers may still hold a lookup reference.
++	 */
++	if (!test_bit(NF_FLOW_TEARDOWN, &flow->flags)) {
++		flow_offload_teardown(flow);
++		if (test_bit(NF_FLOW_HW, &flow->flags) &&
++		    !test_bit(NF_FLOW_HW_DYING, &flow->flags) &&
++		    !test_bit(NF_FLOW_HW_DEAD, &flow->flags))
++			nf_flow_offload_del(flow_table, flow);
++		ctx->need_rcu_sync = true;
++		ctx->remaining++;
++		return;
++	}
++
++	if (!test_bit(NF_FLOW_HW, &flow->flags)) {
++		flow_offload_del(flow_table, flow);
++		return;
++	}
++	if (test_bit(NF_FLOW_PENDING, &flow->flags)) {
++		ctx->remaining++;
++		return;
++	}
++	if (test_bit(NF_FLOW_HW_DEAD, &flow->flags)) {
++		flow_offload_del(flow_table, flow);
++		return;
++	}
++	ctx->remaining++;
++	if (!test_bit(NF_FLOW_HW_DYING, &flow->flags))
++		nf_flow_offload_del(flow_table, flow);
++}
++
++static void nf_flow_table_revoke_count_step(struct nf_flowtable *flow_table,
++					    struct flow_offload *flow,
++					    void *data)
++{
++	struct nf_flow_revoke_ctx *ctx = data;
++
++	if (ctx->match && !ctx->match(flow, ctx->data))
++		return;
++
++	if (!test_bit(NF_FLOW_TEARDOWN, &flow->flags)) {
++		ctx->remaining++;
++		return;
++	}
++	if (!test_bit(NF_FLOW_HW, &flow->flags)) {
++		flow_offload_del(flow_table, flow);
++		return;
++	}
++	if (test_bit(NF_FLOW_HW_DEAD, &flow->flags) &&
++	    !test_bit(NF_FLOW_PENDING, &flow->flags)) {
++		flow_offload_del(flow_table, flow);
++		return;
++	}
++	ctx->remaining++;
++}
++
++#define NF_FLOW_TABLE_REVOKE_SETTLE_PASSES	8
++
++int nf_flow_table_revoke_match(struct net *net,
++			       bool (*match)(const struct flow_offload *flow,
++					     void *data),
++			       void *data, bool wait_hw,
++			       unsigned int *unresolved_out)
++{
++	struct nf_flow_revoke_ctx ctx = {
++		.match = match,
++		.data = data,
++	};
++	struct nf_flowtable *flowtable;
++	unsigned int unresolved = 0;
++
++	mutex_lock(&flowtable_lock);
++	list_for_each_entry(flowtable, &flowtables, list) {
++		unsigned int pass;
++
++		if (net && !net_eq(read_pnet(&flowtable->net), net))
++			continue;
++
++		if (!wait_hw) {
++			nf_flow_table_iterate(flowtable,
++					      nf_flow_table_revoke_step, &ctx);
++			continue;
++		}
++
++		/* Exclude gc_work during synchronous settle so no concurrent
++		 * gc step can queue STATS/DEL work or race flow_offload_del().
++		 */
++		cancel_delayed_work_sync(&flowtable->gc_work);
++		nf_flow_table_iterate(flowtable, nf_flow_table_revoke_step,
++				      &ctx);
++		/* Drain softirq readers that looked up a matching flow before
++		 * NF_FLOW_TEARDOWN was set, before any flow_offload_del().
++		 */
++		synchronize_rcu();
++		nf_flow_table_offload_flush(flowtable);
++		for (pass = 0; pass < NF_FLOW_TABLE_REVOKE_SETTLE_PASSES; pass++) {
++			ctx.remaining = 0;
++			ctx.need_rcu_sync = false;
++			nf_flow_table_iterate(flowtable,
++					      nf_flow_table_revoke_settle_step,
++					      &ctx);
++			if (!ctx.remaining)
++				break;
++			if (ctx.need_rcu_sync) {
++				synchronize_rcu();
++				nf_flow_table_offload_flush(flowtable);
++			} else {
++				nf_flow_table_offload_flush_del(flowtable);
++			}
++		}
++		ctx.remaining = 0;
++		nf_flow_table_iterate(flowtable,
++				      nf_flow_table_revoke_count_step, &ctx);
++		unresolved += ctx.remaining;
++		queue_delayed_work(system_power_efficient_wq,
++				   &flowtable->gc_work, HZ);
++	}
++	mutex_unlock(&flowtable_lock);
++
++	if (unresolved_out)
++		*unresolved_out = unresolved;
++	return unresolved ? -EBUSY : 0;
++}
++EXPORT_SYMBOL_GPL(nf_flow_table_revoke_match);
++
++int nf_flow_table_revoke_all(struct net *net, bool wait_hw,
++			     unsigned int *unresolved_out)
++{
++	return nf_flow_table_revoke_match(net, NULL, NULL, wait_hw,
++					  unresolved_out);
++}
++EXPORT_SYMBOL_GPL(nf_flow_table_revoke_all);
++
+ /* Called once all offload work for the table has been flushed. A flow whose
+  * hardware delete never settled may still be named by a live record through
+  * its tuple address (the offload cookie). Drop its table, route and conntrack
+@@ -773,6 +990,8 @@ static void flow_offload_quarantine_rcu(struct rcu_head *rcu_head)
+ {
+ 	struct flow_offload *flow = container_of(rcu_head, struct flow_offload, rcu_head);
+ 
++	if (flow->type == NF_FLOW_OFFLOAD_ROUTE)
++		flow_offload_route_release(flow);
+ 	nf_ct_put(flow->ct);
+ 	flow->ct = NULL;
+ }
+@@ -790,8 +1009,6 @@ static void nf_flow_table_free_step(struct nf_flowtable *flow_table,
+ 		rhashtable_remove_fast(&flow_table->rhashtable,
+ 				       &flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].node,
+ 				       nf_flow_offload_rhash_params);
+-		if (flow->type == NF_FLOW_OFFLOAD_ROUTE)
+-			flow_offload_route_release(flow);
+ 		call_rcu(&flow->rcu_head, flow_offload_quarantine_rcu);
+ 		(*quarantined)++;
+ 		return;
+diff --git a/net/netfilter/nf_flow_table_ip.c b/net/netfilter/nf_flow_table_ip.c
+index 4235141..4144169 100644
+--- a/net/netfilter/nf_flow_table_ip.c
++++ b/net/netfilter/nf_flow_table_ip.c
+@@ -295,15 +295,6 @@ static bool nf_flow_exceeds_mtu(const struct sk_buff *skb, unsigned int mtu)
+ 	return true;
+ }
+ 
+-static inline bool nf_flow_dst_check(struct flow_offload_tuple *tuple)
+-{
+-	if (tuple->xmit_type != FLOW_OFFLOAD_XMIT_NEIGH &&
+-	    tuple->xmit_type != FLOW_OFFLOAD_XMIT_XFRM)
+-		return true;
+-
+-	return dst_check(tuple->dst_cache, tuple->dst_cookie);
+-}
+-
+ static unsigned int nf_flow_xmit_xfrm(struct sk_buff *skb,
+ 				      const struct nf_hook_state *state,
+ 				      struct dst_entry *dst)
+diff --git a/net/netfilter/nf_flow_table_offload.c b/net/netfilter/nf_flow_table_offload.c
+index 82ec1c3..dc03415 100644
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -987,6 +987,10 @@ static void flow_offload_work_add(struct flow_offload_work *offload)
+ 	struct nf_flow_rule *flow_rule[FLOW_OFFLOAD_DIR_MAX];
+ 	int err;
+ 
++	if (test_bit(NF_FLOW_TEARDOWN, &offload->flow->flags) ||
++	    test_bit(NF_FLOW_HW_DYING, &offload->flow->flags))
++		return;
++
+ 	err = nf_flow_offload_alloc(offload, flow_rule);
+ 	if (err < 0) {
+ 		net_warn_ratelimited("nf_flow_table_offload: alloc failed err=%d flow=%p cmd=%d -- HW offload silently aborted (PR14o diagnostic)\n",
+@@ -1115,15 +1119,17 @@ static void flow_offload_work_handler(struct work_struct *work)
+ 		default:
+ 			WARN_ON_ONCE(1);
+ 	}
+-	/* A FIN/RST or reused-tuple SYN that arrived while this add or stats
+-	 * job was queued could not queue its delete (NF_FLOW_PENDING was set)
+-	 * and the hardware record would then outlive the connection until the
+-	 * next gc pass. Delete it here, in this work item, while
+-	 * NF_FLOW_PENDING still keeps gc from freeing the flow.
++	/* A FIN/RST, reused-tuple SYN, or policy/route teardown that arrived
++	 * while this add or stats job was queued could not queue its delete
++	 * (NF_FLOW_PENDING was set) and the hardware record would then outlive
++	 * the flow until the next gc pass. Delete it here, in this work item,
++	 * while NF_FLOW_PENDING still keeps gc from freeing the flow.
+ 	 */
++	smp_mb();
+ 	if (offload->cmd != FLOW_CLS_DESTROY &&
+ 	    test_bit(NF_FLOW_HW, &offload->flow->flags) &&
+-	    test_bit(NF_FLOW_CLOSING, &offload->flow->flags) &&
++	    (test_bit(NF_FLOW_CLOSING, &offload->flow->flags) ||
++	     test_bit(NF_FLOW_TEARDOWN, &offload->flow->flags)) &&
+ 	    test_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status) &&
+ 	    !test_bit(NF_FLOW_HW_DYING, &offload->flow->flags)) {
+ 		set_bit(NF_FLOW_HW_DYING, &offload->flow->flags);
+@@ -1160,6 +1166,11 @@ nf_flow_offload_work_alloc(struct nf_flowtable *flowtable,
+ 	if (test_and_set_bit(NF_FLOW_PENDING, &flow->flags))
+ 		return NULL;
+ 
++	if (test_bit(NF_FLOW_HW_DEAD, &flow->flags)) {
++		clear_bit(NF_FLOW_PENDING, &flow->flags);
++		return NULL;
++	}
++
+ 	offload = kmalloc(sizeof(struct flow_offload_work), GFP_ATOMIC);
+ 	if (!offload) {
+ 		clear_bit(NF_FLOW_PENDING, &flow->flags);
+@@ -1217,6 +1228,12 @@ void nf_flow_offload_stats(struct nf_flowtable *flowtable,
+ 	flow_offload_queue_work(offload);
+ }
+ 
++void nf_flow_table_offload_flush_del(struct nf_flowtable *flowtable)
++{
++	if (nf_flowtable_hw_offload(flowtable))
++		flush_workqueue(nf_flow_offload_del_wq);
++}
++
+ void nf_flow_table_offload_flush_cleanup(struct nf_flowtable *flowtable)
+ {
+ 	if (nf_flowtable_hw_offload(flowtable)) {
+diff --git a/net/netfilter/nft_flow_offload.c b/net/netfilter/nft_flow_offload.c
+index a787e2d..08cfbd7 100644
+--- a/net/netfilter/nft_flow_offload.c
++++ b/net/netfilter/nft_flow_offload.c
+@@ -60,6 +60,9 @@ static void nft_flow_offload_eval(const struct nft_expr *expr,
+ 	struct nf_conn *ct;
+ 	int ret;
+ 
++	if (unlikely(nf_flow_admission_fenced()))
++		goto out;
++
+ 	if (nft_flow_offload_skip(pkt->skb, nft_pf(pkt)))
+ 		goto out;
+ 

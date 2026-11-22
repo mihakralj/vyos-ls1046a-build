@@ -3,8 +3,8 @@
 #   1 tunnel : bin/testrig-wireguard.sh        (4 TCP streams, a NEW tunnel every rep so serial-worker placement is sampled)
 #   2, 4 tunnels : bin/testrig-wireguard-multi.sh (2 TCP streams per tunnel, one tunnel set per row)
 #   each x up / down / bidir, IPv4 inner, MTU 1420, 30 s runs (first 10 s discarded)
-#   OUTER=6 supported: every tunnel runs over IPv6 between the DUT and dell2 (use a separate TAG).
-# Usage: bin/wg-matrix.sh 70|106|185   Env: REPS1=5 REPSN=3 DUR=30 STEADY_FROM=10 OUTDIR=/mnt/builds/ask2-review/oracle
+#   OUTER=6 supported: every tunnel runs over IPv6 between the DUT and the selected far generator (use a separate TAG).
+# Usage: bin/wg-matrix.sh 70|106|185   Env: REPS1=5 REPSN=3 WG_PORT=eth3|eth4 WG_GEN_QDISC=default|fq DUR=30 STEADY_FROM=10 OUTDIR=/mnt/builds/ask2-review/oracle
 # The rig creates tunnels outside VyOS config. On .185, a temporary nft table
 # untracks only this rig's outer UDP traffic; existing VyOS configuration is untouched.
 # The current .70 has no fw4 forward chain; use WG_SKIP_FW4=1 only if its
@@ -12,6 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . bin/testrig-env.sh
+. bin/testrig-wgfp-modes.sh
 WHO=${1:?usage: wg-matrix.sh 70|106|185}
 REPS1=${REPS1:-5}; REPSN=${REPSN:-3}; DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}
 OUTDIR=${OUTDIR:-/mnt/builds/ask2-review/oracle}; TAG=${TAG:-wgfull}
@@ -34,41 +35,41 @@ case $WHO in
   185) export DUT_KIND=ask2 DUT="${DUT:-vyos@192.168.1.185}" ;;
   *) echo "70, 106 or 185" >&2; exit 2 ;;
 esac
+if [ "$DUT_KIND" = ask2 ]; then WG_INNER6=${WG_INNER6:-1}; else WG_INNER6=${WG_INNER6:-0}; fi
+case $WG_INNER6 in 0|1) ;; *) echo "WG_INNER6 must be 0 or 1" >&2; exit 2 ;; esac
 if [ "$DUT_KIND" = vendor ]; then export RIG_NS=${RIG_NS:-$VENDOR_NS}; else export RIG_NS=${RIG_NS:-}; fi
 if [ -n "$RIG_NS" ] && ! [[ $RIG_NS =~ ^[a-zA-Z0-9_.-]+$ ]]; then
   echo "Invalid RIG_NS" >&2; exit 2
 fi
-if [ "${WG_PORT:-eth4}" != eth4 ]; then
-  echo "The matrix requires WG_PORT=eth4 for both runners" >&2; exit 2
+# WG_PORT=eth3 (default): dell1, the faster generator, terminates the tunnels.
+# WG_PORT=eth4 uses dell2; 1T cells on eth3 get a "-eth3" suffix.
+export WG_PORT=${WG_PORT:-eth3}
+case $WG_PORT in
+  eth4) WG_SUF= ;;
+  eth3) WG_SUF=-eth3 ;;
+  *) echo "WG_PORT must be eth3 or eth4" >&2; exit 2 ;;
+esac
+export WG_SUF
+WG_GEN_QDISC=${WG_GEN_QDISC:-default}
+case $WG_GEN_QDISC in default|fq) ;; *) echo "WG_GEN_QDISC must be default or fq" >&2; exit 2 ;; esac
+export WG_GEN_QDISC
+single_endpoints=$(bin/testrig-wireguard.sh topology) || { echo "Cannot read single-tunnel endpoints" >&2; exit 2; }
+multi_endpoints=$(bin/testrig-wireguard-multi.sh topology) || { echo "Cannot read multi-tunnel endpoints" >&2; exit 2; }
+if [ "$single_endpoints" != "$multi_endpoints" ] || [[ $single_endpoints == *$'\n'* ]]; then
+  echo "WireGuard runner endpoints do not match" >&2; exit 2
+fi
+read -r WG_GEN4 WG_DUT4 WG_GEN6 WG_DUT6 extra <<< "$single_endpoints"
+if [ -n "$extra" ] || ! [[ $WG_GEN4 =~ ^[0-9.]+$ && $WG_DUT4 =~ ^[0-9.]+$ &&
+                           $WG_GEN6 =~ ^[0-9a-fA-F:]+$ && $WG_DUT6 =~ ^[0-9a-fA-F:]+$ ]]; then
+  echo "Invalid WireGuard runner endpoints" >&2; exit 2
 fi
 case ${OUTER:-4} in 4|6) export OUTER=${OUTER:-4} ;; *) echo "OUTER must be 4 or 6" >&2; exit 2 ;; esac
 if [ "$DUT_KIND" = vendor ] && [ "${WGFP:-0}" = 1 ]; then
   echo "WGFP is available only on the ASK2 DUT" >&2; exit 2
 fi
-# WGFP_RX: P3 receive offload for the run. It follows WGFP (offload on means the whole fast path,
-# as the kernel defaults do); WGFP_RX=1 makes down/bidir show direct-RX frames, WGFP_RX=0 is the
-# transmit-only A/B. The DUT's previous setting is restored on exit.
-WGFP_RX=${WGFP_RX:-${WGFP:-0}}
-case $WGFP_RX in 0|1) ;; *) echo "WGFP_RX must be 0 or 1" >&2; exit 2 ;; esac
-if [ "$WGFP_RX" = 1 ] && [ "${WGFP:-0}" != 1 ]; then
-  echo "WGFP_RX=1 needs WGFP=1" >&2; exit 2
-fi
-# WGFP_RX_FAST=0|1|2: P6 in-place decrypt (wireguard.wgfp_rx_fast) for the run; unset leaves the
-# DUT's setting alone. Needs WGFP_RX=1. Restored on exit.
-WGFP_RX_FAST=${WGFP_RX_FAST:-}
-case $WGFP_RX_FAST in ''|0|1|2) ;; *) echo "WGFP_RX_FAST must be 0, 1 or 2" >&2; exit 2 ;; esac
-if [ -n "$WGFP_RX_FAST" ] && [ "$WGFP_RX" != 1 ]; then
-  echo "WGFP_RX_FAST needs WGFP_RX=1" >&2; exit 2
-fi
-# WGFP_RX_TAIL=0|1: P7 direct forward at the end of the upstream receive path (wireguard.wgfp_rx_tail);
-# unset leaves the DUT's setting alone. Needs WGFP=1. Restored on exit.
-WGFP_RX_TAIL=${WGFP_RX_TAIL:-}
-case $WGFP_RX_TAIL in ''|0|1) ;; *) echo "WGFP_RX_TAIL must be 0 or 1" >&2; exit 2 ;; esac
-if [ -n "$WGFP_RX_TAIL" ] && [ "${WGFP:-0}" != 1 ]; then
-  echo "WGFP_RX_TAIL needs WGFP=1" >&2; exit 2
-fi
-if [ "$DUT_KIND" = ask2 ] && [ "${WG_NOTRACK:-0}" != 0 ]; then
-  echo "The ASK2 matrix already applies scoped NOTRACK; leave WG_NOTRACK unset" >&2; exit 2
+wgfp_validate_modes || exit 2
+if [ "${WG_NOTRACK:-0}" != 0 ]; then
+  echo "Leave WG_NOTRACK unset for the matrix; ASK2 applies its own scoped rules" >&2; exit 2
 fi
 if [ "${KEEP:-0}" = 1 ]; then
   echo "KEEP=1 is not supported by the matrix" >&2; exit 2
@@ -87,27 +88,54 @@ if [ -n "$RIG_KEY" ]; then SSH+=(-i "$RIG_KEY"); fi
 TABLE="wgmatrix${BASHPID}${RANDOM}"
 TABLE_TOKEN="${TABLE}x${RANDOM}"
 TABLE_MAY_EXIST=0
-RX_ORIG=
-RXP=/sys/module/wireguard/parameters/wgfp_rx
-FAST_ORIG=
-FASTP=/sys/module/wireguard/parameters/wgfp_rx_fast
-TAIL_ORIG=
-TAILP=/sys/module/wireguard/parameters/wgfp_rx_tail
+wgfp_mode_read() {
+  "${SSH[@]}" -n "$DUT" "sudo -n cat /sys/module/wireguard/parameters/$1"
+}
+run_checked() {
+  local checkpoint counter_start counter_digest cell peers
+  wgfp_check_modes || return 1
+  if [ "${WGFP:-0}" = 1 ]; then
+    checkpoint=$(python3 - "$WGFP_COUNTER_LOG" <<'PY'
+import sys
+sys.path.insert(0, "bin")
+from testrig_wg_validation import wgfp_counter_snapshot
+
+try:
+    print(*wgfp_counter_snapshot(sys.argv[1]))
+except (OSError, ValueError) as exc:
+    raise SystemExit(f"ERROR: cannot snapshot WGFP counter history: {exc}")
+PY
+    ) || return 1
+    read -r counter_start counter_digest <<< "$checkpoint"
+  fi
+  "$@" || return $?
+  wgfp_check_modes || return 1
+  if [ "${WGFP:-0}" = 1 ]; then
+    if [ "$1" = bin/testrig-wireguard.sh ]; then
+      cell="wg-v4$WG_SUF"; peers=1
+    else
+      cell="$TUNNELS"; peers=$TUNNELS
+      [ "${INNER:-4}" != 6 ] || cell="${cell}v6"
+    fi
+    python3 - "$WGFP_COUNTER_LOG" "$cell" "$REPS" "$peers" "$DIRS" "$WGFP_RX" \
+      "$counter_start" "$counter_digest" <<'PY'
+import sys
+sys.path.insert(0, "bin")
+from testrig_wg_validation import validate_wgfp_counters
+
+_, log, cell, reps, peers, directions, rx, start, digest = sys.argv
+expected = {(cell, direction, rep): int(peers) for direction in directions.split()
+            for rep in range(1, int(reps) + 1)}
+try:
+    validate_wgfp_counters(log, expected, rx == "1", int(start), digest)
+except (OSError, UnicodeError, KeyError, TypeError, ValueError) as exc:
+    raise SystemExit(f"ERROR: matrix validation failed: {exc}")
+PY
+  fi
+}
 cleanup() {
   local rc=$? listing handle
   trap - EXIT INT TERM
-  if [ -n "$TAIL_ORIG" ]; then
-    "${SSH[@]}" -n "$DUT" "echo $TAIL_ORIG | sudo -n tee $TAILP >/dev/null" ||
-      { echo "ERROR: cannot restore $TAILP=$TAIL_ORIG" >&2; rc=1; }
-  fi
-  if [ -n "$FAST_ORIG" ]; then
-    "${SSH[@]}" -n "$DUT" "echo $FAST_ORIG | sudo -n tee $FASTP >/dev/null" ||
-      { echo "ERROR: cannot restore $FASTP=$FAST_ORIG" >&2; rc=1; }
-  fi
-  if [ -n "$RX_ORIG" ]; then
-    "${SSH[@]}" -n "$DUT" "echo $RX_ORIG | sudo -n tee $RXP >/dev/null" ||
-      { echo "ERROR: cannot restore $RXP=$RX_ORIG" >&2; rc=1; }
-  fi
   if [ "$TABLE_MAY_EXIST" = 1 ]; then
     if listing=$("${SSH[@]}" -n "$DUT" "sudo -n nft -a list table inet $TABLE"); then
       if handle=$(printf '%s\n' "$listing" | awk -v table="$TABLE" -v token="$TABLE_TOKEN" '
@@ -206,126 +234,86 @@ fi
 REMOTE
 done
 
+wgfp_check_modes
 run_dir=$(mktemp -d "$OUTDIR/$TAG-$WHO-XXXXXXXX")
+printf '%s\n' "$WG_GEN_QDISC" > "$run_dir/generator-qdisc.txt"
+printf '%s\n' "$WG_PORT" > "$run_dir/encrypted-leg.txt"
 export J=${J:-"$run_dir/json"} WG_STATE_PATH=${WG_STATE_PATH:-"$run_dir/state"}
 export WG_DUT_STAT=${WG_DUT_STAT:-"$run_dir/dut.stat"}
 if [ "${WGFP:-0}" = 1 ]; then export WGFP_COUNTER_LOG=${WGFP_COUNTER_LOG:-"$run_dir/wgfp-counters.tsv"}; fi
 mkdir -p "$J"
 echo "Per-run artifacts: $run_dir"
+echo "Encrypted WireGuard leg: $WG_PORT"
+echo "Generator tunnel qdisc: $WG_GEN_QDISC (no explicit iperf rate cap added)"
 if [ "$DUT_KIND" = ask2 ]; then
   printf '%s\n%s\n' "$TABLE" "$TABLE_TOKEN" > "$run_dir/nft-pending"
   TABLE_MAY_EXIST=1
   "${SSH[@]}" -n "$DUT" "sudo -n nft 'create table inet $TABLE { comment \"$TABLE_TOKEN\"; }'"
   "${SSH[@]}" -n "$DUT" "sudo -n nft 'add chain inet $TABLE pre { type filter hook prerouting priority -300 ; }' && \
     sudo -n nft 'add chain inet $TABLE out { type filter hook output priority -300 ; }' && \
-    sudo -n nft add rule inet $TABLE pre ip saddr 10.99.2.113 ip daddr 10.99.2.185 udp sport 51820-51833 udp dport 51820-51833 notrack && \
-    sudo -n nft add rule inet $TABLE out ip saddr 10.99.2.185 ip daddr 10.99.2.113 udp sport 51820-51833 udp dport 51820-51833 notrack && \
-    sudo -n nft add rule inet $TABLE pre ip6 saddr fd99:2::113 ip6 daddr fd99:2::185 udp sport 51820-51833 udp dport 51820-51833 notrack && \
-    sudo -n nft add rule inet $TABLE out ip6 saddr fd99:2::185 ip6 daddr fd99:2::113 udp sport 51820-51833 udp dport 51820-51833 notrack"
-fi
-if [ "$DUT_KIND" = ask2 ] && [ "${WGFP:-0}" = 1 ]; then
-  RX_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $RXP") || exit 1
-  "${SSH[@]}" -n "$DUT" "echo $WGFP_RX | sudo -n tee $RXP >/dev/null" || exit 1
-  echo "wgfp_rx: $RX_ORIG -> $WGFP_RX"
-  if [ -n "$WGFP_RX_FAST" ]; then
-    FAST_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $FASTP") ||
-      { echo "ERROR: this image has no $FASTP (P6)" >&2; exit 1; }
-    "${SSH[@]}" -n "$DUT" "echo $WGFP_RX_FAST | sudo -n tee $FASTP >/dev/null" || exit 1
-    echo "wgfp_rx_fast: $FAST_ORIG -> $WGFP_RX_FAST"
-  fi
-  if [ -n "$WGFP_RX_TAIL" ]; then
-    TAIL_ORIG=$("${SSH[@]}" -n "$DUT" "sudo -n cat $TAILP") ||
-      { echo "ERROR: this image has no $TAILP (P7)" >&2; exit 1; }
-    "${SSH[@]}" -n "$DUT" "echo $WGFP_RX_TAIL | sudo -n tee $TAILP >/dev/null" || exit 1
-    echo "wgfp_rx_tail: $TAIL_ORIG -> $WGFP_RX_TAIL"
-  fi
+    sudo -n nft add rule inet $TABLE pre ip saddr $WG_GEN4 ip daddr $WG_DUT4 udp sport 51820-51833 udp dport 51820-51833 notrack && \
+    sudo -n nft add rule inet $TABLE out ip saddr $WG_DUT4 ip daddr $WG_GEN4 udp sport 51820-51833 udp dport 51820-51833 notrack && \
+    sudo -n nft add rule inet $TABLE pre ip6 saddr $WG_GEN6 ip6 daddr $WG_DUT6 udp sport 51820-51833 udp dport 51820-51833 notrack && \
+    sudo -n nft add rule inet $TABLE out ip6 saddr $WG_DUT6 ip6 daddr $WG_GEN6 udp sport 51820-51833 udp dport 51820-51833 notrack"
 fi
 echo "##### $WHO: 1 tunnel, 4 streams, $REPS1 reps with a fresh tunnel each"
-REPS=$REPS1 RECREATE=1 DIRS="up down bidir" STREAMS=4 OUT=$OUTDIR/$TAG-$WHO-t1.csv bin/testrig-wireguard.sh run wg-v4
+INNER=4 REPS=$REPS1 RECREATE=1 DIRS="up down bidir" STREAMS=4 OUT=$run_dir/t1.csv run_checked bin/testrig-wireguard.sh run wg-v4
 for A in 2 4; do
   echo "##### $WHO: $A tunnels, 2 streams each, $REPSN reps"
-  REPS=$REPSN DIRS="up down bidir" TUNNELS=$A ACTIVE=$A OUT=$OUTDIR/$TAG-$WHO-t$A.csv bin/testrig-wireguard-multi.sh run
+  INNER=4 REPS=$REPSN DIRS="up down bidir" TUNNELS=$A ACTIVE=$A OUT=$run_dir/t$A.csv run_checked bin/testrig-wireguard-multi.sh run
 done
 # WG_INNER6=1 (default on the ASK2 DUT): the same 2/4-tunnel cells with IPv6 inside the tunnels (outer stays IPv4)
-[ "$DUT_KIND" = ask2 ] && WG_INNER6=${WG_INNER6:-1} || WG_INNER6=${WG_INNER6:-0}
 if [ "$WG_INNER6" = 1 ]; then
   for A in 2 4; do
     echo "##### $WHO: $A tunnels, IPv6 inner, 2 streams each, $REPSN reps"
-    INNER=6 REPS=$REPSN DIRS="up down bidir" TUNNELS=$A ACTIVE=$A OUT=$OUTDIR/$TAG-$WHO-t${A}v6.csv bin/testrig-wireguard-multi.sh run
+    INNER=6 REPS=$REPSN DIRS="up down bidir" TUNNELS=$A ACTIVE=$A OUT=$run_dir/t${A}v6.csv run_checked bin/testrig-wireguard-multi.sh run
   done
 fi
-python3 - "$OUTDIR" "$TAG" "$WHO" "$REPS1" "$REPSN" "${WGFP:-0}" "${WGFP_COUNTER_LOG:-}" "$J" "$DUR" "$STEADY_FROM" "$WGFP_RX" <<'PY'
+python3 - "$run_dir" "$REPS1" "$REPSN" "${WGFP:-0}" "${WGFP_COUNTER_LOG:-}" \
+  "$J" "$DUR" "$STEADY_FROM" "$WGFP_RX" "$WG_INNER6" <<'PY'
 import collections
 import csv
-import json
 import math
+import os
 import statistics
 import sys
 from decimal import Decimal
 from pathlib import Path
 
-out, tag, who, reps1, repsn, wgfp, counter_file, json_dir, duration, steady_from, wgfp_rx = sys.argv[1:]
+sys.path.insert(0, "bin")
+from testrig_wg_validation import iperf_rate, validate_wgfp_counters
+
+(out, reps1, repsn, wgfp, counter_file, json_dir, duration, steady_from,
+ wgfp_rx, inner6) = sys.argv[1:]
 duration, steady_from = int(duration), int(steady_from)
 directions = ("up", "down", "bidir")
 summary = {}
-expected = {1: int(reps1), 2: int(repsn), 4: int(repsn)}
-
-def iperf_rate(path, direction):
-    data = json.loads(path.read_text())
-    if data.get("error"):
-        raise ValueError(f"{path}: {data['error']}")
-    end = data["end"]
-    fields = ["sum_sent", "sum_received"]
-    if direction == "bidir":
-        fields += ["sum_sent_bidir_reverse", "sum_received_bidir_reverse"]
-    tolerance = max(1.0, duration * 0.05)
-    for field in fields:
-        seconds = float(end[field]["seconds"])
-        rate = float(end[field]["bits_per_second"])
-        if (not math.isfinite(seconds) or not duration - tolerance <= seconds <= duration + tolerance
-                or not math.isfinite(rate) or rate <= 0):
-            raise ValueError(f"{path}: incomplete or invalid {field}")
-    previous = 0.0
-    steady = []
-    for interval in data["intervals"]:
-        sample = interval["sum"]
-        start, stop, seconds, rate = (float(sample[key]) for key in
-                                      ("start", "end", "seconds", "bits_per_second"))
-        if (not all(math.isfinite(x) for x in (start, stop, seconds, rate))
-                or abs(start - previous) > 0.05 or not 0 < seconds <= 1.55
-                or abs(stop - start - seconds) > 0.05 or rate < 0
-                or sample.get("omitted", False)):
-            raise ValueError(f"{path}: invalid or incomplete interval")
-        if direction == "bidir":
-            reverse = interval["sum_bidir_reverse"]
-            reverse_rate = float(reverse["bits_per_second"])
-            reverse_start, reverse_stop = float(reverse["start"]), float(reverse["end"])
-            if (not all(math.isfinite(x) for x in (reverse_rate, reverse_start, reverse_stop))
-                    or reverse_rate < 0 or abs(reverse_start - start) > 0.05
-                    or abs(reverse_stop - stop) > 0.05
-                    or reverse.get("omitted", False)):
-                raise ValueError(f"{path}: invalid reverse interval")
-            rate += reverse_rate
-        if start >= steady_from - 0.01:
-            steady.append(rate)
-        previous = stop
-    if previous < duration - tolerance or not steady:
-        raise ValueError(f"{path}: incomplete steady window")
-    return sum(steady) / len(steady) / 1e9
+expected = [(4, 1, int(reps1)), (4, 2, int(repsn)), (4, 4, int(repsn))]
+if inner6 == "1":
+    expected += [(6, 2, int(repsn)), (6, 4, int(repsn))]
 
 try:
-    for tunnels, reps in expected.items():
-        path = Path(out) / f"{tag}-{who}-t{tunnels}.csv"
-        rows = list(csv.DictReader(path.open()))
+    counter_expected = {}
+    for family, tunnels, reps in expected:
+        suffix = "v6" if family == 6 else ""
+        path = Path(out) / f"t{tunnels}{suffix}.csv"
+        with path.open(newline="", encoding="utf-8") as file:
+            rows = list(csv.DictReader(file))
         values = collections.defaultdict(list)
         for row in rows:
+            if tunnels == 1:
+                if row["cell"] != f"wg-v4{os.environ.get('WG_SUF', '')}":
+                    raise ValueError(f"{path}: unexpected cell identity")
+            elif row["tunnels"] != str(tunnels) or row["active"] != str(tunnels):
+                raise ValueError(f"{path}: unexpected tunnel identity")
             direction = row["dir"]
             rate, rep = float(row["gbps"]), int(row["rep"])
-            if direction not in directions or not math.isfinite(rate) or rate <= 0:
+            if direction not in directions or not math.isfinite(rate) or rate < 0:
                 raise ValueError(f"{path}: invalid measurement {direction} r{rep}: {rate}")
-            names = ([f"wg-v4-{direction}-r{rep}.json"] if tunnels == 1 else
-                     [f"wgm-{direction}-n{tunnels}-k{k}-r{rep}.json" for k in range(tunnels)])
-            measured = sum(iperf_rate(Path(json_dir) / name, direction) for name in names)
+            prefix = "wgm6" if family == 6 else "wgm"
+            names = ([f"wg-v4{os.environ.get('WG_SUF', '')}-{direction}-r{rep}.json"] if tunnels == 1 else
+                     [f"{prefix}-{direction}-n{tunnels}-k{k}-r{rep}.json" for k in range(tunnels)])
+            measured = sum(iperf_rate(Path(json_dir) / name, direction, duration, steady_from) for name in names)
             precision = max(0, -Decimal(row["gbps"]).as_tuple().exponent)
             tolerance = max(1e-5, 0.500001 * 10 ** -precision)
             if abs(measured - rate) > tolerance:
@@ -335,114 +323,38 @@ try:
             samples = values[direction]
             if sorted(rep for rep, _ in samples) != list(range(1, reps + 1)):
                 raise ValueError(f"{path}: missing or duplicate {direction} repetitions")
-            summary[(tunnels, direction)] = statistics.median(rate for _, rate in samples)
+            summary[(family, tunnels, direction)] = [rate for _, rate in samples]
+            cell = f"wg-v4{os.environ.get('WG_SUF', '')}" if tunnels == 1 else f"{tunnels}{suffix}"
+            for rep in range(1, reps + 1):
+                counter_expected[(cell, direction, rep)] = tunnels
 
     if wgfp == "1":
-        samples = collections.defaultdict(dict)
-        def parse_counters(text, required):
-            counters = {}
-            for field in text.split():
-                key, sep, value = field.partition("=")
-                if key not in required:
-                    continue
-                if key in counters or not sep or not value.isascii() or not value.isdecimal():
-                    raise ValueError(f"invalid or duplicate WGFP counter {key}")
-                counters[key] = int(value)
-            if required - counters.keys():
-                raise ValueError(f"missing WGFP counters: {sorted(required - counters.keys())}")
-            return counters
-
-        def parse_sinks(text, expected):
-            sinks = {}
-            for line in (text.split("|") if text else []):
-                fields = line.split()
-                if not fields or not fields[0].startswith("sink") or not fields[0][4:].isascii() \
-                        or not fields[0][4:].isdecimal() or fields[0] in sinks:
-                    raise ValueError("invalid or duplicate WGFP sink")
-                fqids = [field[5:] for field in fields[1:] if field.startswith("fqid=")]
-                if (len(fqids) != 1 or not fqids[0].startswith("0x") or len(fqids[0]) <= 2
-                        or any(c not in "0123456789abcdefABCDEF" for c in fqids[0][2:])):
-                    raise ValueError(f"{fields[0]}: invalid or duplicate FQID")
-                counters = parse_counters(" ".join(fields[1:]), {"frames", "errs", "sg"})
-                sinks[fields[0]] = (int(fqids[0], 16), counters)
-            if len(sinks) != expected or len({v[0] for v in sinks.values()}) != expected:
-                raise ValueError("incomplete or duplicate WGFP sink FQIDs")
-            return sinks
-
-        for line in Path(counter_file).read_text().splitlines():
-            cell, direction, rep, phase, attempt, state, qman, sink_data = line.split("\t")
-            counters = parse_counters(state, {"sealed", "rx", "peers", "install_fail"})
-            # P6 (wgfp_rx_fast) consumes sink frames before the P3 copy: they are received too
-            optional = dict(f.partition("=")[::2] for f in state.split() if "=" in f)
-            counters["rx"] += sum(int(optional[k]) for k in ("p6_fwd", "p6_stack")
-                                  if optional.get(k, "").isdecimal())
-            counters.update(parse_counters(qman, {"sinks", "xmit_ok", "xmit_fail", "xmit_ern"}))
-            counters["sink_data"] = parse_sinks(sink_data, counters["sinks"])
-            key = (cell, direction, int(rep), int(attempt))
-            if phase not in ("before", "after") or phase in samples[key]:
-                raise ValueError(f"{cell} {direction} r{rep}: invalid or duplicate counter phase")
-            samples[key][phase] = counters
-        for tunnels, reps in expected.items():
-            cell = "wg-v4" if tunnels == 1 else str(tunnels)
-            for direction in directions:
-                for rep in range(1, reps + 1):
-                    attempts = [key for key, pair in samples.items()
-                                if key[:3] == (cell, direction, rep) and set(pair) == {"before", "after"}]
-                    if not attempts:
-                        raise ValueError(f"{cell} {direction} r{rep}: missing WGFP counter pair")
-                    pair = samples[max(attempts)]
-                    before, after = pair["before"], pair["after"]
-                    # P3 receive offload follows WGFP_RX: without it (WGFP_RX=0),
-                    # the direct-RX counter must stay still; with it, down/bidir must move it.
-                    if direction != "down" and after["sealed"] <= before["sealed"]:
-                        raise ValueError(f"{cell} {direction} r{rep}: fast-path counters did not advance")
-                    if wgfp_rx != "1" and after["rx"] != before["rx"]:
-                        raise ValueError(f"{cell} {direction} r{rep}: P3 receive counter advanced")
-                    if wgfp_rx == "1" and direction != "up" and after["rx"] <= before["rx"]:
-                        raise ValueError(f"{cell} {direction} r{rep}: P3 receive counter did not advance")
-                    if after["install_fail"] != before["install_fail"] or after["peers"] < tunnels:
-                        raise ValueError(f"{cell} {direction} r{rep}: installation or peer count failed")
-                    if direction != "down" and after["xmit_ok"] <= before["xmit_ok"]:
-                        raise ValueError(f"{cell} {direction} r{rep}: QMan submissions did not advance")
-                    if any(after[name] != before[name] for name in ("xmit_fail", "xmit_ern")):
-                        raise ValueError(f"{cell} {direction} r{rep}: QMan failures or rejections changed")
-                    old_sinks, new_sinks = before["sink_data"], after["sink_data"]
-                    # per-port sinks are created with a port's first record, so sinks may
-                    # appear during a run; one that vanishes or changes FQID is still an error
-                    if (not old_sinks.keys() <= new_sinks.keys()
-                            or any(old_sinks[name][0] != new_sinks[name][0] for name in old_sinks)):
-                        raise ValueError(f"{cell} {direction} r{rep}: sink FQ identities changed")
-                    deltas = []
-                    zero = {"frames": 0, "errs": 0, "sg": 0}
-                    for name in new_sinks:
-                        old, new = old_sinks.get(name, (0, zero))[1], new_sinks[name][1]
-                        if new["frames"] < old["frames"]:
-                            raise ValueError(f"{cell} {direction} r{rep}: sink frame counter decreased")
-                        if any(new[field] != old[field] for field in ("errs", "sg")):
-                            raise ValueError(f"{cell} {direction} r{rep}: sink errors or SG drops changed")
-                        deltas.append(new["frames"] - old["frames"])
-                    if not any(deltas):
-                        raise ValueError(f"{cell} {direction} r{rep}: sink frame counters did not advance")
-except (OSError, KeyError, TypeError, ValueError) as exc:
+        validate_wgfp_counters(counter_file, counter_expected, wgfp_rx == "1")
+except (OSError, UnicodeError, KeyError, TypeError, ValueError) as exc:
     raise SystemExit(f"ERROR: matrix validation failed: {exc}")
 
 print("\nMedian Gbit/s:")
-for tunnels in expected:
-    print(f"{tunnels}T " + " ".join(f"{d}={summary[(tunnels, d)]:.3f}" for d in directions))
+for tunnels in (1, 2, 4):
+    print(f"{tunnels}T " + " ".join(
+        f"{d}={statistics.median(summary[(4, tunnels, d)]):.3f}" for d in directions))
 if wgfp == "1":
     print(f"Per-cell WGFP counters: {counter_file}")
+if inner6 == "1":
+    print("\nIPv6 inner, fastest / median Gbit/s:")
+    for tunnels in (2, 4):
+        cells = []
+        for direction in directions:
+            values = summary[(6, tunnels, direction)]
+            cells.append(f"{direction}={max(values):.3f}/{statistics.median(values):.3f}")
+        print(f"{tunnels}T v6 " + " ".join(cells))
 PY
-if [ "$WG_INNER6" = 1 ]; then
-  python3 - "$OUTDIR/$TAG-$WHO" <<'PY6'
-import csv, statistics, sys
-print("\nIPv6 inner, fastest / median Gbit/s:")
-for a in ("2", "4"):
-    rows = list(csv.DictReader(open(f"{sys.argv[1]}-t{a}v6.csv")))
-    cells = []
-    for d in ("up", "down", "bidir"):
-        v = [float(r["gbps"]) for r in rows if r["dir"] == d and float(r["gbps"]) > 0]
-        cells.append(f"{d}={max(v):.3f}/{statistics.median(v):.3f}" if v else f"{d}=-")
-    print(f"{a}T v6 " + " ".join(cells))
-PY6
-fi
+results=(t1 t2 t4)
+if [ "$WG_INNER6" = 1 ]; then results+=(t2v6 t4v6); fi
+for result in "${results[@]}"; do
+  published="$OUTDIR/$TAG-$WHO-$result.csv"
+  if ! ln -T -- "$run_dir/$result.csv" "$published"; then
+    echo "ERROR: cannot publish $published without overwriting an existing file" >&2
+    exit 1
+  fi
+done
 echo "##### $WHO done"

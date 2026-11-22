@@ -32,12 +32,16 @@ def test_prechange_role_transition_veto_is_synchronous():
     assert prechange.index("ask_bridge_port_quiesce(port)") < prechange.index(
         "ask_hw_offload_role_prepare("
     )
-    assert "if (rc)\n\t\tgoto veto;" in prechange
-    assert "return notifier_from_errno(rc);" in prechange
+    assert "if (rc)\n\t\t\tgoto record;" in prechange
+    assert "if (rc == -ESTALE || rc == -EACCES || rc == -ESHUTDOWN)\n\t\t\tgoto fail;" in prechange
+    assert "\t\tgoto record;" in prechange
+    # Join failures veto; the kernel ignores an unlink veto, so leave records.
+    assert "return info->linking ? notifier_from_errno(rc) : NOTIFY_OK;" in prechange
+    assert "state->needs_prepare = true;" in prechange
     assert notifier.index("NETDEV_PRECHANGEUPPER") < notifier.index(
         "NETDEV_CHANGEUPPER"
     )
-    assert "state->policy_seq" in notifier
+    assert "ask_bridge_reconcile_port(port);" in notifier
 
 
 def test_failed_owner_delete_is_retained():
@@ -132,10 +136,8 @@ def test_generated_reconciliation_survives_commit_failure():
         "static int ask_bridge_role_prechange(",
         "\nstatic int ask_bridge_netdev_notifier(",
     )
-    assert "if (rc) {" in reconcile
-    assert "continue;" in reconcile
-    assert "state->pending = false;" in reconcile
-    assert "reconciliation pending" in notifier
+    assert "ask_bridge_reconcile_port(port_id);" in reconcile
+    assert "ask_bridge_reconcile_port(port);" in notifier
 
 
 def test_stale_admin_disengage_cannot_republish_saved_family():

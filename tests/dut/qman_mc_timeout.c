@@ -9,8 +9,16 @@
 
 typedef uint8_t u8;
 typedef uint32_t u32;
+typedef int raw_spinlock_t;
 
 #define DPAA_ASSERT(x)
+#define unlikely(x) (x)
+#define raw_spin_lock_irqsave(lock, flags) do { \
+	(void)(lock); (flags) = 0; assert(!mc_locked); mc_locked = true; \
+} while (0)
+#define raw_spin_unlock_irqrestore(lock, flags) do { \
+	(void)(lock); (void)(flags); assert(mc_locked); mc_locked = false; \
+} while (0)
 #define QM_MCC_VERB_VBIT 0x80
 #define QM_MCC_VERB_INITFQ_SCHED 0x41
 #define QM_MCC_VERB_QUERYFQ 0x44
@@ -42,6 +50,8 @@ struct qm_mc {
 	union qm_mc_command *cr;
 	union qm_mc_result *rr;
 	u8 rridx, vbit;
+	bool wedged;
+	raw_spinlock_t lock;
 };
 struct qm_portal { struct qm_mc mc; };
 struct qman_portal { struct qm_portal p; };
@@ -51,6 +61,7 @@ static struct qman_portal portal;
 static union qm_mc_command command;
 static union qm_mc_result responses[2];
 static bool affine_held, init_pending, query_pending, command_reused;
+static bool mc_locked __attribute__((unused));
 static bool deliver_late, timeout_query, deliver_same_verb_late, invalid_fqid;
 static unsigned int submissions, unexpected_verb_logs;
 
@@ -121,7 +132,7 @@ static void reset(void)
 	portal.p.mc.rr = responses;
 	portal.p.mc.rridx = 1;
 	portal.p.mc.vbit = QM_MCC_VERB_VBIT;
-	affine_held = init_pending = query_pending = command_reused = false;
+	affine_held = mc_locked = init_pending = query_pending = command_reused = false;
 	deliver_late = timeout_query = deliver_same_verb_late = invalid_fqid = false;
 	submissions = unexpected_verb_logs = 0;
 }

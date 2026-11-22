@@ -284,6 +284,21 @@ goto nla_put_failure;
 /* Admission budget (ask.max_flows module param); 0 = unlimited. */
 if (nla_put_u32(skb, ASK_INFO_ATTR_MAX_FLOWS, ask_flow_max_flows()))
 goto nla_put_failure;
+{
+	u64 policy_epoch = 0;
+	u8 revoke_state = ASK_REVOKE_IDLE;
+	u32 unresolved_flows = 0;
+
+	ask_policy_get_telemetry(&policy_epoch, &revoke_state,
+				 &unresolved_flows);
+	if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_POLICY_EPOCH, policy_epoch,
+			      ASK_INFO_ATTR_UNSPEC))
+		goto nla_put_failure;
+	if (nla_put_u8(skb, ASK_INFO_ATTR_REVOKE_STATE, revoke_state))
+		goto nla_put_failure;
+	if (nla_put_u32(skb, ASK_INFO_ATTR_UNRESOLVED_FLOWS, unresolved_flows))
+		goto nla_put_failure;
+}
 
 nla_nest_end(skb, nest);
 return 0;
@@ -847,12 +862,7 @@ return rc;
 static int ask_genl_flush_flows_doit(struct sk_buff *skb,
      struct genl_info *info)
 {
-struct ask_flow_table *t = ask_flow_default_table();
-
-if (!t)
-return -ENOENT;
-
-return ask_flow_flush(t);
+	return ask_flow_policy_revoke();
 }
 
 /* ------------------------------------------------------------------------- */

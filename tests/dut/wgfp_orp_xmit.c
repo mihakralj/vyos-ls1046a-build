@@ -28,6 +28,9 @@ struct dpaa_wgfp_frame { const struct qm_fd *fd; };
 static struct qman_fq wgfp_ern_fq;
 static u32 wgfp_eg_fqid[4] = { 11, 12, 13, 14 };
 static atomic64_t wgfp_xmit_ok, wgfp_xmit_fail, wgfp_orp_wait_fail;
+static atomic64_t wgfp_xmit_orp_wait_fail;
+static atomic64_t wgfp_xmit_frame_wait_fail, wgfp_xmit_poll_wait_fail;
+static atomic64_t wgfp_xmit_invalid_egress, wgfp_xmit_ern;
 static int clock_reads, busy_left, enqueues, releases;
 static u32 last_seq, last_orp, last_fqid;
 static long long now;
@@ -63,6 +66,9 @@ static void reset(bool owed, int busy)
 	busy_left = busy;
 	clock_reads = enqueues = releases = 0;
 	wgfp_xmit_ok = wgfp_xmit_fail = wgfp_orp_wait_fail = 0;
+	wgfp_xmit_orp_wait_fail = 0;
+	wgfp_xmit_frame_wait_fail = wgfp_xmit_poll_wait_fail = 0;
+	wgfp_xmit_invalid_egress = wgfp_xmit_ern = 0;
 	now = 0;
 }
 
@@ -93,6 +99,12 @@ int main(void)
 	assert(wgfp_orp_xmit(&f, 0, &out));
 	assert(enqueues == 0 && releases == 1 && wgfp_orp_ctx.owed);
 	assert(wgfp_xmit_fail == 1 && wgfp_orp_wait_fail == 1);
+	assert(wgfp_xmit_orp_wait_fail == 1);
+	assert(wgfp_xmit_frame_wait_fail == 0 && wgfp_xmit_poll_wait_fail == 0);
+	assert(wgfp_xmit_invalid_egress == 0 && wgfp_xmit_ern == 0);
+	assert(wgfp_xmit_fail == wgfp_xmit_orp_wait_fail + wgfp_xmit_ern +
+	       wgfp_xmit_frame_wait_fail + wgfp_xmit_poll_wait_fail +
+	       wgfp_xmit_invalid_egress);
 	assert(clock_reads <= 8);
 
 	puts("wgfp_orp_xmit: ok");

@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="system">
+    <children>
+      <node name="hardware">
+        <properties><help>Hardware settings</help></properties>
+        <children>
+          <node name="fan" owner="${vyos_conf_scripts_dir}/system_hardware_fan.py">
+            <properties><help>Fan thermal settings</help><priority>990</priority></properties>
+            <children>
+              <tagNode name="zone">
+                <properties>
+                  <help>Thermal zone</help>
+                  <completionHelp><list>memory serdes fman cpu-int crypto pcb cpu-ext sfp-plus</list></completionHelp>
+                  <constraint><regex>^(memory|serdes|fman|cpu-int|crypto|pcb|cpu-ext|sfp-plus)$</regex></constraint>
+                </properties>
+                <children>
+                  <leafNode name="setpoint">
+                    <properties>
+                      <help>Target temperature in degrees Celsius</help>
+                      <valueHelp><format>u32:0-100</format><description>Temperature in degrees Celsius</description></valueHelp>
+                      <constraint><regex>^([0-9]|[1-9][0-9]|100)$</regex></constraint>
+                    </properties>
+                  </leafNode>
+                  <leafNode name="critical">
+                    <properties>
+                      <help>Force full fan speed at this temperature in degrees Celsius</help>
+                      <valueHelp><format>u32:0-100</format><description>Temperature in degrees Celsius</description></valueHelp>
+                      <constraint><regex>^([0-9]|[1-9][0-9]|100)$</regex></constraint>
+                    </properties>
+                  </leafNode>
+                </children>
+              </tagNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>

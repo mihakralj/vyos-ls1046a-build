@@ -850,6 +850,16 @@ else
     echo "ERROR: $NF_FLOW_OWNER_PATCH missing"; exit 1
 fi
 
+# Priority 1: retain dst_cache on XMIT_DIRECT for route/GC invalidation and add
+# fenced NAT-preserving SW+HW flowtable revocation. Applies after 150.
+NF_FLOW_REVOKE_PATCH="$COMMON_FIXES_DIR/155-nf-flow-offload-direct-dst-and-revoke.patch"
+if [ -f "$NF_FLOW_REVOKE_PATCH" ]; then
+    echo "### Staging $(basename "$NF_FLOW_REVOKE_PATCH") (XMIT_DIRECT dst_check and fenced revocation)"
+    cp "$NF_FLOW_REVOKE_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "ERROR: $NF_FLOW_REVOKE_PATCH missing"; exit 1
+fi
+
 ### ASK2 in-tree kernel patches: none.
 #
 # There is no flavor-gated patch bucket any more. This block used to stage
@@ -3026,25 +3036,28 @@ if [ -d drivers/soc/fsl/qbman ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_303.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_305.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_306.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_319.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-update.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-owner.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-containment.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --check-retire-snapshot 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --check-verb 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --check-shutdown-responses 2>&1
-    python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" --characterize 2>&1
-    echo "### QMan: F-297/F-298/F-300 CGR host containment verified"
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-mc-timeout.py" "$(pwd)" 2>&1
+    echo "### QMan: F-297/F-298/F-300/F-319 CGR, MC timeout, and shutdown host gates passed"
 fi
 
 if [ -f drivers/crypto/caam/qi.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_301.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_302.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_304.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_318.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" --check-eqcr 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" --check-crypto 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" --check-init 2>&1
-    echo "### CAAM QI: F-301/F-302/F-304 targeted host tests passed"
+    python3 "${GITHUB_WORKSPACE}/bin/test-caam-qi-ownership.py" "$(pwd)" --check-release 2>&1
+    echo "### CAAM QI: F-301/F-302/F-304/F-318 targeted host tests passed"
 fi
 
 # F-210/F-211/F-212 (T-M6-1 IPv6 productization steps 2-4, 2026-08-19):
@@ -3128,14 +3141,30 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-scan.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
     echo "### fman_pcd.c: F-315 stats scan check passed"
+    # F-321 (T1(f)): strict per-port ehash table isolation so unrelated ports
+    # do not block port disengage with -EBUSY.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_321.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f321-fixup.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_prepared_disarm,fman_arm_table 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
+    echo "### fman_pcd.c/dpaa_ethtool.c: F-321 per-port ehash isolation verified"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_294.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-netns-guard 2>&1
     echo "### dpaa_eth.c: F-294 immutable DPAA netdev identity verified"
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_295.py" 2>&1
-    # F-316: per-FQ tail-drop for ask.ko's per-flow offload TX FQ set.
+    # F-316: shared frame-mode QMan CGR for offload no-confirm TX FQs.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_316.py" 2>&1
+    # F-320: contain DPAA FQ teardown failures and retain non-devm parent resources.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_320.py" 2>&1
+    # F-322: WGFP-v2 confirmed TX FQ on offload_cgr, batched BMan release, and bpid=0xff guards.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_322.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f322-fixup.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-fq-lifetime 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-offload-fq.py" "$(pwd)" 2>&1
-    echo "### dpaa_eth.c: F-295 offload FQ initialization quarantine verified"
+    python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-containment.py" "$(pwd)" --require-offload-cgr 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-nf-flow-withdrawal.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-nf-flow-revocation.py" "$(pwd)" 2>&1
+    echo "### dpaa_eth.c / nf_flow_table: F-295/F-316/F-320 and P1 flowtable revocation verified"
     echo "### fman_pcd.c: F-226 dual-lane v6 enable (kill LCV schemes/gro+16, add HOPLIMIT)"
     echo "### fman_pcd.c: F-230 FE-VM NAT/PAT opcode emitter (T-M6-7.1, dormant unless nat->flags)"
     # T-M6-8 VLAN RE-ARCHITECTURE R1 (2026-08-26, plans/ASK2-VLAN-REARCH.md):

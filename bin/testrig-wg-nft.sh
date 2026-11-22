@@ -13,8 +13,8 @@ comment="wgrig-$token"
 
 case $operation in
   add)
-    if [ "$#" -ne 4 ]; then
-      echo "ERROR: expected add <token> <mode> <port>" >&2
+    if [ "$#" -lt 4 ]; then
+      echo "ERROR: expected add <token> <mode> <port> [family peer dut]" >&2
       exit 2
     fi
     mode=$3
@@ -22,8 +22,30 @@ case $operation in
     case $port in ''|*[!0-9]*) echo "ERROR: invalid UDP port" >&2; exit 2;; esac
     [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || exit 2
     case $mode in
-      1) incoming="udp dport $port notrack"; outgoing="udp sport $port notrack";;
-      2) incoming=notrack; outgoing=notrack;;
+      1|2)
+        [ "$#" -eq 4 ] || { echo "ERROR: unexpected NOTRACK arguments" >&2; exit 2; }
+        if [ "$mode" = 1 ]; then
+          incoming="udp dport $port notrack"; outgoing="udp sport $port notrack"
+        else
+          incoming=notrack; outgoing=notrack
+        fi;;
+      3)
+        [ "$#" -eq 7 ] || { echo "ERROR: scoped NOTRACK needs family, peer and DUT addresses" >&2; exit 2; }
+        family=$5
+        peer=$6
+        dut=$7
+        [ -n "$peer" ] && [ -n "$dut" ] || { echo "ERROR: empty endpoint" >&2; exit 2; }
+        case $family in
+          4)
+            case $peer$dut in *[!0-9.]*) echo "ERROR: invalid IPv4 endpoint" >&2; exit 2;; esac
+            prefix=ip;;
+          6)
+            case $peer$dut in *[!0-9a-fA-F:]*) echo "ERROR: invalid IPv6 endpoint" >&2; exit 2;; esac
+            prefix=ip6;;
+          *) echo "ERROR: invalid endpoint family" >&2; exit 2;;
+        esac
+        incoming="$prefix saddr $peer $prefix daddr $dut udp sport $port udp dport $port notrack"
+        outgoing="$prefix saddr $dut $prefix daddr $peer udp sport $port udp dport $port notrack";;
       *) echo "ERROR: invalid NOTRACK mode" >&2; exit 2;;
     esac
     nft -f - <<EOF

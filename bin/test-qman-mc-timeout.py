@@ -75,9 +75,17 @@ def run(kernel, controls, check_retire_snapshot, check_verb, check_shutdown_resp
             "int qman_query_fq_np",
         )
     )
-    macro_start = qman.index("#define qm_mr_drain(p, V)")
+    macro_match = re.search(r"(?m)^#define qm_mr_drain\(", qman)
+    if not macro_match:
+        raise ValueError("qm_mr_drain macro not found")
+    macro_start = macro_match.start()
     macro_end = qman.index("int qman_shutdown_fq(", macro_start)
+    drain_timeout = (
+        "#define QM_SHUTDOWN_DRAIN_TIMEOUT\t10000\n"
+        if "QM_SHUTDOWN_DRAIN_TIMEOUT" in qman else ""
+    )
     shutdown = "\n".join((
+        drain_timeout,
         function(qman, "static int _qm_mr_consume_and_match_verb"),
         function(qman, "static int _qm_dqrr_consume_and_match"),
         qman[macro_start:macro_end],

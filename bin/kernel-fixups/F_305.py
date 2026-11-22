@@ -51,6 +51,9 @@ def inspect(source, prefix, old, new):
 def main():
     try:
         source = QMAN.read_text()
+        if "F-319: serialize QMan portal MC" in source:
+            print("### F-305: already applied (superseded by F-319)")
+            return 0
         sections = (
             inspect(source, "int qman_query_fq(", OLD, NEW),
             inspect(source, "int qman_query_fq_np(", OLD_NP, NEW_NP),

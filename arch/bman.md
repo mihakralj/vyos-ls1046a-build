@@ -83,9 +83,10 @@ A pool has two distinct low states:
 - FBPR low-watermark (`FBPR_FP_LWIT`) raises `FLWI` when the *backing* FBPR free pool runs low.
 
 > **ASK2:** offloaded RX uses BMan pools for frame buffers. **Pool sizing is a correctness issue**:
-> under-provisioned pools → out-of-buffer discards (counted in `FMBM_RFDC`) that look like silent
-> packet loss. Wire HW depletion thresholds so the MAC pauses rather than drops. Buffer-size vs.
-> pool-count tradeoffs interact with the MURAM FIFO budget ([`muram.md`](muram.md)).
+> under-provisioned pools → out-of-buffer discards (counted in `FMBM_RODC` when BMI statistics are
+> enabled) that look like silent packet loss. `FMBM_RFDC` is the generic RX frame-discard counter,
+> not a substitute for `FMBM_RODC`. Wire HW depletion thresholds so the MAC pauses rather than
+> drops. Buffer-size vs. pool-count tradeoffs interact with the MURAM FIFO budget ([`muram.md`](muram.md)).
 
 ---
 

@@ -172,7 +172,7 @@ static struct ask_hw_pcd hardware = {
 	.lock = { .native = PTHREAD_MUTEX_INITIALIZER },
 	.fman = &fman,
 };
-static bool hw_available = true, l2_available = true, flow_valid, debug_direct;
+static bool hw_available = true, l2_available = true, l2_tearing_down = false, flow_valid, debug_direct;
 static u8 flow_action = ASK_BRIDGE_ACT_POP;
 static int add_result, adds, delete_result, deletes;
 static bool live_present;
@@ -200,6 +200,33 @@ static struct ask_hw_pcd *ask_hw_l2_port(struct ask_hw_pcd *h, u8 port)
 {
 	assert(h->lock.held && port == 0x10);
 	return l2_available ? h : NULL;
+}
+
+static bool ask_hw_l2_port_tearing_down(struct ask_hw_pcd *h, u8 port)
+{
+	assert(h->lock.held && port == 0x10);
+	return l2_tearing_down;
+}
+
+static int l2_fq_users;
+static int ask_hw_l2_fq_get_locked(struct ask_hw_pcd *h, u32 fqid)
+{
+	assert(h->lock.held && fqid);
+	l2_fq_users++;
+	return 0;
+}
+static void ask_hw_l2_fq_put_locked(struct ask_hw_pcd *h, u32 fqid)
+{
+	assert(h->lock.held);
+	if (!fqid)
+		return;
+	if (l2_fq_users > 0)
+		l2_fq_users--;
+}
+static void ask_hw_l2_fq_put(u32 fqid)
+{
+	if (fqid && l2_fq_users > 0)
+		l2_fq_users--;
 }
 
 static unsigned long ask_hw_get_enq_fe_off(void) { return 1; }
@@ -553,10 +580,27 @@ int main(void)
 
 	r = new_record(2);
 	l2_available = false;
+	l2_tearing_down = false;
 	ask_bridge_rec_del(r);
 	l2_available = true;
 	assert_unsettled(r, 0);
 	discard_record(r);
+
+	/* T1(c): delete racing a clean port disengage must defer (-EAGAIN) rather
+	 * than permanently poisoning the record as unsettled before forget_port. */
+	r = new_record(2);
+	l2_available = false;
+	l2_tearing_down = true;
+	assert(ask_bridge_rec_del(r) == -EAGAIN);
+	assert(!r->unsettled && !r->dead && ask_bridge_n_recs == 1 && module_refs == 1);
+	ask_bridge_forget_port(0x10);
+	l2_tearing_down = false;
+	l2_available = true;
+	assert(r->dead && !r->unsettled);
+	ask_bridge_resync();
+	assert(ask_bridge_n_recs == 0 && module_refs == 0);
+	releases = 0;
+	freed = 0;
 
 	for (unsigned int i = 0; i < sizeof(errors) / sizeof(errors[0]); i++) {
 		r = new_record(3 + i);
