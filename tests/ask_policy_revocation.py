@@ -83,6 +83,22 @@ def test_policy_revocation_uapi_and_wiring():
     # Never falsely transition to ASK_REVOKE_CONTAINED without proven hardware quarantine.
     assert "= ASK_REVOKE_CONTAINED" not in offload
 
+    # Stage 3 (#5): G3 FIB/FDB overflow caps widened to >= 256 and FIB delay <= 10 ms.
+    assert "#define ASK_FDBCHG_MAX\t\t256" in offload
+    assert "#define ASK_FIBCHG_MAX\t\t256" in offload
+    assert "#define ASK_FIBCHG_DELAY_MS\t10" in offload
+
+    # Stage 3 (#6): neigh updates use per-neighbour bucketed epoch before walk
+    # instead of bumping global ask_policy_epoch (protecting parked flows & unrelated REPLACEs).
+    neigh_fn = _slice(offload, "bool ask_flow_neigh_mac_changed(", "\nEXPORT_SYMBOL_GPL(ask_flow_neigh_mac_changed);")
+    assert "ask_policy_bump_epoch(" not in neigh_fn
+    assert neigh_fn.index("\task_neigh_epoch_bump(") < neigh_fn.index("ask_flow_walk(t,")
+    assert "ask_neigh_epoch_read(" in replace
+    assert "ask_neigh_epoch_current(" in replace
+    poll_fn = _slice(offload, "static void ask_flow_pending_poll_fn(", "\n/* ------------------------------------------------------------------------- */\n/* Per-block state")
+    assert poll_fn.index("ask_neigh_epoch_read(") < poll_fn.index("neigh_lookup(")
+    assert "ask_neigh_republish_fenced(" in poll_fn
+
 
 def test_policy_revocation_state_machine(tmp_path):
     source = OFFLOAD.read_text()

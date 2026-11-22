@@ -120,6 +120,8 @@ struct ask_flow_key {
 	u8 l3_proto, l4_proto, port_id, vlan_edit_flags, nat_flags;
 	__be16 vlan_push_tci, vlan_push_tpid;
 	u8 next_hop_mac[ETH_ALEN], egress_mac[ETH_ALEN];
+	u32 nh_ifindex;
+	u8 nh_ip[16];
 	u64 family_policy_seq;
 };
 enum ask_hw_dir { ASK_DIR_FWD };
@@ -217,6 +219,11 @@ static bool ask_policy_epoch_is_current(u64 epoch)
 {
 	return epoch != 0;
 }
+static u64 ask_neigh_epoch_read(int ifindex, u8 l3_proto, const u8 *ip)
+{
+	(void)ifindex; (void)l3_proto; (void)ip;
+	return 1;
+}
 static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 			       const struct ask_flow_key *key, u32 oif,
 			       u32 action_flags, enum ask_hw_dir dir,
@@ -236,6 +243,16 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 	if (key->vlan_edit_flags & (ASK_VLANF_PPPOE_STRIP | ASK_VLANF_PPPOE_INSERT))
 		atomic_store(&live_pppoe, true);
 	return 0;
+}
+static int ask_neigh_republish_fenced(struct ask_flow_table *t, u64 cookie,
+				      const struct ask_flow_key *key, u32 oif,
+				      u32 action_flags, enum ask_hw_dir dir,
+				      u64 generation, u64 policy_epoch,
+				      u64 neigh_epoch, bool check_neigh)
+{
+	(void)neigh_epoch; (void)check_neigh;
+	return ask_neigh_republish(t, cookie, key, oif, action_flags, dir,
+				   generation, policy_epoch);
 }
 
 struct net_device { int ifindex, type; };

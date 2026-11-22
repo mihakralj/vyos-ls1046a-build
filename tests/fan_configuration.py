@@ -153,6 +153,7 @@ def modules(monkeypatch):
     commit = types.ModuleType('vyos.utils.commit')
     commit.acquire_commit_lock_file = lambda: (object(), '')
     commit.release_commit_lock_file = lambda lock: None
+    commit.commit_in_progress2 = lambda: False
     for name, module in {'vyos': vyos, 'vyos.base': base, 'vyos.fan_control': fan, 'vyos.config': config,
                          'vyos.utils': utils, 'vyos.utils.boot': boot,
                          'vyos.utils.commit': commit}.items():
@@ -705,6 +706,75 @@ def test_reconcile_success_delete_and_failed_commit(tmp_path, monkeypatch):
     assert not script.PENDING.exists()
 
 
+def test_steady_state_reconcile_never_takes_commit_lock(tmp_path, monkeypatch):
+    fan, _ = modules(monkeypatch)
+    fan.STATE = tmp_path / 'state'
+    fan.APPLIED = tmp_path / 'applied'
+    script = load_script(monkeypatch, ROOT / 'data/vyos-1x-files/src/conf_mode/system_hardware_fan.py',
+                         'fan_conf_steady_test')
+    script.PENDING = tmp_path / 'pending'
+
+    class FakeConfig:
+        def get_config_tree(self, effective=False):
+            return {}
+
+        def get_config_dict(self, path, effective=False, get_first_key=False):
+            return {'zone': {'memory': {'setpoint': '55'}}}
+
+    script.Config = FakeConfig
+    script.apply({})
+    script.reconcile()
+    publish_test_ack(fan, fan.read_snapshot())
+    script.reconcile()
+    assert not script.PENDING.exists()
+    # Steady state: an operator commit must never find the lock taken by fan reconcile.
+    monkeypatch.setattr(script, 'acquire_commit_lock_file',
+                        lambda: (_ for _ in ()).throw(AssertionError('steady state took the commit lock')))
+    fan.invalidate_verification()
+    fan.write_verification(fan.read_snapshot(), fan.load_snapshot_record()[2])
+    before = json.loads(fan.verification_path().read_text())['updated']
+    monkeypatch.setattr(fan, 'clock_now', lambda: before + 1.0)
+    script.reconcile()
+    assert json.loads(fan.verification_path().read_text())['updated'] == before + 1.0
+    # A commit racing the lock-free read defers to the locked path, which yields to it.
+    monkeypatch.setattr(script, 'commit_in_progress2', lambda: True)
+    monkeypatch.setattr(script, 'acquire_commit_lock_file', lambda: (None, script.COMMIT_LOCK_BUSY))
+    script.reconcile()
+    assert fan.verification_path().exists() and not script.PENDING.exists()
+
+    # Fast fan commit creating PENDING between Config() read and write_verification()
+    # must defer to the locked path instead of extending the stale verification lease.
+    locked_calls = []
+    class RacingConfig(FakeConfig):
+        def get_config_dict(self, path, effective=False, get_first_key=False):
+            script.PENDING.write_text(str(fan.clock_now()))
+            return super().get_config_dict(path, effective=effective, get_first_key=get_first_key)
+
+    monkeypatch.setattr(script, 'commit_in_progress2', lambda: False)
+    script.Config = RacingConfig
+    monkeypatch.setattr(script, 'acquire_commit_lock_file',
+                        lambda: (locked_calls.append(True), (None, script.COMMIT_LOCK_BUSY))[1])
+    script.reconcile()
+    assert locked_calls == [True]
+    script.PENDING.unlink(missing_ok=True)
+
+    # Second commit_in_progress2() raising OSError must defer to locked path (not bypass fail_closed).
+    script.Config = FakeConfig
+    calls = iter([False, OSError('lock probe failed')])
+    def flaky_probe():
+        val = next(calls)
+        if isinstance(val, Exception):
+            raise val
+        return val
+
+    monkeypatch.setattr(script, 'commit_in_progress2', flaky_probe)
+    monkeypatch.setattr(script, 'acquire_commit_lock_file',
+                        lambda: (_ for _ in ()).throw(OSError('lock broken')))
+    with pytest.raises(OSError, match='lock broken'):
+        script.reconcile()
+    assert not fan.verification_path().exists() and script.PENDING.exists()
+
+
 def test_reconcile_waits_for_boot_lock_and_retries_failure(tmp_path, monkeypatch):
     fan, _ = modules(monkeypatch)
     fan.STATE = tmp_path / 'state'
@@ -786,6 +856,17 @@ def controller_fixture(tmp_path, monkeypatch, name, ready=True):
                                   'tach_file': 'fan1_input'}], '', dict(paths), {0x30: 60})
     ctrl.next_rescan_t = float('inf')
     return fan, daemon, ctrl, writes
+
+
+def test_persistent_sensor_failure_logs_once_and_holds_max(tmp_path, monkeypatch):
+    _, daemon, ctrl, writes = controller_fixture(tmp_path, monkeypatch, 'fan_pid_sensor_log_test')
+    logs = []
+    monkeypatch.setattr(daemon.syslog, 'syslog', lambda level, msg: logs.append(msg))
+    monkeypatch.setattr(daemon, 'find_thermal_zones', lambda: {})
+    ctrl.zone_paths.pop(daemon.ZONES[-1].name)
+    for _ in range(5):
+        assert ctrl.step()[0]['fan1'] == 255
+    assert sum('sensor readings unavailable' in m for m in logs) == 1
 
 
 @pytest.mark.parametrize('fault', ['missing', 'expired'])
@@ -2939,6 +3020,7 @@ def test_pinned_commit_lock_blocks_reconcile_and_covers_publication(tmp_path, mo
     script.PENDING = tmp_path / 'pending'
     script.acquire_commit_lock_file = lock_api.acquire_commit_lock_file
     script.release_commit_lock_file = lock_api.release_commit_lock_file
+    script.commit_in_progress2 = lock_api.commit_in_progress2
     context = multiprocessing.get_context('fork')
 
     def check_lock_is_held():

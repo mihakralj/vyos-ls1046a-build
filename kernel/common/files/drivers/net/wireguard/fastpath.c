@@ -2033,8 +2033,9 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 		u8 *dst;
 
 		if (unlikely(!skb)) {
-			dpaa_wgfp_drop(f);
-			return 1;
+			if (!READ_ONCE(pst->stopping))
+				mod_delayed_work(system_wq, &pst->refresh, 0);
+			goto decline;
 		}
 		skb_reserve(skb, room);
 		dst = skb_put(skb, plain + POLY1305_DIGEST_SIZE);

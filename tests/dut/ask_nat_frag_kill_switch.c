@@ -142,10 +142,13 @@ int main(void)
 	check_switch(ask_nat66_offload_set, &ask_nat66_offload,
 		     &ask_nat66_disable_incomplete,
 		     &nat66_flush_calls, &nat66_flush_rc, false);
-	/* A1: ipv6_hw_frag defaults OFF (RFC 8200 safe); opt in before testing disable path. */
+	/* A1: ipv6_hw_frag defaults OFF (RFC 8200 safe); writing 0 while already 0
+	 * must be a no-op (must not flush IPv6 SW flows). Opt in before testing 1->0. */
 	assert(!ask_ipv6_hw_frag);
 	{
 		struct kernel_param kp = { .arg = &ask_ipv6_hw_frag };
+		assert(ask_ipv6_hw_frag_set("0", &kp) == 0 && !ask_ipv6_hw_frag);
+		assert(v6_frag_flush_calls == 0);
 		assert(ask_ipv6_hw_frag_set("1", &kp) == 0 && ask_ipv6_hw_frag);
 	}
 	check_switch(ask_ipv6_hw_frag_set, &ask_ipv6_hw_frag,

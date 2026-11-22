@@ -409,8 +409,11 @@ int main(void)
 	assert(!families[0x10]);
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
 					     false, ASK_FAM_V6, 0) == -ESHUTDOWN);
+	/* A bridge re-role (if_engaged) of a retained, unengaged port is a
+	 * no-op: it must neither veto the topology change nor republish. */
 	assert(ask_hw_offload_engage_role(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					  true, ASK_FAM_V6) == -ESHUTDOWN);
+					  true, ASK_FAM_V6) == 0);
+	assert(!families[0x10] && h->port[0].fe_retained);
 	ask_hw_offload_set_family(0x10, ASK_FAM_V6);
 	assert(!families[0x10]);
 	assert(ask_hw_offload_disengage(0x10) == -ESHUTDOWN);

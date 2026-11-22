@@ -797,6 +797,7 @@ class Controller:
         self.active_generation = None
         self.ack_failed = False
         self.output_failed = not initial_export_ok
+        self.logged_sensor_failures = {}
 
     def rescan_missing_zones(self) -> None:
         """Pick up zones whose sensor appeared after startup (late module bind)."""
@@ -1117,7 +1118,12 @@ class Controller:
             for name in sensor_failures:
                 self.zone_paths.pop(name, None)
             self.next_rescan_t = min(self.next_rescan_t, time.monotonic() + TICK_SECONDS)
-            syslog.syslog(syslog.LOG_ERR, f"fan-pid: sensor readings unavailable: {sensor_failures}")
+            # Log each change of the failure set, not every tick.
+            if sensor_failures != self.logged_sensor_failures:
+                syslog.syslog(syslog.LOG_ERR, f"fan-pid: sensor readings unavailable: {sensor_failures}")
+        elif self.logged_sensor_failures:
+            syslog.syslog(syslog.LOG_INFO, "fan-pid: sensor readings restored")
+        self.logged_sensor_failures = dict(sensor_failures)
         for z in ZONES:
             if z.name in sensor_failures or z.name not in temperatures:
                 continue
@@ -1519,7 +1525,7 @@ def main() -> int:
     missing = [z.name for z in ZONES if z.name not in zone_paths]
     if missing:
         syslog.syslog(syslog.LOG_WARNING,
-                      f"fan-pid: thermal zones missing (will skip): {','.join(missing)}")
+                      f"fan-pid: thermal zones missing (PWM held at MAX until present): {','.join(missing)}")
     syslog.syslog(syslog.LOG_INFO,
                   f"fan-pid: controlling {len(zone_paths)} zones: {','.join(zone_paths)}")
 

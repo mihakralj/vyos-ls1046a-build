@@ -79,6 +79,8 @@ struct ask_flow_key {
 	u8 l3_proto, port_id, nat_flags, vlan_edit_flags;
 	u8 next_hop_mac[ETH_ALEN], egress_mac[ETH_ALEN];
 	u8 nat_src_ip[16], nat_dst_ip[16];
+	u32 nh_ifindex;
+	u8 nh_ip[16];
 	u16 nat_sport, nat_dport, egress_mtu, vlan_ingress_vid;
 	u16 vlan_push_tci, vlan_push_tpid, pppoe_push_sid;
 	struct ask_pppoe_info pppoe_session;
@@ -293,6 +295,16 @@ static bool ask_policy_epoch_is_current(u64 epoch)
 {
 	return epoch != 0;
 }
+static bool ask_neigh_epoch_current(int ifindex, u8 l3_proto, const u8 *ip, u64 epoch)
+{
+	(void)ifindex; (void)l3_proto; (void)ip; (void)epoch;
+	return true;
+}
+static int ask_neigh_republish_fenced(struct ask_flow_table *t, u64 cookie,
+				      const struct ask_flow_key *key, u32 oif,
+				      u32 action_flags, enum ask_hw_dir dir,
+				      u64 generation, u64 policy_epoch,
+				      u64 neigh_epoch, bool check_neigh);
 static bool ask_flow_gen_tombstone_if_current(struct ask_flow_table *table,
 					      u64 cookie, u64 generation)
 {

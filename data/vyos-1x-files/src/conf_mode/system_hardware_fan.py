@@ -14,7 +14,7 @@ from vyos.fan_control import (PENDING_TIMEOUT, boot_failure_latched, boot_failur
                               load_snapshot_record, mark_boot_failed, mark_boot_ready, mark_pending,
                               read_applied, read_verification, write_snapshot, write_verification)
 from vyos.utils.boot import boot_configuration_complete, boot_configuration_success
-from vyos.utils.commit import acquire_commit_lock_file, release_commit_lock_file
+from vyos.utils.commit import acquire_commit_lock_file, commit_in_progress2, release_commit_lock_file
 
 PATH = ['system', 'hardware', 'fan']
 PENDING = Path('/run/vyos-fan-pending')
@@ -108,8 +108,38 @@ def boot_approved():
     return boot_approval() == 'success'
 
 
+def _refresh_steady_state():
+    """Refresh the verification lease without the commit lock when nothing is
+    pending and the published snapshot already matches the running config.
+
+    VyOS commits take the commit lock non-blocking, so holding it on every tick
+    makes operator commits fail at random. Any doubt (pending work, read error,
+    a commit around the read) returns False and defers to the locked path.
+    """
+    try:
+        if PENDING.exists() or not boot_marker().exists() or commit_in_progress2():
+            return False
+        conf = Config()
+        if conf.get_config_tree(effective=True) is None:
+            return False
+        values = effective(conf.get_config_dict(PATH, effective=True, get_first_key=True))
+        current, _, generation = load_snapshot_record()
+        read_verification(values, generation)
+        applied = read_applied()
+        if (current != values or applied['zones'] != values or applied['generation'] != generation or
+                PENDING.exists() or not boot_marker().exists() or
+                commit_in_progress2() or not boot_approved()):
+            return False
+        write_verification(values, generation)
+    except Exception:
+        return False
+    return True
+
+
 def reconcile():
     if not boot_approved():
+        return
+    if _refresh_steady_state():
         return
     try:
         lock, message = acquire_commit_lock_file()

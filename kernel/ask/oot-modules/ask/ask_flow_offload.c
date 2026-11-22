@@ -39,6 +39,7 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/list.h>
+#include <linux/jhash.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
@@ -150,7 +151,7 @@ static int ask_flow_v6_frag_flush_sync(void);
 
 static int ask_ipv6_hw_frag_set(const char *val, const struct kernel_param *kp)
 {
-	bool enabled;
+	bool enabled, prev;
 	int rc;
 
 	if (!try_module_get(THIS_MODULE))
@@ -163,8 +164,10 @@ static int ask_ipv6_hw_frag_set(const char *val, const struct kernel_param *kp)
 		rc = -EBUSY;
 		goto unlock;
 	}
+	prev = READ_ONCE(ask_ipv6_hw_frag);
 	WRITE_ONCE(ask_ipv6_hw_frag, enabled);
-	if (ask_hw_is_ready() && !enabled) {
+	if (ask_hw_is_ready() && !enabled &&
+	    (prev || ask_ipv6_hw_frag_disable_incomplete)) {
 		rc = ask_flow_v6_frag_flush_sync();
 		ask_ipv6_hw_frag_disable_incomplete = rc != 0;
 		if (rc)
@@ -667,6 +670,7 @@ struct ask_flow_pending {
 	u64                     nat44_epoch;
 	u64                     pppoe_session_epoch;
 	u64                     policy_epoch;
+	u64                     neigh_epoch;
 };
 
 enum ask_g3_subsys {
@@ -681,9 +685,22 @@ static void ask_policy_bump_epoch(void);
 static u64 ask_policy_mark_g3_dirty(enum ask_g3_subsys subsys);
 static void ask_policy_mark_g3_settled(enum ask_g3_subsys subsys, u64 epoch);
 static void ask_policy_note_unresolved(u32 count, bool identity_lost);
+static void ask_neigh_epoch_bump(int ifindex, u8 l3_proto, const u8 *ip);
+static u64 ask_neigh_epoch_read(int ifindex, u8 l3_proto, const u8 *ip);
+static bool ask_neigh_epoch_current(int ifindex, u8 l3_proto, const u8 *ip,
+				    u64 epoch);
 static void ask_policy_revoke_exit(void);
-static void ask_flow_revoke_neigh_sw(int ifindex, const u8 *new_mac);
+static void ask_flow_revoke_neigh_sw(int ifindex, u8 l3_proto,
+				     const u8 *dst_ip, const u8 *new_mac,
+				     const u8 (*old_macs)[ETH_ALEN],
+				     unsigned int n_old_macs,
+				     bool old_mac_overflow);
 
+static int ask_neigh_republish_fenced(struct ask_flow_table *t, u64 cookie,
+				      const struct ask_flow_key *key, u32 oif,
+				      u32 action_flags, enum ask_hw_dir dir,
+				      u64 generation, u64 policy_epoch,
+				      u64 neigh_epoch, bool check_neigh);
 static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 			       const struct ask_flow_key *key, u32 oif,
 			       u32 action_flags, enum ask_hw_dir dir,
@@ -1047,9 +1064,14 @@ static int ask_flow_pending_enqueue(u64 cookie,
 					    p->cookie);
 			goto resolved_next;
 		}
-		/* Re-resolve so we always pick up the fresh n->ha. */
+		/* Snapshot neigh epoch before re-resolving n->ha. */
+		p->neigh_epoch = ask_neigh_epoch_read(dev->ifindex,
+						      ASK_FLOW_L3_IPV4,
+						      (const u8 *)&dst_ip);
 		ask_resolve_neigh_v4(dev, dst_ip,
 				     p->key.next_hop_mac, p->key.egress_mac);
+		p->key.nh_ifindex = dev->ifindex;
+		memcpy(p->key.nh_ip, &dst_ip, sizeof(dst_ip));
 		/* F-111: Drop pending entries with multicast/broadcast
 		 * next-hop — these can never be HW-offloaded. */
 		if (is_multicast_ether_addr(p->key.next_hop_mac)) {
@@ -1096,9 +1118,10 @@ static int ask_flow_pending_enqueue(u64 cookie,
 		 * defer time and replay it here.
 		 */
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
-		rc = ask_neigh_republish(t, p->cookie, &p->key, p->oif,
-					 p->action_flags, p->dir,
-					 p->generation, p->policy_epoch);
+		rc = ask_neigh_republish_fenced(t, p->cookie, &p->key, p->oif,
+						p->action_flags, p->dir,
+						p->generation, p->policy_epoch,
+						p->neigh_epoch, true);
 		if (rc == -EEXIST)
 			rc = 0;
 		if (rc == 0) {
@@ -1138,6 +1161,7 @@ struct ask_neigh_mac_fixup {
 	u64                 cookie;
 	u64                 fe_token;
 	struct ask_flow_key key;    /* copy with next_hop_mac already patched */
+	u8                  old_mac[ETH_ALEN]; /* stale next-hop MAC before patch */
 	u32                 oif;
 	u32                 action_flags;
 	u8                  dir;
@@ -1187,6 +1211,7 @@ static int ask_neigh_mac_collect(struct ask_flow *f, void *arg)
 	fx->cookie       = f->cookie;
 	fx->fe_token     = f->fe_token;
 	fx->key          = f->key;
+	ether_addr_copy(fx->old_mac, f->key.next_hop_mac);
 	ether_addr_copy(fx->key.next_hop_mac, ctx->new_mac);
 	fx->oif          = f->oif;
 	fx->action_flags = f->action_flags;
@@ -1302,6 +1327,17 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 			       u32 action_flags, enum ask_hw_dir dir,
 			       u64 generation, u64 policy_epoch)
 {
+	return ask_neigh_republish_fenced(t, cookie, key, oif, action_flags,
+					  dir, generation, policy_epoch, 0,
+					  false);
+}
+
+static int ask_neigh_republish_fenced(struct ask_flow_table *t, u64 cookie,
+				      const struct ask_flow_key *key, u32 oif,
+				      u32 action_flags, enum ask_hw_dir dir,
+				      u64 generation, u64 policy_epoch,
+				      u64 neigh_epoch, bool check_neigh)
+{
 	struct ask_flow *cur;
 	bool hw_backed = false;
 	u32 hw_id = 0;
@@ -1309,7 +1345,10 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 	int rc;
 
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
-	if (!ask_policy_epoch_is_current(policy_epoch))
+	if (!ask_policy_epoch_is_current(policy_epoch) ||
+	    (check_neigh && key->nh_ifindex &&
+	     !ask_neigh_epoch_current(key->nh_ifindex, key->l3_proto,
+				      key->nh_ip, neigh_epoch)))
 		return -EAGAIN;
 	rc = ask_flow_insert_owned_identified(t, cookie, key, oif,
 					      action_flags, dir, generation,
@@ -1330,7 +1369,10 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 		return 0;
 
 	if (!ask_flow_gen_is_current(t, cookie, generation) ||
-	    !ask_policy_epoch_is_current(policy_epoch)) {
+	    !ask_policy_epoch_is_current(policy_epoch) ||
+	    (check_neigh && key->nh_ifindex &&
+	     !ask_neigh_epoch_current(key->nh_ifindex, key->l3_proto,
+				      key->nh_ip, neigh_epoch))) {
 		(void)ask_flow_remove_owned_identified(t, cookie, generation,
 						       fe_token);
 		return -EAGAIN;
@@ -1355,7 +1397,10 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
 			return rc;
 		return -ESTALE;
 	}
-	if (!ask_policy_epoch_is_current(policy_epoch)) {
+	if (!ask_policy_epoch_is_current(policy_epoch) ||
+	    (check_neigh && key->nh_ifindex &&
+	     !ask_neigh_epoch_current(key->nh_ifindex, key->l3_proto,
+				      key->nh_ip, neigh_epoch))) {
 		bool superseded = false;
 
 		if (!ask_flow_gen_tombstone_if_current(t, cookie, generation)) {
@@ -1388,12 +1433,79 @@ static int ask_neigh_republish(struct ask_flow_table *t, u64 cookie,
  * window a rebuilt flow has no HW backing the kernel SW path carries it, so no
  * packet is lost.  Runs in PROCESS context (workqueue) — insert/remove sleep.
  */
+#define ASK_NEIGH_OLD_MAC_MAX 16
+#define ASK_NEIGH_EPOCH_BUCKETS 64
+
+static atomic64_t ask_neigh_mac_epoch[ASK_NEIGH_EPOCH_BUCKETS];
+
+static unsigned int ask_neigh_epoch_slot(int ifindex, u8 l3_proto, const u8 *ip)
+{
+	u32 h = jhash(ip, ask_flow_l3_addr_len(l3_proto),
+		      ((u32)ifindex << 8) ^ l3_proto);
+
+	return h & (ASK_NEIGH_EPOCH_BUCKETS - 1);
+}
+
+static void ask_neigh_epoch_bump(int ifindex, u8 l3_proto, const u8 *ip)
+{
+	if (ifindex <= 0 || !ip)
+		return;
+	atomic64_inc_return(&ask_neigh_mac_epoch[ask_neigh_epoch_slot(ifindex,
+								      l3_proto,
+								      ip)]);
+}
+
+static u64 ask_neigh_epoch_read(int ifindex, u8 l3_proto, const u8 *ip)
+{
+	if (ifindex <= 0 || !ip)
+		return 0;
+	return (u64)atomic64_read_acquire(
+		&ask_neigh_mac_epoch[ask_neigh_epoch_slot(ifindex, l3_proto, ip)]);
+}
+
+static bool ask_neigh_epoch_current(int ifindex, u8 l3_proto, const u8 *ip,
+				    u64 epoch)
+{
+	if (ifindex <= 0 || !ip)
+		return true;
+	/* Full barrier pairs with ask_neigh_epoch_bump()'s atomic64_inc_return()
+	 * so rhashtable insertion vs ask_flow_walk() satisfies LKMM Dekker order. */
+	smp_mb();
+	return (u64)atomic64_read(
+		&ask_neigh_mac_epoch[ask_neigh_epoch_slot(ifindex, l3_proto, ip)]) ==
+	       epoch;
+}
+
+static void ask_neigh_record_old_mac(u8 old_macs[][ETH_ALEN],
+				     unsigned int *n_old_macs,
+				     bool *overflow, const u8 *mac)
+{
+	unsigned int i;
+
+	if (*overflow)
+		return;
+	if (is_zero_ether_addr(mac)) {
+		*overflow = true;
+		return;
+	}
+	for (i = 0; i < *n_old_macs; i++)
+		if (ether_addr_equal(old_macs[i], mac))
+			return;
+	if (*n_old_macs < ASK_NEIGH_OLD_MAC_MAX)
+		ether_addr_copy(old_macs[(*n_old_macs)++], mac);
+	else
+		*overflow = true;
+}
+
 bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 				u8 l3_proto, const u8 *new_mac)
 {
 	struct ask_flow_table *t = ask_flow_default_table();
 	struct ask_neigh_mac_fixup *fx, *tmp;
 	struct ask_neigh_mac_ctx ctx;
+	u8 old_macs[ASK_NEIGH_OLD_MAC_MAX][ETH_ALEN];
+	unsigned int n_old_macs = 0;
+	bool old_mac_overflow = false;
 	bool complete = true;
 	bool need_sw_revoke = false;
 	bool can_republish;
@@ -1406,7 +1518,10 @@ bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 	if (is_zero_ether_addr(new_mac) || is_multicast_ether_addr(new_mac))
 		return false;
 
-	ask_policy_bump_epoch();
+	/* Fence racing REPLACEs for this (ifindex, proto, dst_ip) BEFORE
+	 * ask_flow_walk() without bumping the global ask_policy_epoch (so
+	 * unrelated REPLACEs and parked pending flows are not disturbed). */
+	ask_neigh_epoch_bump(dev->ifindex, l3_proto, dst_ip);
 	can_republish = ask_policy_epoch_snapshot(&policy_epoch) == 0;
 
 	ctx.ifindex      = dev->ifindex;
@@ -1420,8 +1535,12 @@ bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 
 	if (ask_flow_walk(t, ask_neigh_mac_collect, &ctx))
 		complete = false;
-	if (!ctx.matched)
+	if (!ctx.matched) {
+		if (ctx.incomplete)
+			ask_flow_revoke_neigh_sw(dev->ifindex, l3_proto, dst_ip,
+						 new_mac, NULL, 0, true);
 		return complete && !ctx.incomplete;
+	}
 
 	list_for_each_entry_safe(fx, tmp, &ctx.fixups, node) {
 		struct ask_flow *cur;
@@ -1476,6 +1595,8 @@ bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 			goto neigh_next;
 		if (!can_republish) {
 			need_sw_revoke = true;
+			ask_neigh_record_old_mac(old_macs, &n_old_macs,
+						 &old_mac_overflow, fx->old_mac);
 			goto neigh_next;
 		}
 		rc = ask_neigh_republish(t, fx->cookie, &fx->key, fx->oif,
@@ -1495,6 +1616,8 @@ bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 			if (rc == -EINPROGRESS)
 				complete = false;
 			need_sw_revoke = true;
+			ask_neigh_record_old_mac(old_macs, &n_old_macs,
+						 &old_mac_overflow, fx->old_mac);
 			pr_warn_ratelimited("ask: neigh: rebuild failed, flow left in software cookie=0x%llx rc=%d\n",
 					    fx->cookie, rc);
 		}
@@ -1511,8 +1634,10 @@ neigh_next:
 		list_del(&fx->node);
 		kfree(fx);
 	}
-	if (need_sw_revoke)
-		ask_flow_revoke_neigh_sw(dev->ifindex, new_mac);
+	if (need_sw_revoke || ctx.incomplete)
+		ask_flow_revoke_neigh_sw(dev->ifindex, l3_proto, dst_ip,
+					 new_mac, old_macs, n_old_macs,
+					 old_mac_overflow || ctx.incomplete);
 	return complete && !ctx.incomplete;
 }
 EXPORT_SYMBOL_GPL(ask_flow_neigh_mac_changed);
@@ -1595,6 +1720,9 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 			tried_ifindex[n_tries++] = p->ingress_ifindex;
 
 		for (i = 0; i < n_tries && !got_mac; i++) {
+			int resolved_ifindex;
+			u64 neigh_ep;
+
 			rcu_read_lock();
 			dev_try = dev_get_by_index_rcu(&init_net,
 						       tried_ifindex[i]);
@@ -1624,6 +1752,10 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 				if (vlan_dev)
 					dev_try = vlan_dev;
 			}
+			resolved_ifindex = dev_try->ifindex;
+			neigh_ep = ask_neigh_epoch_read(resolved_ifindex,
+							ASK_FLOW_L3_IPV4,
+							(const u8 *)&p->dst_ip);
 			n = neigh_lookup(&arp_tbl, &dst_key, dev_try);
 			rcu_read_unlock();
 			if (!n)
@@ -1632,6 +1764,10 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 			read_lock_bh(&n->lock);
 			if (n->nud_state & NUD_VALID) {
 				memcpy(p->key.next_hop_mac, n->ha, ETH_ALEN);
+				p->key.nh_ifindex = resolved_ifindex;
+				memcpy(p->key.nh_ip, &p->dst_ip,
+				       sizeof(p->dst_ip));
+				p->neigh_epoch = neigh_ep;
 				got_mac = true;
 			}
 			read_unlock_bh(&n->lock);
@@ -1663,9 +1799,10 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 			goto poll_next;
 		}
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
-		rc = ask_neigh_republish(t, p->cookie, &p->key, p->oif,
-					 p->action_flags, p->dir,
-					 p->generation, p->policy_epoch);
+		rc = ask_neigh_republish_fenced(t, p->cookie, &p->key, p->oif,
+						p->action_flags, p->dir,
+						p->generation, p->policy_epoch,
+						p->neigh_epoch, true);
 		if (rc == -EEXIST)
 			rc = 0;
 		if (rc == 0) {
@@ -4105,7 +4242,7 @@ static void ask_devchg_queue(int ifindex)
  * FDB entry, except when the entry was (re)learned on the port the record
  * already uses.
  */
-#define ASK_FDBCHG_MAX		16
+#define ASK_FDBCHG_MAX		256
 struct ask_fdbchg {
 	u8 addr[ETH_ALEN];
 	int ifindex;		/* port now holding the MAC, 0 = deleted */
@@ -4166,7 +4303,8 @@ static void ask_fdbchg_flush_fn(struct work_struct *w)
 	int rc, walk_rc = 0;
 
 	spin_lock_bh(&ask_fdbchg_lock);
-	memcpy(ask_fdbchg_snap, ask_fdbchg_q, sizeof(ask_fdbchg_snap));
+	memcpy(ask_fdbchg_snap, ask_fdbchg_q,
+	       ask_fdbchg_n * sizeof(*ask_fdbchg_q));
 	ask_fdbchg_snap_n = ask_fdbchg_n;
 	ask_fdbchg_snap_all = ask_fdbchg_all;
 	ask_fdbchg_snap_g3_epoch = ask_fdbchg_g3_epoch;
@@ -4245,8 +4383,8 @@ void ask_flow_fdb_change(const u8 *addr, int ifindex)
  * are coalesced for ASK_FIBCHG_DELAY_MS so a routing-protocol burst costs one
  * flush pass, and the registration-time route dump is ignored.
  */
-#define ASK_FIBCHG_MAX		16
-#define ASK_FIBCHG_DELAY_MS	50
+#define ASK_FIBCHG_MAX		256
+#define ASK_FIBCHG_DELAY_MS	10
 struct ask_fibchg_pfx {
 	u8 l3_proto;
 	u8 plen;
@@ -4306,6 +4444,8 @@ static void ask_fibchg_queue_pfx_locked(const struct ask_fibchg_pfx *p)
 {
 	unsigned int i;
 
+	if (ask_fibchg_all)
+		return;
 	for (i = 0; i < ask_fibchg_n; i++)
 		if (!memcmp(&ask_fibchg_q[i], p, sizeof(*p)))
 			return;
@@ -4323,7 +4463,8 @@ static void ask_fibchg_flush_fn(struct work_struct *w)
 	int rc, walk_rc = 0;
 
 	spin_lock_bh(&ask_fibchg_lock);
-	memcpy(ask_fibchg_snap, ask_fibchg_q, sizeof(ask_fibchg_snap));
+	memcpy(ask_fibchg_snap, ask_fibchg_q,
+	       ask_fibchg_n * sizeof(*ask_fibchg_q));
 	ask_fibchg_snap_n = ask_fibchg_n;
 	ask_fibchg_snap_all = ask_fibchg_all;
 	ask_fibchg_snap_g3_epoch = ask_fibchg_g3_epoch;
@@ -4507,6 +4648,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	u64 fe_token = 0;
 	u64 family_policy_seq;
 	u64 policy_epoch;
+	u64 neigh_epoch = 0;
 	u64 pppoe_session_epoch;
 	bool direct_mac = false;
 	bool is_v6;
@@ -5127,6 +5269,16 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			neigh_dev = vdev;
 	}
 
+	if (neigh_dev) {
+		key.nh_ifindex = neigh_dev->ifindex;
+		if (is_v6)
+			memcpy(key.nh_ip, &dst_ip6, sizeof(dst_ip6));
+		else
+			memcpy(key.nh_ip, &dst_ip, sizeof(dst_ip));
+		neigh_epoch = ask_neigh_epoch_read(key.nh_ifindex, key.l3_proto,
+						   key.nh_ip);
+	}
+
 	if (is_v6)
 		ask_resolve_neigh_v6(neigh_dev, &dst_ip6,
 				     key.next_hop_mac, key.egress_mac);
@@ -5138,13 +5290,6 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		key.oif_phys_ifindex = is_vlan_dev(egress_dev) ?
 			vlan_dev_real_dev(egress_dev)->ifindex :
 			egress_dev->ifindex;
-	if (neigh_dev) {
-		key.nh_ifindex = neigh_dev->ifindex;
-		if (is_v6)
-			memcpy(key.nh_ip, &dst_ip6, sizeof(dst_ip6));
-		else
-			memcpy(key.nh_ip, &dst_ip, sizeof(dst_ip));
-	}
 
 	if (neigh_dev != egress_dev)
 		dev_put(neigh_dev);
@@ -5156,6 +5301,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		ether_addr_copy(key.next_hop_mac, pppoe_info.peer_mac);
 		ether_addr_copy(key.egress_mac, pppoe_info.src_mac);
 	} else if (direct_mac) {
+		if (!is_zero_ether_addr(key.next_hop_mac) &&
+		    !ether_addr_equal(key.next_hop_mac, direct_dst_mac))
+			return -EAGAIN;
 		ether_addr_copy(key.next_hop_mac, direct_dst_mac);
 		if (!is_zero_ether_addr(direct_src_mac))
 			ether_addr_copy(key.egress_mac, direct_src_mac);
@@ -5369,7 +5517,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			return -EOPNOTSUPP;
 		if (!ask_hw_flow_policy_current(&key))
 			return -ESTALE;
-		if (!ask_policy_epoch_is_current(policy_epoch))
+		if (!ask_policy_epoch_is_current(policy_epoch) ||
+		    (!defer_nh && key.nh_ifindex &&
+		     !ask_neigh_epoch_current(key.nh_ifindex, key.l3_proto,
+					      key.nh_ip, neigh_epoch)))
 			return -EAGAIN;
 
 		/*
@@ -5480,7 +5631,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 				    f->cookie, rc ? "owner superseded" : "FE record removed");
 		return 0;
 	}
-	if (!ask_policy_epoch_is_current(policy_epoch)) {
+	if (!ask_policy_epoch_is_current(policy_epoch) ||
+	    (key.nh_ifindex &&
+	     !ask_neigh_epoch_current(key.nh_ifindex, key.l3_proto,
+				      key.nh_ip, neigh_epoch))) {
 		bool superseded = false;
 
 		if (!ask_flow_gen_tombstone_if_current(t, (u64)f->cookie,
@@ -6288,13 +6442,18 @@ static bool ask_fibchg_sw_match(const struct flow_offload *flow, void *data)
 
 struct ask_neigh_sw_ctx {
 	int ifindex;
+	u8 l3_proto;
+	const u8 *dst_ip;
 	const u8 *new_mac;
+	const u8 (*old_macs)[ETH_ALEN];
+	unsigned int n_old_macs;
+	bool old_mac_overflow;
 };
 
 static bool ask_neigh_sw_match(const struct flow_offload *flow, void *data)
 {
 	const struct ask_neigh_sw_ctx *ctx = data;
-	unsigned int dir;
+	unsigned int dir, i;
 
 	for (dir = 0; dir < FLOW_OFFLOAD_DIR_MAX; dir++) {
 		const struct flow_offload_tuple *t = &flow->tuplehash[dir].tuple;
@@ -6318,17 +6477,43 @@ static bool ask_neigh_sw_match(const struct flow_offload *flow, void *data)
 					dev_hit = true;
 			}
 		}
-		if (dev_hit)
+		if (!dev_hit)
+			continue;
+		if (ctx->old_mac_overflow || (!ctx->n_old_macs && !ctx->dst_ip))
 			return true;
+		for (i = 0; i < ctx->n_old_macs; i++)
+			if (ether_addr_equal(t->out.h_dest, ctx->old_macs[i]))
+				return true;
+		if (ctx->dst_ip) {
+			if (ctx->l3_proto == ASK_FLOW_L3_IPV4 &&
+			    t->l3proto == NFPROTO_IPV4 &&
+			    (!memcmp(&t->dst_v4, ctx->dst_ip, 4) ||
+			     !memcmp(&t->src_v4, ctx->dst_ip, 4)))
+				return true;
+			if (ctx->l3_proto == ASK_FLOW_L3_IPV6 &&
+			    t->l3proto == NFPROTO_IPV6 &&
+			    (!memcmp(&t->dst_v6, ctx->dst_ip, 16) ||
+			     !memcmp(&t->src_v6, ctx->dst_ip, 16)))
+				return true;
+		}
 	}
 	return false;
 }
 
-static void ask_flow_revoke_neigh_sw(int ifindex, const u8 *new_mac)
+static void ask_flow_revoke_neigh_sw(int ifindex, u8 l3_proto,
+				     const u8 *dst_ip, const u8 *new_mac,
+				     const u8 (*old_macs)[ETH_ALEN],
+				     unsigned int n_old_macs,
+				     bool old_mac_overflow)
 {
 	struct ask_neigh_sw_ctx ctx = {
 		.ifindex = ifindex,
+		.l3_proto = l3_proto,
+		.dst_ip = dst_ip,
 		.new_mac = new_mac,
+		.old_macs = old_macs,
+		.n_old_macs = n_old_macs,
+		.old_mac_overflow = old_mac_overflow,
 	};
 
 	(void)nf_flow_table_revoke_match(&init_net, ask_neigh_sw_match, &ctx,

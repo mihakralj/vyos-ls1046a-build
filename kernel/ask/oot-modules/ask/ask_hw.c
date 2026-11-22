@@ -1836,22 +1836,24 @@ int ask_hw_offload_role_prepare(u8 hw_port_id,
 		return -EINVAL;
 	*detached = false;
 	*policy_seq = 0;
-	if (!READ_ONCE(ask_hw_ready))
-		return -EAGAIN;
-	if (!h)
-		return -ENODEV;
+	if (!h) {
+		if (!if_engaged)
+			return -ENODEV;
+		*family_mask = 0;	/* no PCD: nothing can be engaged */
+		return 0;
+	}
 	mutex_lock(&h->lock);
 	if (expected_policy_seq &&
 	    expected_policy_seq != ask_hw_role_policy_seq[hw_port_id]) {
 		mutex_unlock(&h->lock);
 		return -ESTALE;
 	}
-	if (ask_hw_role_admin_disabled[hw_port_id]) {
-		mutex_unlock(&h->lock);
-		return -EACCES;
-	}
+	if (!ask_hw_role_policy_seq[hw_port_id])
+		ask_hw_role_policy_seq[hw_port_id] = 1;
+	*policy_seq = ask_hw_role_policy_seq[hw_port_id];
 	old_fam = ask_hw_port_family_get(hw_port_id);
 	fam = *family_mask ? *family_mask : old_fam;
+	*family_mask = fam;
 	for (i = 0; i < ASK_HW_MAX_PORTS; i++)
 		if (h->port[i].in_use && h->port[i].port_id == hw_port_id) {
 			retained = h->port[i].fe_retained;
@@ -1859,10 +1861,28 @@ int ask_hw_offload_role_prepare(u8 hw_port_id,
 			engaged = h->port[i].offload_engaged;
 			other = engaged && h->port[i].engaged_profile != profile;
 		}
-	*family_mask = fam;
-	if (!ask_hw_role_policy_seq[hw_port_id])
-		ask_hw_role_policy_seq[hw_port_id] = 1;
-	*policy_seq = ask_hw_role_policy_seq[hw_port_id];
+	/*
+	 * A bridge join/leave only re-roles a port the operator engaged. An
+	 * idle, cleanly admin-disabled, retained or tearing-down port
+	 * (offload_engaged == false) needs no FE change, so it must never
+	 * veto the topology change. A port still armed in the wrong profile
+	 * after a failed disengage_admin (engaged && other) must still fail
+	 * closed below instead of entering a bridge with the wrong FE table.
+	 */
+	if (if_engaged && (!engaged || (!other && (!fam ||
+					ask_hw_role_admin_disabled[hw_port_id])))) {
+		mutex_unlock(&h->lock);
+		*family_mask = 0;
+		return 0;
+	}
+	if (ask_hw_role_admin_disabled[hw_port_id]) {
+		mutex_unlock(&h->lock);
+		return -EACCES;
+	}
+	if (!READ_ONCE(ask_hw_ready)) {
+		mutex_unlock(&h->lock);
+		return -EAGAIN;
+	}
 	if (!retained && !transitioning && other)
 		ask_hw_set_family_locked(hw_port_id, 0);
 	mutex_unlock(&h->lock);
@@ -1871,10 +1891,6 @@ int ask_hw_offload_role_prepare(u8 hw_port_id,
 		return -ESHUTDOWN;
 	if (transitioning)
 		return -EAGAIN;
-	if (if_engaged && (!engaged || !fam)) {
-		*family_mask = 0;
-		return 0;
-	}
 	if (other) {
 		int rc;
 
@@ -2093,6 +2109,8 @@ static int ask_hw_offload_quiesce_port(u8 hw_port_id)
 int ask_hw_offload_disengage_admin(u8 hw_port_id)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	bool owned = false;
+	unsigned int i;
 
 	if (!h)
 		return -ENODEV;
@@ -2102,7 +2120,25 @@ int ask_hw_offload_disengage_admin(u8 hw_port_id)
 	ask_hw_role_admin_disabled[hw_port_id] = true;
 	++ask_hw_role_policy_seq[hw_port_id];
 	ask_hw_set_family_locked(hw_port_id, 0);
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+		struct ask_hw_port *p = &h->port[i];
+
+		if (p->in_use && p->port_id == hw_port_id) {
+			owned = p->offload_engaged || p->teardown_in_progress ||
+				p->fe_retained;
+			break;
+		}
+	}
 	mutex_unlock(&h->lock);
+	/*
+	 * VyOS disengages every port without `offload ipv4|ipv6` on each
+	 * commit. A port that is not engaged anchors no ingress owner (all
+	 * admission needs a non-zero family), and egress through it stays
+	 * valid, so quiescing it would only revoke unrelated SW flows and
+	 * fail on any FE orphan elsewhere.
+	 */
+	if (!owned)
+		return 0;
 	return ask_hw_offload_quiesce_port(hw_port_id);
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_disengage_admin);

@@ -49,6 +49,15 @@ def test_wgfp_dma_readonly_out_of_place_tx_and_rx():
     assert "dpaa_wgfp_drop(f);" in p6
 
 
+def test_wgfp_tx_alloc_failure_punts_and_refreshes():
+    fp = FASTPATH_C.read_text()
+    peer_tx = _between(fp, "static int wgfp_peer_frame(", "\nstatic const struct dpaa_wgfp_ops")
+    alloc_err = _between(peer_tx, "if (unlikely(!skb)) {", "\n\t\tskb_reserve(")
+    assert "mod_delayed_work(system_wq, &pst->refresh, 0);" in alloc_err
+    assert "goto decline;" in alloc_err
+    assert "dpaa_wgfp_drop(f);" not in alloc_err
+
+
 def test_wgfp_uncertain_insert_stuck_obs_ttl_and_quiesce():
     wgfp_h = WGFP_H.read_text()
     wgfp_c = WGFP_C.read_text()

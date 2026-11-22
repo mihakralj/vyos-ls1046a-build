@@ -123,7 +123,7 @@ static bool nf_flow_dst_check(struct flow_offload_tuple *t)
 	return !t->dst_cache || t->dst_cache->valid;
 }
 
-struct ask_flow_key { u8 l3_proto; };
+struct ask_flow_key { u8 l3_proto; u32 nh_ifindex; u8 nh_ip[16]; };
 struct ask_flow {
 	u64 cookie;
 	u64 fe_token;
@@ -254,13 +254,26 @@ static int ask_flow_policy_sweep_hw(bool *identity_lost)
 #include "ask_policy_state_body.h"
 #include "ask_sw_match_body.h"
 
-/* Mocks to drive real ask_neigh_republish() post-install policy races. */
+/* Mocks to drive real ask_neigh_republish() post-install policy/neigh races. */
 static struct ask_flow mock_flow;
 static bool mock_bump_epoch_in_fe_install;
+static bool mock_bump_neigh_epoch_in_fe_install;
+static u64 mock_neigh_epoch = 1;
 static bool mock_tombstone_ok = true;
 static int mock_withdraw_rc;
 static bool mock_withdraw_superseded;
 static unsigned int mock_gen_releases;
+
+static bool ask_neigh_epoch_current(int ifindex, u8 l3_proto, const u8 *ip, u64 epoch)
+{
+	(void)ifindex; (void)l3_proto; (void)ip;
+	return epoch == mock_neigh_epoch;
+}
+static int ask_neigh_republish_fenced(struct ask_flow_table *t, u64 cookie,
+				      const struct ask_flow_key *key, u32 oif,
+				      u32 action_flags, enum ask_hw_dir dir,
+				      u64 generation, u64 policy_epoch,
+				      u64 neigh_epoch, bool check_neigh);
 
 static int ask_flow_insert_owned_identified(struct ask_flow_table *t, u64 cookie,
 					    const struct ask_flow_key *key,
@@ -305,6 +318,8 @@ static int ask_flow_fe_install(const struct ask_flow_key *key, u32 hw_id,
 	(void)key; (void)hw_id; (void)egress_dev; (void)cookie; (void)fe_token;
 	if (mock_bump_epoch_in_fe_install)
 		ask_policy_bump_epoch();
+	if (mock_bump_neigh_epoch_in_fe_install)
+		mock_neigh_epoch++;
 	return 0;
 }
 static bool ask_flow_gen_tombstone_if_current(struct ask_flow_table *t, u64 c, u64 g)
@@ -368,6 +383,8 @@ static void reset_all(void)
 
 	memset(&mock_flow, 0, sizeof(mock_flow));
 	mock_bump_epoch_in_fe_install = false;
+	mock_bump_neigh_epoch_in_fe_install = false;
+	mock_neigh_epoch = 1;
 	mock_tombstone_ok = true;
 	mock_withdraw_rc = 0;
 	mock_withdraw_superseded = false;
@@ -472,6 +489,19 @@ static void test_republish_post_install_policy_races(void)
 	assert(mock_gen_releases == 1 && !mock_flow.present);
 	assert(ask_policy_epoch_snapshot(&snap) == 0);
 
+	/* Stage 3 (#6): neigh-epoch race during ask_neigh_republish_fenced() rolls back cleanly. */
+	reset_all();
+	key.nh_ifindex = 5;
+	assert(ask_policy_epoch_snapshot(&ep) == 0);
+	mock_bump_neigh_epoch_in_fe_install = true;
+	mutex_lock(&ask_flow_lifecycle_lock);
+	assert(ask_neigh_republish_fenced(&default_table, 42, &key, 4, 0,
+					  ASK_HW_DIR_FWD, 1, ep,
+					  mock_neigh_epoch, true) == -EAGAIN);
+	mutex_unlock(&ask_flow_lifecycle_lock);
+	assert(mock_gen_releases == 1 && !mock_flow.present);
+	assert(ask_policy_epoch_snapshot(&snap) == 0);
+
 	/* Finding 4: FE superseded during policy-race rollback -> -EINPROGRESS + UNRESOLVED + sticky id_lost. */
 	reset_all();
 	assert(ask_policy_epoch_snapshot(&ep) == 0);
@@ -547,10 +577,44 @@ static void test_sw_match_helpers(void)
 	f.tuplehash[1].tuple.src_v4.bytes[3] = 113;
 	assert(ask_fibchg_sw_match(&f, NULL));
 
-	/* neigh_sw_match: matches stale out.h_dest on vif, ignores already-updated MAC. */
+	/* neigh_sw_match: matches stale old_mac on vif, ignores already-updated MAC
+	 * and unrelated hosts with a different MAC on the same interface (#7);
+	 * falls back fail-closed on overflow and matches direct dst_ip for v4/v6. */
 	{
-		struct ask_neigh_sw_ctx ctx = { .ifindex = 30, .new_mac = mac_new };
+		const u8 mac_other[ETH_ALEN] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x99 };
+		const u8 old_macs[1][ETH_ALEN] = { { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 } };
+		const u8 ip4_hit[4] = { 10, 99, 2, 113 };
+		const u8 ip4_miss[4] = { 10, 99, 2, 200 };
+		const u8 ip6_hit[16] = { 0xfd, 0x99, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13 };
+		struct ask_neigh_sw_ctx ctx = {
+			.ifindex = 30,
+			.new_mac = mac_new,
+			.old_macs = old_macs,
+			.n_old_macs = 1,
+		};
+		memcpy(f.tuplehash[0].tuple.out.h_dest, mac_old, ETH_ALEN);
 		assert(ask_neigh_sw_match(&f, &ctx));
+		memcpy(f.tuplehash[0].tuple.out.h_dest, mac_other, ETH_ALEN);
+		assert(!ask_neigh_sw_match(&f, &ctx));
+		/* Overflow falls back fail-closed on the interface. */
+		ctx.old_mac_overflow = true;
+		assert(ask_neigh_sw_match(&f, &ctx));
+		ctx.old_mac_overflow = false;
+		/* Direct IPv4 dst_ip match works even when old_macs doesn't list mac_other. */
+		memcpy(f.tuplehash[0].tuple.dst_v4.bytes, ip4_hit, 4);
+		ctx.l3_proto = ASK_FLOW_L3_IPV4;
+		ctx.dst_ip = ip4_miss;
+		assert(!ask_neigh_sw_match(&f, &ctx));
+		ctx.dst_ip = ip4_hit;
+		assert(ask_neigh_sw_match(&f, &ctx));
+		/* Direct IPv6 dst_ip match. */
+		f.tuplehash[0].tuple.l3proto = NFPROTO_IPV6;
+		memcpy(f.tuplehash[0].tuple.dst_v6.bytes, ip6_hit, 16);
+		ctx.l3_proto = ASK_FLOW_L3_IPV6;
+		ctx.dst_ip = ip6_hit;
+		assert(ask_neigh_sw_match(&f, &ctx));
+		/* Already-updated MAC is always skipped even on overflow. */
+		ctx.old_mac_overflow = true;
 		memcpy(f.tuplehash[0].tuple.out.h_dest, mac_new, ETH_ALEN);
 		assert(!ask_neigh_sw_match(&f, &ctx));
 	}
