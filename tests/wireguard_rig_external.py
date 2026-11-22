@@ -1,6 +1,7 @@
 """Host tests for externally managed WireGuard benchmark servers."""
 
 import csv
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -51,21 +52,33 @@ elif "iperf3 -c " in command:
         "-p " + os.environ["FAKE_IPERF_RATE_PORT"]
     ) in command:
         rate = float(os.environ["FAKE_IPERF_RATE_BPS"])
+    duration = int(re.search(r"(?:^| )-t (\d+)(?: |$)", command).group(1))
+    streams = int(re.search(r"(?:^| )-P (\d+)(?: |$)", command).group(1))
+    reverse = bool(re.search(r"(?:^| )-R(?: |$)", command))
+    stats = {"seconds": duration, "bits_per_second": rate}
     end = {
-        "sum_sent": {"retransmits": int(os.environ.get("FAKE_FORWARD_RETRANS", "0"))},
+        "sum_sent": dict(stats, retransmits=int(os.environ.get("FAKE_FORWARD_RETRANS", "0"))),
+        "sum_received": dict(stats),
         "cpu_utilization_percent": {"host_total": 10},
     }
-    if "--bidir" in command and not os.environ.get("FAKE_MISSING_REVERSE"):
-        end["sum_sent_bidir_reverse"] = {
-            "retransmits": int(os.environ.get("FAKE_REVERSE_RETRANS", "0"))
-        }
-    interval = {"sum": {"start": 0, "bits_per_second": rate, "omitted": False}}
-    if "--bidir" in command and not os.environ.get("FAKE_MISSING_REVERSE_INTERVAL"):
-        interval["sum_bidir_reverse"] = {
-            "start": 0, "bits_per_second": rate, "omitted": False
-        }
+    if "--bidir" in command:
+        end["sum_sent_bidir_reverse"] = dict(stats)
+        end["sum_received_bidir_reverse"] = dict(stats)
+        if not os.environ.get("FAKE_MISSING_REVERSE"):
+            end["sum_sent_bidir_reverse"]["retransmits"] = int(os.environ.get("FAKE_REVERSE_RETRANS", "0"))
+    intervals = []
+    for second in range(duration):
+        sample = {"start": second, "end": second + 1, "seconds": 1,
+                  "bits_per_second": rate, "omitted": False}
+        interval = {"sum": dict(sample)}
+        if "--bidir" in command and not os.environ.get("FAKE_MISSING_REVERSE_INTERVAL"):
+            interval["sum_bidir_reverse"] = dict(sample)
+        intervals.append(interval)
     print(json.dumps({
-        "intervals": [interval],
+        "start": {"tcp_mss_default": 1368, "test_start": {
+            "protocol": "TCP", "duration": duration, "num_streams": streams,
+            "reverse": int(reverse), "bidir": int("--bidir" in command)}},
+        "intervals": intervals,
         "end": end,
     }))
 elif os.environ.get("FAKE_FW4_ERROR") and "nft insert rule inet fw4 forward" in command:
@@ -138,7 +151,9 @@ elif "tee /sys/module/wireguard/parameters/wgfp_peer" in command:
     if not match:
         sys.exit(1)
     state_file.write_text((match.group(1) or match.group(2)).strip())
-elif "cat /sys/kernel/debug/dpaa_wgfp/stats" in command:
+elif "head -n1 /sys/kernel/debug/dpaa_wgfp/stats_sw" in command:
+    print("touch=0 sinks=0 threaded=1 tx_batch=32")
+elif "cat /sys/kernel/debug/dpaa_wgfp/stats_sw" in command:
     if os.environ.get("FAKE_QMAN_ERROR"):
         sys.exit(1)
     state = os.environ.get(
@@ -150,7 +165,7 @@ elif "cat /sys/kernel/debug/dpaa_wgfp/stats" in command:
         count_file = Path(os.environ["FAKE_QMAN_READ_COUNT"])
         count = int(count_file.read_text()) + 1 if count_file.exists() else 1
         count_file.write_text(str(count))
-        if count > 1:
+        if count >= int(os.environ.get("FAKE_QMAN_CHANGE_AT", "2")):
             key = os.environ["FAKE_QMAN_CHANGE"]
             state = state.replace(f"{key}=0", f"{key}=1")
     print(state)
@@ -177,10 +192,24 @@ elif "cat /sys/module/wireguard/parameters/wgfp_peer" in command:
         if count >= int(os.environ["FAKE_WGFP_CONFLICT_AT"]):
             default = "on sealed=2 rx=3 dev=existing"
     print(os.environ.get("FAKE_WGFP_STATE", default))
+elif "cat /proc/sys/kernel/random/boot_id" in command:
+    boot = os.environ.get("FAKE_BOOT_ID", "01234567-89ab-cdef-0123-456789abcdef")
+    if os.environ.get("FAKE_BOOT_CHANGE_AT"):
+        count_file = Path(os.environ["FAKE_BOOT_READ_COUNT"])
+        count = int(count_file.read_text()) + 1 if count_file.exists() else 1
+        count_file.write_text(str(count))
+        if count >= int(os.environ["FAKE_BOOT_CHANGE_AT"]):
+            boot = "abcdef01-2345-6789-abcd-ef0123456789"
+    print(boot)
 elif command == "test ! -e /sys/module/wireguard/parameters/wgfp_peer":
     sys.exit(0 if os.environ.get("FAKE_WGFP_MISSING") else 1)
 elif remote[:2] in (["sh", "-s"], ["bash", "-s"]):
-    sys.stdin.read()
+    script = sys.stdin.read()
+    if os.environ.get("FAKE_STAT_HANG"):
+        import time
+        time.sleep(10)
+    if os.environ.get("FAKE_DUT_STAT_SCRIPT") and remote[0] == "bash":
+        Path(os.environ["FAKE_DUT_STAT_SCRIPT"]).write_text(script)
     if os.environ.get("FAKE_STAT_ERROR"):
         sys.exit(1)
     print("cpu 10 0 0 90 0 0 0 0 0 0\ncpu0 10 0 0 90 0 0 0 0 0 0\n"
@@ -217,6 +246,7 @@ def run_rig(tmp_path, script, extra, operation="run", cells=None):
         "FAKE_SSH_LOG": str(log),
         "FAKE_SSH_HOST_LOG": str(tmp_path / "hosts.log"),
         "FAKE_QMAN_READ_COUNT": str(tmp_path / "qman-count"),
+        "FAKE_BOOT_READ_COUNT": str(tmp_path / "boot-count"),
         "FAKE_BIND_STATE": str(tmp_path / "wgfp-bound"),
         "FAKE_BIND_OWNER": str(tmp_path / "wgfp-owner"),
         "FAKE_LOST_RESPONSE_COUNT": str(tmp_path / "lost-response-count"),
@@ -228,6 +258,7 @@ def run_rig(tmp_path, script, extra, operation="run", cells=None):
         "STEADY_FROM": "0",
         "REPS": "1",
         "WGFP": "0",
+        "WG_GEN_QDISC": "default",
     }
     env.update(extra)
     args = ["bash", str(script), operation]
@@ -250,6 +281,122 @@ def test_single_run_recreates_tunnel_without_touching_external_server(tmp_path):
     assert all("-p 15361" in command for command in clients)
     assert all("iperf3 -s " not in command and "/tmp/wg-iperf" not in command for command in commands)
     assert (tmp_path / "result.csv").read_text().count("2.000") == 2
+
+
+def test_runners_report_matching_outer_endpoints_without_side_effects(tmp_path):
+    endpoints = []
+    for port in ("eth3", "eth4"):
+        runners = []
+        for script in (SINGLE, MULTI):
+            directory = tmp_path / f"{port}-{script.name}"
+            directory.mkdir()
+            result, commands = run_rig(directory, script, {"WG_PORT": port}, operation="topology")
+            assert result.returncode == 0, result.stdout + result.stderr
+            addresses = [ipaddress.ip_address(value) for value in result.stdout.split()]
+            assert [address.version for address in addresses] == [4, 4, 6, 6]
+            assert commands == []
+            assert not (directory / "json").exists()
+            runners.append(addresses)
+        assert runners[0] == runners[1]
+        endpoints.append(runners[0])
+    assert endpoints[0] != endpoints[1]
+
+
+@pytest.mark.parametrize(("outer", "peer", "dut"), [
+    ("4", "10.99.1.112", "10.99.1.185"),
+    ("6", "fd99:1::112", "fd99:1::185"),
+])
+def test_single_scoped_notrack_uses_selected_outer_peer(tmp_path, outer, peer, dut):
+    result, commands = run_rig(tmp_path, SINGLE, {
+        "WG_PORT": "eth3", "WG_NOTRACK": "3", "OUTER": outer,
+    }, operation="setup")
+    assert result.returncode == 0, result.stdout + result.stderr
+    adds = [command for command in commands if "sh -s -- add " in command and " 3 51820 " in command]
+    assert len(adds) == 1
+    assert adds[0].endswith(f" 3 51820 {outer} {peer} {dut}")
+
+
+@pytest.mark.parametrize(("script", "role"), [(SINGLE, "far"), (MULTI, "f0")])
+@pytest.mark.parametrize("kind", ["ask2", "vendor"])
+def test_eth3_places_far_tunnel_on_dell1(tmp_path, script, role, kind):
+    result, commands = run_rig(tmp_path, script, {
+        "DUT_KIND": kind, "WG_PORT": "eth3", "TUNNELS": "2",
+    }, operation="setup")
+    assert result.returncode == 0, result.stdout + result.stderr
+    hosts = (tmp_path / "hosts.log").read_text().splitlines()
+    far = [(host, command) for host, command in zip(hosts, commands)
+           if re.search(rf" wgo-[0-9a-f]{{32}}-{role}(?:\s|$)", command)
+           and "sh -s -- create " in command]
+    assert len(far) == 1
+    assert far[0][0] == "admin@192.168.1.112"
+
+
+@pytest.mark.parametrize(
+    ("script", "generator_roles", "dut_roles"),
+    [(SINGLE, ("far",), ("dut",)), (MULTI, ("f0", "f1"), ("d0", "d1"))],
+)
+def test_opt_in_fq_is_scoped_to_owned_generator_links(tmp_path, script, generator_roles, dut_roles):
+    options = {"WG_PORT": "eth3", "WG_GEN_QDISC": "fq", "TUNNELS": "2"}
+    result, commands = run_rig(tmp_path, script, options, operation="setup")
+    assert result.returncode == 0, result.stdout + result.stderr
+    creates = [c for c in commands if "sh -s -- create wg" in c]
+    for role in generator_roles:
+        assert any(re.search(rf" wgo-[0-9a-f]{{32}}-{role} fq$", c) for c in creates)
+    for role in dut_roles:
+        assert any(re.search(rf" wgo-[0-9a-f]{{32}}-{role}$", c) for c in creates)
+    result, commands = run_rig(tmp_path, script, {"WG_PORT": "eth3"}, operation="teardown")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not any(" fq" in c for c in commands if "sh -s -- delete wg" in c)
+
+
+@pytest.mark.parametrize(("script", "role"), [(SINGLE, "far"), (MULTI, "f0")])
+def test_fq_creation_failure_releases_the_lease_after_link_removal(tmp_path, script, role):
+    result, commands = run_rig(tmp_path, script, {
+        "WG_GEN_QDISC": "fq", "TUNNELS": "2",
+        "FAKE_LINK_FAIL_ROLE": role, "FAKE_LINK_FAIL_CODE": "12",
+    }, operation="setup")
+    assert result.returncode != 0
+    lease = tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")
+    assert not lease.exists()
+    assert not (tmp_path / "wgfp-owner").exists()
+    assert not any(re.search(rf" delete wg\S* wgo-[0-9a-f]{{32}}-{role}$", c)
+                   for c in commands)
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_teardown_does_not_depend_on_generator_qdisc_option(tmp_path, script):
+    result, _ = run_rig(tmp_path, script, {
+        "WG_GEN_QDISC": "fq", "TUNNELS": "2",
+    }, operation="setup")
+    assert result.returncode == 0, result.stdout + result.stderr
+    result, _ = run_rig(tmp_path, script, {
+        "WG_GEN_QDISC": "invalid", "TUNNELS": "2",
+    }, operation="teardown")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (tmp_path / ("state.single-lease" if script == SINGLE else "state.multi-lease")).exists()
+
+
+def test_direct_fq_uses_both_owned_generators_without_rate_cap(tmp_path):
+    result, commands = run_rig(
+        tmp_path, SINGLE, {"WG_GEN_QDISC": "fq", "WG_SKIP_SERVERS": "0"},
+        cells=["ceiling-v4"],
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    for role in ("direct1", "direct2"):
+        assert any(re.search(rf" create wgd wgo-[0-9a-f]{{32}}-{role} fq$", c)
+                   for c in commands)
+    assert not any("--fq-rate" in c for c in commands if "iperf3 -c " in c)
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_invalid_generator_qdisc_is_rejected_before_remote_operations(tmp_path, script):
+    result, commands = run_rig(
+        tmp_path, script, {"WG_GEN_QDISC": "fq;unexpected", "TUNNELS": "2"},
+        operation="setup",
+    )
+    assert result.returncode == 2
+    assert "WG_GEN_QDISC" in result.stderr
+    assert not commands
 
 
 def test_single_manual_teardown_restores_persisted_options_and_unbinds_first(tmp_path):
@@ -971,6 +1118,23 @@ def test_invalid_client_timeout_fails_before_remote_operations(tmp_path, script)
     assert not commands
 
 
+@pytest.mark.parametrize("kind", ["ask2", "vendor"])
+def test_stalled_single_dut_stats_fail_closed_and_release_lease(tmp_path, kind):
+    result, _ = run_rig(tmp_path, SINGLE, {
+        "DUT_KIND": kind, "DIRS": "up", "WG_STATS_TIMEOUT": "4", "FAKE_STAT_HANG": "1",
+    })
+    assert result.returncode != 0
+    assert "DUT statistics sampling failed" in result.stderr
+    assert not (tmp_path / "state.single-lease").exists()
+
+
+def test_invalid_single_stats_timeout_fails_before_remote_operations(tmp_path):
+    result, commands = run_rig(tmp_path, SINGLE, {"WG_STATS_TIMEOUT": "3"})
+    assert result.returncode == 2
+    assert "WG_STATS_TIMEOUT must be an integer greater than DUR" in result.stderr
+    assert not commands
+
+
 @pytest.mark.parametrize("script", [SINGLE, MULTI])
 def test_skipping_servers_for_run_requires_explicit_external_mode(tmp_path, script):
     result, commands = run_rig(tmp_path, script, {"WG_EXTERNAL_IPERF": "0"})
@@ -1082,7 +1246,7 @@ def test_multi_vendor_fw4_cleanup_preserves_foreign_rule_in_netns(tmp_path):
 def test_external_server_failure_is_not_reported_as_success(tmp_path, script, extra):
     result, commands = run_rig(tmp_path, script, extra)
     assert result.returncode != 0
-    assert "iperf" in result.stderr and "no traffic" in result.stderr
+    assert "iperf" in result.stderr
     assert all("iperf3 -s " not in command and "/tmp/wg-iperf" not in command
                and "/tmp/wgm-iperf" not in command for command in commands)
 
@@ -1098,13 +1262,16 @@ def test_owned_server_client_failure_is_not_reported_as_success(tmp_path, script
     assert "iperf" in result.stderr
 
 
-def test_owned_server_zero_rate_is_not_reported_as_success(tmp_path):
+def test_owned_server_zero_rate_is_retained_as_evidence(tmp_path):
     result, _ = run_rig(tmp_path, MULTI, {
         "WG_SKIP_SERVERS": "0", "TUNNELS": "2", "ACTIVE": "2",
         "FAKE_IPERF_RATE_PORT": "5241", "FAKE_IPERF_RATE_BPS": "0",
     })
-    assert result.returncode != 0
-    assert "no traffic" in result.stderr
+    assert result.returncode == 0, result.stderr
+    with (tmp_path / "result.csv").open(newline="") as source:
+        rows = list(csv.DictReader(source))
+    assert len(rows) == 2
+    assert all(float(row["gbps"]) == 2 for row in rows)
 
 
 @pytest.mark.parametrize("script", [SINGLE, MULTI])
@@ -1137,14 +1304,94 @@ def test_slow_external_tunnel_is_recorded_not_reported_as_no_traffic(
     assert (tmp_path / "result.csv").read_text().count(expected_rate) == 2
 
 
-def test_zero_traffic_in_one_external_tunnel_fails(tmp_path):
+def test_zero_traffic_in_one_external_tunnel_is_retained(tmp_path):
     result, _ = run_rig(
         tmp_path, MULTI,
         {"WG_IPERF_BASE": "15370", "TUNNELS": "2", "ACTIVE": "2",
          "FAKE_IPERF_RATE_PORT": "15371", "FAKE_IPERF_RATE_BPS": "0"},
     )
+    assert result.returncode == 0, result.stderr
+    with (tmp_path / "result.csv").open(newline="") as source:
+        rows = list(csv.DictReader(source))
+    assert len(rows) == 2
+    assert all(float(row["gbps"]) == 2 for row in rows)
+    report = json.loads((tmp_path / "json/wgm-up-n2-k1-r1.measurement.json").read_text())
+    assert report["gbps"] == 0
+    assert report["directions"]["forward"]["zero_seconds"] == 2
+
+
+def run_multi_steady(tmp_path, data, *, direction="up", measure_to=7):
+    script = MULTI.read_text()
+    parser = script[script.index("steady(){"):script.index("\ncpu_summary(){")]
+    path = tmp_path / "iperf.json"
+    path.write_text(json.dumps(data))
+    return subprocess.run(
+        ["bash", "-c",
+         f'HERE="{MULTI.parent}"\nDUR=8 STEADY_FROM=2 STREAMS=2 MEASURE_TO={measure_to}\n'
+         f'{parser}\nsteady "$2" "$1"\n', "test", str(path), direction],
+        capture_output=True, text=True, check=False,
+    )
+
+
+def test_multi_steady_weights_variable_intervals_and_excludes_terminal_overrun(tmp_path):
+    from testrig_iperf_measurement import tcp_result
+
+    data = tcp_result()
+    data["intervals"][2:4] = [
+        {"sum": {"start": 2, "end": 2.5, "seconds": .5, "bits_per_second": 0, "bytes": 0}},
+        {"sum": {"start": 2.5, "end": 4, "seconds": 1.5, "bits_per_second": 4e9,
+                 "bytes": 750_000_000}},
+    ]
+    data["intervals"][-1]["sum"].update(end=17, seconds=10, bits_per_second=0, bytes=0)
+    result = run_multi_steady(tmp_path, data)
+    assert result.returncode == 0, result.stderr
+    assert float(result.stdout.split()[0]) == 6
+    report = json.loads((tmp_path / "iperf.measurement.json").read_text())
+    forward = report["directions"]["forward"]
+    assert forward["measured_seconds"] == 5
+    assert forward["zero_seconds"] == .5
+    assert forward["terminal_overrun_seconds"] == 9
+
+
+@pytest.mark.parametrize("defect", ["gap", "duration", "streams", "reverse", "mss"])
+def test_multi_steady_rejects_malformed_evidence(tmp_path, defect):
+    from testrig_iperf_measurement import tcp_result
+
+    data = tcp_result(bidir=True)
+    if defect == "gap":
+        data["intervals"].pop(3)
+    elif defect == "duration":
+        data["start"]["test_start"]["duration"] = 9
+    elif defect == "streams":
+        data["start"]["test_start"]["num_streams"] = 4
+    elif defect == "reverse":
+        data["intervals"][3].pop("sum_bidir_reverse")
+    else:
+        data["start"]["tcp_mss_default"] = 0
+    result = run_multi_steady(tmp_path, data, direction="bidir")
     assert result.returncode != 0
-    assert "no traffic" in result.stderr
+
+
+def test_multi_steady_uses_explicit_measure_to(tmp_path):
+    from testrig_iperf_measurement import tcp_result
+
+    data = tcp_result()
+    data["intervals"][6]["sum"].update(bits_per_second=0, bytes=0)
+    result = run_multi_steady(tmp_path, data, measure_to=6)
+    assert result.returncode == 0, result.stderr
+    assert float(result.stdout.split()[0]) == 8
+
+
+@pytest.mark.parametrize("parity", [False, True])
+def test_multi_passes_common_congestion_control_to_actual_clients(tmp_path, parity):
+    options = {"TUNNELS": "2", "ACTIVE": "2", "DIRS": "up"}
+    options.update({"RIG_PARITY": "1", "PARITY_CC": "cubic"} if parity else
+                   {"IPERF_ARGS": "-C cubic"})
+    result, commands = run_rig(tmp_path, MULTI, options)
+    assert result.returncode == 0, result.stderr
+    clients = [command for command in commands if "iperf3 -c " in command]
+    assert len(clients) == 2
+    assert all("-C cubic" in command for command in clients)
 
 
 @pytest.mark.parametrize("script", [SINGLE, MULTI])
@@ -1157,8 +1404,8 @@ def test_optional_fast_path_counters_bracket_each_cell(tmp_path, script):
     assert result.returncode == 0, result.stdout + result.stderr
     rows = [line.split("\t") for line in log.read_text().splitlines()]
     assert [(row[1], row[3]) for row in rows] == [
-        ("up", "before"), ("up", "after"),
-        ("down", "before"), ("down", "after"),
+        ("up", "before"), ("up", "after"), ("up", "settle"),
+        ("down", "before"), ("down", "after"), ("down", "settle"),
     ]
     assert all("sealed=123" in row[5] and "rx=456" in row[5] and
                "xmit_ok=123" in row[6] and "xmit_ern=0" in row[6] for row in rows)
@@ -1179,6 +1426,22 @@ def test_fast_path_counter_records_each_sink(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     for row in (line.split("\t") for line in log.read_text().splitlines()):
         assert [sink.split()[0] for sink in row[7].split("|")] == ["sink0", "sink1"]
+
+
+def test_fast_path_counter_preserves_failure_breakdown(tmp_path):
+    log = tmp_path / "counters.tsv"
+    breakdown = ("xmit_frame_wait_fail=1 xmit_poll_wait_fail=2 "
+                 "xmit_invalid_egress=3 xmit_orp_wait_fail=4")
+    stats = (f"sinks=1 xmit_ok=123 xmit_fail=10 xmit_ern=0 {breakdown}\n"
+             "sink0 cpu=0 fqid=0x2be frames=10 errs=0 sg=0")
+    result, _ = run_rig(
+        tmp_path, SINGLE, {"WGFP": "1", "WGFP_COUNTER_LOG": str(log),
+                           "FAKE_QMAN_STATE": stats}
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = [row.split("\t") for row in log.read_text().splitlines()]
+    assert len(rows) == 6
+    assert all(breakdown in row[6] for row in rows)
 
 
 @pytest.mark.parametrize("script", [SINGLE, MULTI])
@@ -1253,6 +1516,230 @@ def test_changed_qman_failure_counter_aborts_standalone_run(tmp_path, script, co
 
 
 @pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_xmit_fail_budget_allows_bounded_increase_inside_one_cell(tmp_path, script):
+    log = tmp_path / "counters.tsv"
+    options = {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(log), "DIRS": "up",
+        "TUNNELS": "2", "ACTIVE": "2", "WGFP_XMIT_FAIL_BUDGET": "1",
+    }
+    first, _ = run_rig(tmp_path, script, options | {"FAKE_QMAN_CHANGE": "xmit_fail"})
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "WARNING: WGFP xmit_fail +1" in first.stderr
+    stats = ("touch=2 sinks=1 xmit_ok=123 xmit_fail=1 xmit_ern=0\n"
+             "sink0 cpu=0 fqid=0x2be frames=10 errs=0 sg=0")
+    second, _ = run_rig(tmp_path, script, options | {"FAKE_QMAN_STATE": stats})
+    assert second.returncode == 0, second.stdout + second.stderr
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_xmit_fail_budget_does_not_cover_rejections(tmp_path, script):
+    result, _ = run_rig(tmp_path, script, {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(tmp_path / "counters.tsv"), "DIRS": "up",
+        "TUNNELS": "2", "ACTIVE": "2", "WGFP_XMIT_FAIL_BUDGET": "5",
+        "FAKE_QMAN_CHANGE": "xmit_ern",
+    })
+    assert result.returncode != 0
+    assert "QMan failures or rejections changed" in result.stderr
+
+
+def test_guarded_fast_path_does_not_retry_failed_client(tmp_path):
+    log = tmp_path / "counters.tsv"
+    result, commands = run_rig(tmp_path, SINGLE, {"FAKE_IPERF_FAIL_PORT": "5231",
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(log), "DIRS": "down",
+        "WG_PORT": "eth3",
+    })
+    assert result.returncode != 0
+    assert len([command for command in commands if "iperf3 -c " in command]) == 1
+    assert [row.split("\t")[3] for row in log.read_text().splitlines()] == ["before", "after"]
+    assert not (tmp_path / "wgfp-owner").exists()
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+@pytest.mark.parametrize("counter", ["xmit_fail", "xmit_ern"])
+def test_qman_failure_after_client_fails_settle_gate(tmp_path, script, counter):
+    log = tmp_path / "counters.tsv"
+    result, _ = run_rig(tmp_path, script, {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(log), "DIRS": "up",
+        "TUNNELS": "2", "ACTIVE": "2", "FAKE_QMAN_CHANGE": counter,
+        "FAKE_QMAN_CHANGE_AT": "3",
+    })
+    assert result.returncode != 0
+    assert "QMan failures or rejections changed" in result.stderr
+    assert [row.split("\t")[3] for row in log.read_text().splitlines()] == [
+        "before", "after", "settle",
+    ]
+
+
+def test_wgfp_sampler_skips_fman_ehash_debugfs_during_traffic(tmp_path):
+    capture = tmp_path / "dut-stat.sh"
+    result, commands = run_rig(tmp_path, SINGLE, {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(tmp_path / "counters.tsv"),
+        "DIRS": "up", "FAKE_DUT_STAT_SCRIPT": str(capture),
+    })
+    assert result.returncode == 0, result.stdout + result.stderr
+    script = capture.read_text()
+    assert "skip_ehash=$3" in script
+    assert 'if [ "$skip_ehash" != 1 ]; then' in script
+    assert "sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats" in script
+    assert any(command.startswith("bash -s -- ") and command.endswith(" 1")
+               for command in commands)
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+@pytest.mark.parametrize("counter", ["xmit_fail", "xmit_ern"])
+def test_failed_settle_cannot_be_reused_by_another_runner(tmp_path, script, counter):
+    log = tmp_path / "counters.tsv"
+    options = {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(log), "DIRS": "up",
+        "TUNNELS": "2", "ACTIVE": "2",
+    }
+    first, first_commands = run_rig(tmp_path, script, options | {
+        "FAKE_QMAN_CHANGE": counter, "FAKE_QMAN_CHANGE_AT": "3",
+    })
+    assert first.returncode != 0
+    stats = (
+        "touch=2 sinks=1 xmit_ok=123 xmit_fail=0 xmit_ern=0\n"
+        "sink0 cpu=0 fqid=0x2be frames=10 errs=0 sg=0"
+    ).replace(f"{counter}=0", f"{counter}=1")
+    second, commands = run_rig(tmp_path, script, options | {"FAKE_QMAN_STATE": stats})
+    assert second.returncode != 0
+    assert "previous WGFP" in second.stderr
+    assert not any(
+        "iperf3 -c " in command or
+        "tee /sys/module/wireguard/parameters/wgfp_peer_lease" in command
+        for command in commands[len(first_commands):]
+    )
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+@pytest.mark.parametrize("damage", ["counter", "boot", "sequence", "truncated"])
+def test_invalid_earlier_counter_history_cannot_be_reused(tmp_path, script, damage):
+    log = tmp_path / "counters.tsv"
+    options = {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(log), "DIRS": "up down",
+        "TUNNELS": "2", "ACTIVE": "2",
+    }
+    first, first_commands = run_rig(tmp_path, script, options)
+    assert first.returncode == 0, first.stdout + first.stderr
+    data = log.read_text()
+    if damage == "counter":
+        data = data.replace("xmit_fail=0", "xmit_fail=1", 1)
+    elif damage == "boot":
+        data = data.replace("01234567-89ab-cdef-0123-456789abcdef",
+                            "abcdef01-2345-6789-abcd-ef0123456789", 1)
+    elif damage == "sequence":
+        data = data.replace("\tafter\t", "\tbefore\t", 1)
+    else:
+        data = data[:-1]
+    log.write_text(data)
+    second, commands = run_rig(tmp_path, script, options)
+    assert second.returncode != 0
+    assert "previous WGFP" in second.stderr
+    assert not any(
+        "iperf3 -c " in command or
+        "tee /sys/module/wireguard/parameters/wgfp_peer_lease" in command
+        for command in commands[len(first_commands):]
+    )
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_valid_counter_history_can_be_reused(tmp_path, script):
+    log = tmp_path / "counters.tsv"
+    options = {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(log), "DIRS": "up",
+        "TUNNELS": "2", "ACTIVE": "2",
+    }
+    first, _ = run_rig(tmp_path, script, options)
+    assert first.returncode == 0, first.stdout + first.stderr
+    second, _ = run_rig(tmp_path, script, options)
+    assert second.returncode == 0, second.stdout + second.stderr
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_guarded_fast_path_rejects_reboot_during_sample(tmp_path, script):
+    log = tmp_path / "counters.tsv"
+    result, commands = run_rig(tmp_path, script, {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(log), "DIRS": "up",
+        "TUNNELS": "2", "ACTIVE": "2", "FAKE_BOOT_CHANGE_AT": "2",
+    })
+    assert result.returncode != 0
+    assert "boot" in result.stderr.lower()
+    assert not any("iperf3 -c " in command for command in commands)
+
+
+def test_malformed_tcp_result_is_rejected_without_retry(tmp_path):
+    result, commands = run_rig(tmp_path, SINGLE, {
+        "FAKE_IPERF_FAIL_PORT": "5231", "WGFP": "1", "DIRS": "down"})
+    assert result.returncode != 0
+    assert len([command for command in commands if "iperf3 -c " in command]) == 1
+
+
+@pytest.mark.parametrize("guarded", [False, True])
+def test_complete_tcp_stall_is_recorded_without_retry(tmp_path, guarded):
+    options = {"FAKE_IPERF_RATE_PORT": "5231", "FAKE_IPERF_RATE_BPS": "0",
+               "WGFP": "1", "DIRS": "down"}
+    if guarded:
+        options["WGFP_COUNTER_LOG"] = str(tmp_path / "counters.tsv")
+    result, commands = run_rig(tmp_path, SINGLE, options)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len([command for command in commands if "iperf3 -c " in command]) == 1
+    with (tmp_path / "result.csv").open(newline="") as source:
+        assert float(next(csv.DictReader(source))["gbps"]) == 0
+
+
+@pytest.mark.parametrize(("script", "clients_per_attempt"), [(SINGLE, 1), (MULTI, 2)])
+def test_qman_failure_between_repetitions_stops_before_new_client(
+    tmp_path, script, clients_per_attempt
+):
+    log = tmp_path / "counters.tsv"
+    result, commands = run_rig(tmp_path, script, {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(log), "DIRS": "up", "REPS": "2",
+        "TUNNELS": "2", "ACTIVE": "2", "FAKE_QMAN_CHANGE": "xmit_fail",
+        "FAKE_QMAN_CHANGE_AT": "4",
+    })
+    assert result.returncode != 0
+    assert "QMan failures or rejections changed" in result.stderr
+    assert len([command for command in commands if "iperf3 -c " in command]) == clients_per_attempt
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_qman_failure_between_runner_processes_stops_before_new_client(tmp_path, script):
+    log = tmp_path / "counters.tsv"
+    options = {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(log), "DIRS": "up",
+        "TUNNELS": "2", "ACTIVE": "2",
+    }
+    first, first_commands = run_rig(tmp_path, script, options)
+    assert first.returncode == 0, first.stdout + first.stderr
+    second, commands = run_rig(tmp_path, script, options | {
+        "FAKE_QMAN_STATE": (
+            "touch=2 sinks=1 xmit_ok=123 xmit_fail=1 xmit_ern=0\n"
+            "sink0 cpu=0 fqid=0x2be frames=10 errs=0 sg=0"
+        ),
+    })
+    assert second.returncode != 0
+    assert "QMan failures or rejections changed" in second.stderr
+    assert not any("iperf3 -c " in command for command in commands[len(first_commands):])
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
+def test_guarded_fast_path_rejects_boot_change_between_runners(tmp_path, script):
+    log = tmp_path / "counters.tsv"
+    options = {
+        "WGFP": "1", "WGFP_COUNTER_LOG": str(log), "DIRS": "up",
+        "TUNNELS": "2", "ACTIVE": "2",
+    }
+    first, first_commands = run_rig(tmp_path, script, options)
+    assert first.returncode == 0, first.stdout + first.stderr
+    second, commands = run_rig(tmp_path, script, options | {
+        "FAKE_BOOT_ID": "abcdef01-2345-6789-abcd-ef0123456789",
+    })
+    assert second.returncode != 0
+    assert "boot" in second.stderr.lower()
+    assert not any("iperf3 -c " in command for command in commands[len(first_commands):])
+
+
+@pytest.mark.parametrize("script", [SINGLE, MULTI])
 def test_unbound_fast_path_aborts_counter_measurement(tmp_path, script):
     result, commands = run_rig(
         tmp_path, script, {"WGFP": "1", "WGFP_COUNTER_LOG": str(tmp_path / "counters.tsv"),
@@ -1288,6 +1775,22 @@ command = " ".join(remote)
 state = Path(os.environ["FAKE_NFT_STATE"])
 with open(os.environ["FAKE_SSH_LOG"], "a") as log:
     log.write(json.dumps(command) + "\n")
+mode = re.fullmatch(r"sudo -n cat /sys/module/wireguard/parameters/(wgfp_rx|wgfp_rx_fast|wgfp_rx_tail)", command)
+if mode:
+    name = mode.group(1)
+    if os.environ.get("FAKE_MATRIX_MODE_ERROR") == name:
+        sys.exit(1)
+    def value(path, fallback):
+        stored = Path(os.environ[path])
+        return stored.read_text().strip() if stored.exists() else fallback
+
+    default_rx = "Y" if (os.environ.get("WGFP_RX") or os.environ.get("WGFP")) == "1" else "N"
+    values = {
+        "wgfp_rx": value("FAKE_MATRIX_RX_FILE", os.environ.get("FAKE_MATRIX_RX", default_rx)),
+        "wgfp_rx_fast": value("FAKE_MATRIX_FAST_FILE", os.environ.get("FAKE_MATRIX_FAST", "2")),
+        "wgfp_rx_tail": value("FAKE_MATRIX_TAIL_FILE", os.environ.get("FAKE_MATRIX_TAIL", "N")),
+    }
+    print(values[name])
 if remote[:2] == ["sh", "-s"]:
     sys.stdin.read()
     if os.environ.get("FAKE_MATRIX_FAIL") == "preflight":
@@ -1314,27 +1817,68 @@ if os.environ.get("FAKE_MATRIX_FAIL") == "chain" and "nft 'add chain" in command
 """
 
 MATRIX_FAKE_RIG = r"""#!/usr/bin/env bash
-echo "$(basename "$0") $DUT $DUT_KIND outer=${OUTER:-4}" >> "$FAKE_RIG_LOG"
+if [ "${1:-}" = topology ]; then
+    if [ "${FAKE_TOPO_MISMATCH:-0}" = 1 ] && [[ $0 = *multi.sh ]]; then
+        echo "203.0.113.10 203.0.113.1 2001:db8:3::10 2001:db8:3::1"
+        exit 0
+    fi
+    case "${WG_PORT:-eth4}" in
+        eth3) echo "192.0.2.10 192.0.2.1 2001:db8:1::10 2001:db8:1::1" ;;
+        eth4) echo "198.51.100.10 198.51.100.1 2001:db8:2::10 2001:db8:2::1" ;;
+        *) exit 2 ;;
+    esac
+    exit 0
+fi
+echo "$(basename "$0") $DUT $DUT_KIND qdisc=${WG_GEN_QDISC:-default} port=${WG_PORT:-unset} inner=${INNER:-4} outer=${OUTER:-4}" >> "$FAKE_RIG_LOG"
+if [ "${FAKE_MATRIX_DRIFT_RX:-0}" = 1 ]; then
+    printf 'N\n' > "$FAKE_MATRIX_RX_FILE"
+fi
+if [ "${FAKE_MATRIX_DRIFT_FAST:-0}" = 1 ]; then
+    printf '1\n' > "$FAKE_MATRIX_FAST_FILE"
+fi
+if [ "${FAKE_MATRIX_DRIFT_TAIL:-0}" = 1 ]; then
+    printf 'Y\n' > "$FAKE_MATRIX_TAIL_FILE"
+fi
 if [ "${FAKE_MATRIX_FAIL:-}" = single ] && [[ $0 = *testrig-wireguard.sh ]]; then
     echo "single failed" >&2
     exit 1
 fi
-cell=${TUNNELS:-wg-v4}
+cell=${TUNNELS:-wg-v4${WG_SUF:-}}
 peers=${TUNNELS:-1}
 # as the real multi runner: INNER=6 labels counters <N>v6 and writes wgm6- JSON
 ccell=$cell; jpre=wgm
 if [ "${INNER:-4}" = 6 ]; then ccell=${cell}v6; jpre=wgm6; fi
-printf 'dir,rep,gbps\n' > "$OUT"
+if [ -n "${FAKE_MATRIX_COLLISION:-}" ] && [ ! -e "$FAKE_MATRIX_COLLISION" ]; then
+    printf 'foreign\n' > "$FAKE_MATRIX_COLLISION"
+fi
+if [ -n "${TUNNELS:-}" ]; then
+    printf 'tunnels,active,dir,rep,gbps\n' > "$OUT"
+else
+    printf 'cell,dir,rep,gbps\n' > "$OUT"
+fi
 for dir in up down bidir; do
-    printf '%s,1,1.5\n' "$dir" >> "$OUT"
-    python3 - "$J" "$cell" "$dir" "$DUR" "${FAKE_MATRIX_FAIL:-}" "$jpre" <<'PY'
-import json, sys
+    rowrate=1.5; [ "${FAKE_MATRIX_FAIL:-}" != zero ] || rowrate=0
+    if [ "${INNER:-4}" != 6 ] || [ "${FAKE_MATRIX_INNER6_FAIL:-}" != missing_row ] || [ "$dir" != down ]; then
+        if [ -n "${TUNNELS:-}" ]; then
+            active=${ACTIVE:-$TUNNELS}
+            [ "${FAKE_MATRIX_FAIL:-}" != wrong_active ] || active=0
+            printf '%s,%s,%s,1,%s\n' "$TUNNELS" "$active" "$dir" "$rowrate" >> "$OUT"
+        else
+            rowcell=$cell
+            [ "${FAKE_MATRIX_FAIL:-}" != wrong_cell ] || rowcell=plain-v4
+            printf '%s,%s,1,%s\n' "$rowcell" "$dir" "$rowrate" >> "$OUT"
+        fi
+    fi
+    failure=${FAKE_MATRIX_FAIL:-}
+    if [ "${INNER:-4}" = 6 ] && [ "${FAKE_MATRIX_INNER6_FAIL:-}" = short_json ]; then failure=short; fi
+    python3 - "$J" "$cell" "$dir" "$DUR" "$failure" "$jpre" <<'PY'
+import json, os, sys
 from pathlib import Path
 
 directory, cell, direction, duration, failure, jpre = sys.argv[1:]
 duration = int(duration)
 tunnels = int(cell) if cell.isdigit() else 1
-rate = (1.8e9 if failure == "mismatch" else 1.5e9) / tunnels
+rate = (0 if failure == "zero" else 1.8e9 if failure == "mismatch" else 1.5e9) / tunnels
 forward = rate / 2 if direction == "bidir" else rate
 for peer in range(tunnels):
     intervals = []
@@ -1349,19 +1893,32 @@ for peer in range(tunnels):
     end = {"sum_sent": stats, "sum_received": stats}
     if direction == "bidir":
         end.update(sum_sent_bidir_reverse=stats, sum_received_bidir_reverse=stats)
-    name = (f"wg-v4-{direction}-r1.json" if tunnels == 1 else
+    name = (f"{cell}-{direction}-r1.json" if tunnels == 1 else
             f"{jpre}-{direction}-n{tunnels}-k{peer}-r1.json")
-    (Path(directory) / name).write_text(json.dumps({"intervals": intervals, "end": end}))
+    start = {"tcp_mss_default": 1368, "test_start": {
+        "protocol": "TCP", "duration": duration,
+        "num_streams": int(os.environ.get("STREAMS", "4" if tunnels == 1 else "2")),
+        "reverse": int(direction == "down"), "bidir": int(direction == "bidir")}}
+    (Path(directory) / name).write_text(json.dumps({"start": start, "intervals": intervals, "end": end}))
 PY
-    if [ "${WGFP:-0}" = 1 ]; then
-        printf '%s\t%s\t1\tbefore\t1\ton sealed=0 rx=0 peers=%s install_fail=0\t%s\t%s\n' \
-            "$ccell" "$dir" "$peers" "sinks=1 xmit_ok=0 xmit_fail=0 xmit_ern=0" \
+    if [ "${WGFP:-0}" = 1 ] && { [ "${INNER:-4}" != 6 ] || [ "${FAKE_MATRIX_INNER6_FAIL:-}" != missing_counter ]; }; then
+        boot=01234567-89ab-cdef-0123-456789abcdef
+        attempt=1; [ "${FAKE_MATRIX_FAIL:-}" != retry ] || attempt=2
+        before_fail=0
+        if [ "${FAKE_MATRIX_FAIL:-}" = qman_gap ] && [ "$dir" = down ]; then before_fail=1; fi
+        if [ "${FAKE_MATRIX_FAIL:-}" = qman_budget ]; then
+            before_fail=$(cat "$WGFP_COUNTER_LOG.fail" 2>/dev/null || echo 0)
+            echo $((before_fail + 1)) > "$WGFP_COUNTER_LOG.fail"
+        fi
+        printf '%s\t%s\t1\tbefore\t%s\ton sealed=0 rx=0 peers=%s install_fail=0 boot_id=%s\t%s\t%s\n' \
+            "$ccell" "$dir" "$attempt" "$peers" "$boot" "sinks=1 xmit_ok=0 xmit_fail=$before_fail xmit_ern=0" \
             "sink0 fqid=0x2be frames=10 errs=0 sg=0" >> "$WGFP_COUNTER_LOG"
         rx=0; [ "${FAKE_MATRIX_FAIL:-}" != rx_moved ] || rx=10
-        qman="sinks=1 xmit_ok=10 xmit_fail=0 xmit_ern=0"
+        qman="sinks=1 xmit_ok=10 xmit_fail=$before_fail xmit_ern=0"
         sink="sink0 fqid=0x2be frames=20 errs=0 sg=0"
         case "${FAKE_MATRIX_FAIL:-}" in
             qman_fail) qman="sinks=1 xmit_ok=10 xmit_fail=1 xmit_ern=0" ;;
+            qman_budget) qman="sinks=1 xmit_ok=10 xmit_fail=$((before_fail + 1)) xmit_ern=0" ;;
             qman_ern) qman="sinks=1 xmit_ok=10 xmit_fail=0 xmit_ern=1" ;;
             qman_stall) qman="sinks=1 xmit_ok=0 xmit_fail=0 xmit_ern=0" ;;
             qman_missing) qman="sinks=1 xmit_ok=10 xmit_fail=0" ;;
@@ -1371,8 +1928,14 @@ PY
             sink_sg) sink="sink0 fqid=0x2be frames=20 errs=0 sg=1" ;;
             sink_identity) sink="sink0 fqid=0x2bf frames=20 errs=0 sg=0" ;;
         esac
-        printf '%s\t%s\t1\tafter\t1\ton sealed=10 rx=%s peers=%s install_fail=0\t%s\t%s\n' \
-            "$ccell" "$dir" "$rx" "$peers" "$qman" "$sink" >> "$WGFP_COUNTER_LOG"
+        printf '%s\t%s\t1\tafter\t%s\ton sealed=10 rx=%s peers=%s install_fail=0 boot_id=%s\t%s\t%s\n' \
+            "$ccell" "$dir" "$attempt" "$rx" "$peers" "$boot" "$qman" "$sink" >> "$WGFP_COUNTER_LOG"
+        if [ "${FAKE_MATRIX_FAIL:-}" != missing_settle ]; then
+            [ "${FAKE_MATRIX_FAIL:-}" != qman_late ] || qman="sinks=1 xmit_ok=10 xmit_fail=1 xmit_ern=0"
+            [ "${FAKE_MATRIX_FAIL:-}" != boot_change ] || boot=abcdef01-2345-6789-abcd-ef0123456789
+            printf '%s\t%s\t1\tsettle\t%s\ton sealed=10 rx=%s peers=%s install_fail=0 boot_id=%s\t%s\t%s\n' \
+                "$ccell" "$dir" "$attempt" "$rx" "$peers" "$boot" "$qman" "$sink" >> "$WGFP_COUNTER_LOG"
+        fi
     fi
 done
 echo "measurement complete"
@@ -1389,6 +1952,9 @@ def run_matrix(tmp_path, target, extra=None):
     bin_dir.mkdir(parents=True)
     shutil.copy(MATRIX, bin_dir / "wg-matrix.sh")
     shutil.copy(ROOT / "bin/testrig-env.sh", bin_dir / "testrig-env.sh")
+    shutil.copy(ROOT / "bin/testrig-wgfp-modes.sh", bin_dir / "testrig-wgfp-modes.sh")
+    shutil.copy(ROOT / "bin/testrig_wg_validation.py", bin_dir / "testrig_wg_validation.py")
+    shutil.copy(ROOT / "bin/testrig_iperf.py", bin_dir / "testrig_iperf.py")
     for name in ("testrig-wireguard.sh", "testrig-wireguard-multi.sh"):
         script = bin_dir / name
         script.write_text(MATRIX_FAKE_RIG)
@@ -1407,6 +1973,7 @@ def run_matrix(tmp_path, target, extra=None):
         "DUT": "",
         "RIG_NS": "",
         "WG_PORT": "eth4",
+        "WG_GEN_QDISC": "default",
         "OUTER": "4",
         "WG_NOTRACK": "0",
         "WGFP": "0",
@@ -1428,6 +1995,9 @@ def run_matrix(tmp_path, target, extra=None):
         "FAKE_SSH_LOG": str(log),
         "FAKE_RIG_LOG": str(rig_log),
         "FAKE_NFT_STATE": str(tmp_path / "nft.json"),
+        "FAKE_MATRIX_RX_FILE": str(tmp_path / "rx-mode"),
+        "FAKE_MATRIX_FAST_FILE": str(tmp_path / "fast-mode"),
+        "FAKE_MATRIX_TAIL_FILE": str(tmp_path / "tail-mode"),
     }
     env.update(extra or {})
     env = {k: v for k, v in env.items() if v is not None}   # None in extra unsets a variable
@@ -1448,14 +2018,175 @@ def test_matrix_uses_owned_scoped_nft_table_without_changing_vyos_config(tmp_pat
     assert token.startswith(table)
     setup = next(command for command in commands if "nft 'add chain" in command)
     assert f"inet {table} pre" in setup and f"inet {table} out" in setup
-    assert "ip saddr 10.99.2.113 ip daddr 10.99.2.185" in setup
+    assert "ip saddr 198.51.100.10 ip daddr 198.51.100.1" in setup
     assert "udp sport 51820-51833 udp dport 51820-51833 notrack" in setup
     assert any(f"nft -a list table inet {table}" in command for command in commands)
     assert sum("nft delete table inet handle 42" in command for command in commands) == 1
     assert not any("conntrack ignore" in command or "sysctl" in command for command in commands)
     assert len(rigs) == ASK2_MATRIX_RUNS and all("vyos@192.168.1.185 ask2" in rig for rig in rigs)
-    assert "ip6 saddr fd99:2::113 ip6 daddr fd99:2::185 udp sport 51820-51833 udp dport 51820-51833 notrack" in setup
+    assert "ip6 saddr 2001:db8:2::10 ip6 daddr 2001:db8:2::1 udp sport 51820-51833 udp dport 51820-51833 notrack" in setup
     assert not list((tmp_path / "out").glob("*/nft-pending"))
+    for cell in ("t1", "t2", "t4", "t2v6", "t4v6"):
+        published = tmp_path / f"out/wgtest-185-{cell}.csv"
+        assert published.is_file()
+        assert published.samefile(next((tmp_path / "out").glob(f"wgtest-185-*/{cell}.csv")))
+
+
+@pytest.mark.parametrize(("target", "runs"), [("185", ASK2_MATRIX_RUNS), ("106", 3)])
+def test_matrix_defaults_to_dell1_on_encrypted_leg(tmp_path, target, runs):
+    result, commands, rigs = run_matrix(tmp_path, target, {"WG_PORT": None})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(rigs) == runs and all("port=eth3" in rig for rig in rigs)
+    metadata = list((tmp_path / "out").glob("*/encrypted-leg.txt"))
+    assert len(metadata) == 1 and metadata[0].read_text() == "eth3\n"
+    if target == "185":
+        setup = next(command for command in commands if "nft 'add chain" in command)
+        assert "ip saddr 192.0.2.10 ip daddr 192.0.2.1" in setup
+
+
+def test_matrix_uses_mirrored_outer_endpoints_for_eth3(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "185", {"WG_PORT": "eth3", "WGFP": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    setup = next(command for command in commands if "nft 'add chain" in command)
+    assert "ip saddr 192.0.2.10 ip daddr 192.0.2.1" in setup
+    assert "ip6 saddr 2001:db8:1::10 ip6 daddr 2001:db8:1::1" in setup
+    assert len(rigs) == ASK2_MATRIX_RUNS
+
+
+def test_vendor_matrix_supports_mirrored_outer_peer(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "106", {"WG_PORT": "eth3"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(rigs) == 3 and all(" vendor " in rig for rig in rigs)
+    assert not any("nft 'create table inet" in command for command in commands)
+
+
+def test_matrix_records_and_propagates_opt_in_generator_qdisc(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "185", {"WG_GEN_QDISC": "fq"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    metadata = list((tmp_path / "out").glob("*/generator-qdisc.txt"))
+    assert len(metadata) == 1 and metadata[0].read_text() == "fq\n"
+    assert len(rigs) == ASK2_MATRIX_RUNS and all("qdisc=fq" in rig for rig in rigs)
+
+
+def test_matrix_does_not_write_global_wgfp_modes(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "185", {
+        "WGFP": "1", "WGFP_RX": "1", "WGFP_RX_FAST": "2", "WGFP_RX_TAIL": "0",
+        "FAKE_MATRIX_FAIL": "rx_moved",
+    })
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(rigs) == ASK2_MATRIX_RUNS
+    assert not any("tee /sys/module/wireguard/parameters/wgfp_rx" in command
+                   for command in commands)
+
+
+@pytest.mark.parametrize(("name", "extra"), [
+    ("wgfp_rx", {"WGFP_RX": "1", "FAKE_MATRIX_RX": "N"}),
+    ("wgfp_rx_fast", {"WGFP_RX": "1", "WGFP_RX_FAST": "2", "FAKE_MATRIX_FAST": "1"}),
+    ("wgfp_rx_tail", {"WGFP_RX": "1", "WGFP_RX_TAIL": "1", "FAKE_MATRIX_TAIL": "N"}),
+])
+def test_matrix_rejects_mismatched_global_mode_before_setup(tmp_path, name, extra):
+    result, commands, rigs = run_matrix(tmp_path, "185", {"WGFP": "1"} | extra)
+    assert result.returncode != 0
+    assert name in result.stderr
+    assert not rigs
+    assert not any("nft 'create table" in command or
+                   "tee /sys/module/wireguard/parameters/wgfp_rx" in command
+                   for command in commands)
+
+
+@pytest.mark.parametrize(("name", "extra"), [
+    ("wgfp_rx", {"FAKE_MATRIX_DRIFT_RX": "1"}),
+    ("wgfp_rx_fast", {"WGFP_RX_FAST": "2", "FAKE_MATRIX_DRIFT_FAST": "1"}),
+    ("wgfp_rx_tail", {"WGFP_RX_TAIL": "0", "FAKE_MATRIX_DRIFT_TAIL": "1"}),
+])
+def test_matrix_stops_if_global_mode_changes_during_a_runner(tmp_path, name, extra):
+    result, commands, rigs = run_matrix(tmp_path, "185", {
+        "WGFP": "1", "WGFP_RX": "1",
+        "FAKE_MATRIX_FAIL": "rx_moved",
+    } | extra)
+    assert result.returncode != 0
+    assert name in result.stderr
+    assert len(rigs) == 1
+    assert any("nft delete table" in command for command in commands)
+    assert not any("tee /sys/module/wireguard/parameters/wgfp_rx" in command
+                   for command in commands)
+
+
+@pytest.mark.parametrize("name", ["wgfp_rx", "wgfp_rx_fast", "wgfp_rx_tail"])
+def test_matrix_refuses_unreadable_global_mode_before_setup(tmp_path, name):
+    result, commands, rigs = run_matrix(tmp_path, "185", {
+        "WGFP": "1", "WGFP_RX": "1", "WGFP_RX_FAST": "2", "WGFP_RX_TAIL": "0",
+        "FAKE_MATRIX_MODE_ERROR": name,
+    })
+    assert result.returncode != 0
+    assert f"cannot read {name}" in result.stderr
+    assert not rigs
+    assert not any("nft 'create table" in command or
+                   "tee /sys/module/wireguard/parameters/wgfp_rx" in command
+                   for command in commands)
+
+
+def test_matrix_rejects_invalid_generator_qdisc_before_touching_dut(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "185", {"WG_GEN_QDISC": "fq;unexpected"})
+    assert result.returncode == 2
+    assert "WG_GEN_QDISC" in result.stderr
+    assert not commands and not rigs
+
+
+def test_matrix_rejects_invalid_inner_family_before_touching_dut(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "185", {"WG_INNER6": "unexpected"})
+    assert result.returncode == 2
+    assert "WG_INNER6" in result.stderr
+    assert not commands and not rigs
+
+
+@pytest.mark.parametrize("mode", ["1", "2", "3"])
+def test_vendor_matrix_rejects_runner_notrack_before_remote_access(tmp_path, mode):
+    result, commands, rigs = run_matrix(tmp_path, "106", {"WG_NOTRACK": mode})
+    assert result.returncode != 0
+    assert "WG_NOTRACK" in result.stderr
+    assert not commands and not rigs
+
+
+@pytest.mark.parametrize("failure", ["wrong_cell", "wrong_active"])
+def test_matrix_rejects_misidentified_measurements(tmp_path, failure):
+    result, _, _ = run_matrix(tmp_path, "185", {"FAKE_MATRIX_FAIL": failure})
+    assert result.returncode != 0
+    assert "identity" in result.stderr
+    assert not list((tmp_path / "out").glob("wgtest-185-t*.csv"))
+
+
+@pytest.mark.parametrize("cell", ["t1", "t2"])
+def test_matrix_preserves_a_file_created_after_preflight(tmp_path, cell):
+    target = tmp_path / f"out/wgtest-185-{cell}.csv"
+    result, _, _ = run_matrix(tmp_path, "185", {"FAKE_MATRIX_COLLISION": str(target)})
+    assert result.returncode != 0
+    assert target.read_text() == "foreign\n"
+    assert list((tmp_path / "out").glob(f"wgtest-185-*/{cell}.csv"))
+    assert not (tmp_path / "out/wgtest-185-t4.csv").exists()
+
+
+def test_matrix_does_not_inherit_the_inner_family_for_ipv4_rows(tmp_path):
+    result, _, rigs = run_matrix(tmp_path, "185", {"INNER": "6"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ["inner=6" in rig for rig in rigs] == [False, False, False, True, True]
+
+
+def test_matrix_stops_before_next_runner_if_sink_errors_change(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "185", {
+        "WGFP": "1", "FAKE_MATRIX_FAIL": "sink_error",
+    })
+    assert result.returncode != 0
+    assert "sink errors or SG drops changed" in result.stderr
+    assert len(rigs) == 1
+    assert any("nft delete table" in command for command in commands)
+
+
+def test_matrix_rejects_mismatched_runner_endpoints_before_touching_dut(tmp_path):
+    result, commands, rigs = run_matrix(tmp_path, "185", {"FAKE_TOPO_MISMATCH": "1"})
+    assert result.returncode != 0
+    assert "endpoint" in (result.stdout + result.stderr).lower()
+    assert commands == [] and rigs == []
 
 
 @pytest.mark.parametrize("failure", ["chain", "single"])
@@ -1509,8 +2240,20 @@ def test_matrix_rejects_p3_receive_activity_and_removes_its_table(tmp_path):
     )
     assert result.returncode != 0
     assert "P3 receive counter advanced" in result.stderr
-    assert len(rigs) == ASK2_MATRIX_RUNS
+    assert len(rigs) == 1
     assert any("nft delete table" in command for command in commands)
+
+
+@pytest.mark.parametrize(("budget", "passes"), [("0", False), ("1", True)])
+def test_matrix_xmit_fail_budget_bounds_each_cell(tmp_path, budget, passes):
+    result, _, _ = run_matrix(tmp_path, "185", {
+        "WGFP": "1", "FAKE_MATRIX_FAIL": "qman_budget", "WGFP_XMIT_FAIL_BUDGET": budget,
+    })
+    if passes:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0
+        assert "QMan failures or rejections changed" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -1525,6 +2268,11 @@ def test_matrix_rejects_p3_receive_activity_and_removes_its_table(tmp_path):
         ("sink_error", "sink errors or SG drops changed"),
         ("sink_sg", "sink errors or SG drops changed"),
         ("sink_identity", "sink FQ identities changed"),
+        ("qman_late", "QMan failures or rejections changed"),
+        ("qman_gap", "QMan failures or rejections changed"),
+        ("missing_settle", "invalid WGFP counter sequence"),
+        ("retry", "WGFP attempt"),
+        ("boot_change", "DUT boot changed"),
     ],
 )
 def test_matrix_rejects_invalid_qman_transmit_counters(tmp_path, failure, message):
@@ -1533,7 +2281,7 @@ def test_matrix_rejects_invalid_qman_transmit_counters(tmp_path, failure, messag
     )
     assert result.returncode != 0
     assert message in result.stderr
-    assert len(rigs) == ASK2_MATRIX_RUNS
+    assert len(rigs) == 1
     assert any("nft delete table" in command for command in commands)
 
 
@@ -1550,6 +2298,27 @@ def test_matrix_rejects_csv_that_disagrees_with_iperf(tmp_path):
     assert result.returncode != 0
     assert "differs from its iperf JSON" in result.stderr
     assert len(rigs) == ASK2_MATRIX_RUNS
+    assert any("nft delete table" in command for command in commands)
+
+
+def test_matrix_retains_complete_zero_rate_measurements(tmp_path):
+    result, _, rigs = run_matrix(tmp_path, "185", {"FAKE_MATRIX_FAIL": "zero"})
+    assert result.returncode == 0, result.stderr
+    assert len(rigs) == ASK2_MATRIX_RUNS
+
+
+@pytest.mark.parametrize(("failure", "message"), [
+    ("missing_row", "missing"),
+    ("short_json", "incomplete"),
+    ("missing_counter", "WGFP"),
+])
+def test_matrix_validates_each_ipv6_inner_measurement_and_counter(tmp_path, failure, message):
+    result, commands, rigs = run_matrix(tmp_path, "185", {
+        "WGFP": "1", "FAKE_MATRIX_INNER6_FAIL": failure,
+    })
+    assert result.returncode != 0
+    assert message.lower() in result.stderr.lower()
+    assert len(rigs) == (4 if failure == "missing_counter" else ASK2_MATRIX_RUNS)
     assert any("nft delete table" in command for command in commands)
 
 
@@ -1677,8 +2446,8 @@ def test_matrix_rejects_unknown_outer_family(tmp_path):
 
 
 def test_matrix_receive_offload_follows_wgfp(tmp_path):
-    # unset WGFP_RX with WGFP=1: the run switches P3 receive on and requires direct-RX frames
+    # unset WGFP_RX with WGFP=1: the run requires P3 enabled and direct-RX frames
     result, commands, rigs = run_matrix(
         tmp_path, "185", {"WGFP": "1", "WGFP_RX": None, "FAKE_MATRIX_FAIL": "rx_moved"})
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "wgfp_rx:  -> 1" in result.stdout
+    assert any("cat /sys/module/wireguard/parameters/wgfp_rx" in command for command in commands)

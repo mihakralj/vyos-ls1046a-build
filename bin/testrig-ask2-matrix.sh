@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # testrig-ask2-matrix.sh — ASK2-only flow-type matrix (plans/ASK2-PERF-MATRIX-PLAN.md, Layer A, first cut).
 #   unicast, nat, vlan-vlan, vlan-port, pppoe: bin/testrig-offload-quick.sh cells, unidir then BIDIR=1
-#   wireguard: bin/wg-parity.sh ask2 (1 tunnel on eth4, fresh tunnel per rep); wireguard6: the same with OUTER=6
-#   bridge, *-9k, policer, 2/4-tunnel WireGuard: bin/testrig-ask2-bridge.sh, testrig-ask2-9k.sh,
-#   testrig-ask2-policer.sh, wg-matrix.sh (same run dir). ipsec/multicast/broadcast/fragments: not measured
+#   wireguard: bin/wg-parity.sh ask2 (1 tunnel, fresh tunnel per rep); wireguard6: the same with OUTER=6
+#   bridge, *-9k, 2/4-tunnel WireGuard: bin/testrig-ask2-bridge.sh, testrig-ask2-9k.sh,
+#   wg-matrix.sh (same run dir). The policer is not part of the table. ipsec/multicast/broadcast/fragments: not measured
 # Every cell runs REPS short reps (DUR s, steady window from STEADY_FROM s); the table keeps the FASTEST rep.
 # Usage: bin/testrig-ask2-matrix.sh            Env: REPS=3 WG_REPS=$REPS DUR=10 STEADY_FROM=3 BIDIR_DUR=20 BIDIR_STEADY_FROM=12 WGFP=1|0 OUTDIR=...
+#        WG_PORT=eth3 (default; the far WireGuard peer, which runs software crypto, is the faster dell1) | eth4 (dell2)
+# Generator tuning is applied and verified first (bin/testrig-gen-tune.sh); drift aborts the run.
 # Output: the table on stdout; raw CSVs, JSON and matrix.csv (with verdicts) in $OUTDIR/ask2-matrix-<stamp>/.
 # Never run it next to other rig traffic.
-set -u
+set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/testrig-env.sh"
+if [ "${RIG_PARITY:-0}" = 1 ]; then . "$HERE/testrig-parity-profile.sh"; fi
 rig_require ASK2_DUT
 REPS=${REPS:-3}; WG_REPS=${WG_REPS:-$REPS}
 export DUR=${DUR:-10} STEADY_FROM=${STEADY_FROM:-3}
@@ -19,8 +22,20 @@ export DUR=${DUR:-10} STEADY_FROM=${STEADY_FROM:-3}
 BIDIR_DUR=${BIDIR_DUR:-20}; BIDIR_STEADY_FROM=${BIDIR_STEADY_FROM:-12}
 # WireGuard offload follows the port offload, so the ASK2 row measures the fast path (WGFP=0: software A/B).
 export WGFP=${WGFP:-1}
-RUN=${OUTDIR:-$RIG_OUT}/ask2-matrix-$(date +%Y%m%d-%H%M)
-mkdir -p "$RUN"
+WG_PORT=${WG_PORT:-eth3}
+case $WG_PORT in eth3|eth4) ;; *) echo "WG_PORT must be eth3 or eth4" >&2; exit 2 ;; esac
+RUN_BASE=${OUTDIR:-$RIG_OUT}
+RUN=$RUN_BASE/ask2-matrix-$(date +%Y%m%d-%H%M)
+mkdir -p "$RUN_BASE"
+if [ -e "$RUN" ] || [ -L "$RUN" ]; then echo "Refusing to reuse $RUN" >&2; exit 2; fi
+"$HERE/testrig-gen-tune.sh" && "$HERE/testrig-gen-tune.sh" check || { echo "generator tuning failed" >&2; exit 1; }
+mkdir "$RUN"
+if [ "${RIG_PARITY:-0}" = 1 ]; then
+  python3 "$HERE/testrig_parity.py" profile "$RUN/protocol.json"
+fi
+if [ "$WGFP" = 1 ]; then
+  export WGFP_COUNTER_LOG=${WGFP_COUNTER_LOG:-"$RUN/wgfp-counters.tsv"}
+fi
 UNI="unicast-v4 unicast-v6 unicast-v4-rev unicast-v6-rev nat-v4 nat-v6 nat-v4-rev nat-v6-rev
 vlan-v4 vlan-v6 vlan-v4-rev vlan-v6-rev vlanport-v4 vlanport-v6 portvlan-v4 portvlan-v6
 pppoe-up-v4 pppoe-up-v6 pppoe-down-v4 pppoe-down-v6"
@@ -32,8 +47,8 @@ for r in $(seq 1 "$REPS"); do
   DUT_KIND=ask2 BIDIR=1 DUR=$BIDIR_DUR STEADY_FROM=$BIDIR_STEADY_FROM OUT=$RUN/quick-bidir-r$r.csv J=$RUN/json-r$r "$HERE/testrig-offload-quick.sh" $BI
 done
 echo "##### wireguard $(date +%T)"
-OUTDIR=$RUN REPS=$WG_REPS PORTS=eth4 TAG=wg CELLS="wg-v4 wg-v6" DIRS="up down bidir" "$HERE/wg-parity.sh" ask2
+OUTER=4 OUTDIR=$RUN REPS=$WG_REPS PORTS=$WG_PORT TAG=wg CELLS="wg-v4 wg-v6" DIRS="up down bidir" "$HERE/wg-parity.sh" ask2
 echo "##### wireguard6 (IPv6 outer transport) $(date +%T)"
-OUTER=6 OUTDIR=$RUN REPS=$WG_REPS PORTS=eth4 TAG=wg6 CELLS="wg-v4 wg-v6" DIRS="up down bidir" "$HERE/wg-parity.sh" ask2
+OUTER=6 OUTDIR=$RUN REPS=$WG_REPS PORTS=$WG_PORT TAG=wg6 CELLS="wg-v4 wg-v6" DIRS="up down bidir" "$HERE/wg-parity.sh" ask2
 echo "##### done $(date +%T), raw results in $RUN"
 python3 "$HERE/ask2-matrix-table.py" "$RUN"

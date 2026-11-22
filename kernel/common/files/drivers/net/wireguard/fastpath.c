@@ -227,10 +227,11 @@ static void wgfp_mac(const u8 key[POLY1305_KEY_SIZE], const u8 *m,
  * @src, zero-pads to @plain (@plain >= @ip_len), optionally decrements IPv4
  * TTL or IPv6 hop_limit on the encrypted plaintext without mutating @src, and
  * writes @plain ciphertext bytes plus 16-byte Poly1305 tag to @dst in a single
- * NEON section.  Block 0 (Poly1305 key) rides with up to 256 head bytes on the
- * stack so a 1420-byte packet uses the exact same 5 NEON calls as in-place. */
+ * NEON section.  When @scratch_b0 is true, caller guarantees 64 writable
+ * scratch bytes immediately before @dst (which will be overwritten by the outer
+ * header), eliminating the 256-byte stack copy-back and 320-byte stack wipe. */
 static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
-			      u8 family, u64 nonce,
+			      u8 family, bool scratch_b0, u64 nonce,
 			      const u8 key[CHACHA20POLY1305_KEY_SIZE],
 			      unsigned int neon_min)
 {
@@ -242,17 +243,20 @@ static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 	struct chacha_state st;
 
 	wgfp_chacha_setup(&st, nonce, key);
-	memset(head_buf, 0, CHACHA_BLOCK_SIZE);
-	memcpy(head_buf + CHACHA_BLOCK_SIZE, src, copy_head);
-	if (head > copy_head)
-		memset(head_buf + CHACHA_BLOCK_SIZE + copy_head, 0,
-		       head - copy_head);
-	if (family == AF_INET && copy_head >= sizeof(struct iphdr))
-		ip_decrease_ttl((struct iphdr *)(head_buf + CHACHA_BLOCK_SIZE));
-	else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr))
-		((struct ipv6hdr *)(head_buf + CHACHA_BLOCK_SIZE))->hop_limit--;
 
 	if (!neon) {
+		u32 wipe = CHACHA_BLOCK_SIZE + head;
+
+		memset(head_buf, 0, CHACHA_BLOCK_SIZE);
+		memcpy(head_buf + CHACHA_BLOCK_SIZE, src, copy_head);
+		if (head > copy_head)
+			memset(head_buf + CHACHA_BLOCK_SIZE + copy_head, 0,
+			       head - copy_head);
+		if (family == AF_INET && copy_head >= sizeof(struct iphdr))
+			ip_decrease_ttl((struct iphdr *)(head_buf + CHACHA_BLOCK_SIZE));
+		else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr))
+			((struct ipv6hdr *)(head_buf + CHACHA_BLOCK_SIZE))->hop_limit--;
+
 		chacha_block_generic(&st, head_buf, 20);
 		wgfp_chacha_gen(&st, dst, head_buf + CHACHA_BLOCK_SIZE, head);
 		if (plain > head) {
@@ -284,16 +288,52 @@ static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 						       chunk - avail);
 					wgfp_chacha_gen(&st, dst + off, tmp,
 							chunk);
+					wipe = sizeof(head_buf);
 					off += chunk;
 				}
 			}
 		}
 		wgfp_mac(head_buf, dst, plain, false, dst + plain);
-	} else {
-		kernel_neon_begin();
-		wgfp_chacha_neon(&st, head_buf, head_buf,
-				 CHACHA_BLOCK_SIZE + head);
-		memcpy(dst, head_buf + CHACHA_BLOCK_SIZE, head);
+		chacha_zeroize_state(&st);
+		memzero_explicit(head_buf, wipe);
+		return;
+	}
+
+	{
+		u32 tail_wipe = 0;
+
+		if (likely(scratch_b0)) {
+			u8 *b0 = dst - CHACHA_BLOCK_SIZE;
+
+			memset(b0, 0, CHACHA_BLOCK_SIZE);
+			memcpy(dst, src, copy_head);
+			if (head > copy_head)
+				memset(dst + copy_head, 0, head - copy_head);
+			if (family == AF_INET && copy_head >= sizeof(struct iphdr))
+				ip_decrease_ttl((struct iphdr *)dst);
+			else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr))
+				((struct ipv6hdr *)dst)->hop_limit--;
+
+			kernel_neon_begin();
+			wgfp_chacha_neon(&st, b0, b0, CHACHA_BLOCK_SIZE + head);
+			memcpy(head_buf, b0, POLY1305_KEY_SIZE);
+			memzero_explicit(b0, CHACHA_BLOCK_SIZE);
+		} else {
+			memset(head_buf, 0, CHACHA_BLOCK_SIZE);
+			memcpy(head_buf + CHACHA_BLOCK_SIZE, src, copy_head);
+			if (head > copy_head)
+				memset(head_buf + CHACHA_BLOCK_SIZE + copy_head, 0,
+				       head - copy_head);
+			if (family == AF_INET && copy_head >= sizeof(struct iphdr))
+				ip_decrease_ttl((struct iphdr *)(head_buf + CHACHA_BLOCK_SIZE));
+			else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr))
+				((struct ipv6hdr *)(head_buf + CHACHA_BLOCK_SIZE))->hop_limit--;
+
+			kernel_neon_begin();
+			wgfp_chacha_neon(&st, head_buf, head_buf,
+					 CHACHA_BLOCK_SIZE + head);
+			memcpy(dst, head_buf + CHACHA_BLOCK_SIZE, head);
+		}
 		if (plain > head) {
 			if (ip_len == plain) {
 				wgfp_chacha_neon(&st, dst + head, src + head,
@@ -323,15 +363,20 @@ static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 						       chunk - avail);
 					wgfp_chacha_neon(&st, dst + off, tmp,
 							 chunk);
+					if (chunk > tail_wipe)
+						tail_wipe = chunk;
 					off += chunk;
 				}
 			}
 		}
 		wgfp_mac(head_buf, dst, plain, true, dst + plain);
 		kernel_neon_end();
+		chacha_zeroize_state(&st);
+		memzero_explicit(head_buf, scratch_b0 ? POLY1305_KEY_SIZE :
+					   CHACHA_BLOCK_SIZE);
+		if (unlikely(tail_wipe))
+			memzero_explicit(head_buf + CHACHA_BLOCK_SIZE, tail_wipe);
 	}
-	chacha_zeroize_state(&st);
-	memzero_explicit(head_buf, sizeof(head_buf));
 }
 
 /* @n plaintext bytes from @src into @dst (may equal @src), tag at src + n;
@@ -446,15 +491,16 @@ static int wgfp_one_ok(void)
 			u8 fam = ip_len_pad >= sizeof(struct ipv6hdr) ? AF_INET6 :
 				 ip_len_pad >= sizeof(struct iphdr) ? AF_INET : 0;
 
-			/* Out-of-place seal (unpadded, exact) + src untouched */
+			/* Out-of-place seal (scratch_b0=false and true) + src untouched */
 			memset(a, 0xa5, CHACHA_BLOCK_SIZE);
 			memset(p, 0x5a, len + POLY1305_DIGEST_SIZE);
-			wgfp_seal_one_dst(p, m, len, len, 0, nonce, key, neon_min);
+			wgfp_seal_one_dst(p, m, len, len, 0, false, nonce, key, neon_min);
 			ok = !memcmp(p, b, len + POLY1305_DIGEST_SIZE) &&
 			     !memchr_inv(a, 0xa5, CHACHA_BLOCK_SIZE);
-			/* Out-of-place seal with zero-padding + TTL/hop_limit dec */
+			/* Out-of-place seal with scratch_b0=true + zero-padding + TTL/hop_limit dec */
+			memset(a, 0xa5, CHACHA_BLOCK_SIZE);
 			memset(p, 0x5a, len + POLY1305_DIGEST_SIZE);
-			wgfp_seal_one_dst(p, m, ip_len_pad, len, fam, nonce, key, neon_min);
+			wgfp_seal_one_dst(p, m, ip_len_pad, len, fam, true, nonce, key, neon_min);
 			ok = ok && !memcmp(p, b2, len + POLY1305_DIGEST_SIZE);
 			/* Verify src m was never mutated */
 			for (j = 0; j < len && ok; j++)
@@ -590,7 +636,8 @@ static void wgfp_seal_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 		fold = wgfp_seal_selftest();
 #ifdef WGFP_ONE_NEON
 	if (likely(fold == 2)) {
-		wgfp_seal_one_dst(dst, src, ip_len, plain, family, nonce, key,
+		wgfp_seal_one_dst(dst, src, ip_len, plain, family,
+				  room >= CHACHA_BLOCK_SIZE, nonce, key,
 				  READ_ONCE(wgfp_neon_min));
 		return;
 	}
@@ -784,35 +831,42 @@ static int wgfp_lab_frame(void *priv, struct dpaa_wgfp_frame *f)
 
 	plain = ALIGN(ip_len, 16);
 	frame_len = WGFP_HDR_LEN + plain + POLY1305_DIGEST_SIZE;
-	if (unlikely(frame_len > DPAA_WGFP_TX_BUF_SIZE ||
-		     !dpaa_wgfp_tx_alloc(l->egress, 0, frame_len, &tx))) {
-		dpaa_wgfp_drop(f);
-		return 1;
+	{
+		u32 pad_off = WGFP_HDR_LEN < CHACHA_BLOCK_SIZE ?
+			      CHACHA_BLOCK_SIZE - WGFP_HDR_LEN : 0;
+		u32 off = DPAA_WGFP_TX_HEADROOM + pad_off;
+
+		if (unlikely(pad_off + frame_len > DPAA_WGFP_TX_BUF_SIZE ||
+			     !dpaa_wgfp_tx_alloc(l->egress, 0,
+						 pad_off + frame_len, &tx))) {
+			dpaa_wgfp_drop(f);
+			return 1;
+		}
+		hdr = (u8 *)tx.buf + off;
+		dst = hdr + WGFP_HDR_LEN;
+
+		ctr = (u64)atomic64_inc_return(&l->counter) - 1;
+		wgfp_seal_dst(dst, inner, ip_len, plain, 0, CHACHA_BLOCK_SIZE,
+			      ctr, l->key);
+
+		memcpy(hdr, l->tmpl, sizeof(l->tmpl));
+
+		tot = sizeof(struct iphdr) + sizeof(struct udphdr) +
+		      sizeof(struct message_data) + plain + POLY1305_DIGEST_SIZE;
+		oip = (struct iphdr *)(hdr + ETH_HLEN);
+		oip->tot_len = htons(tot);
+		oip->check = 0;
+		oip->check = ip_fast_csum((const u8 *)oip, oip->ihl);
+		udp = (struct udphdr *)(oip + 1);
+		udp->len = htons(tot - sizeof(struct iphdr));
+
+		wg = (struct message_data *)(udp + 1);
+		wg->header.type = cpu_to_le32(MESSAGE_DATA);
+		wg->key_idx = l->rcv_idx;
+		wg->counter = cpu_to_le64(ctr);
+
+		dpaa_wgfp_tx_submit(f, &tx, off, frame_len);
 	}
-	hdr = (u8 *)tx.buf + DPAA_WGFP_TX_HEADROOM;
-	dst = hdr + WGFP_HDR_LEN;
-
-	ctr = (u64)atomic64_inc_return(&l->counter) - 1;
-	wgfp_seal_dst(dst, inner, ip_len, plain, 0, CHACHA_BLOCK_SIZE,
-		      ctr, l->key);
-
-	memcpy(hdr, l->tmpl, sizeof(l->tmpl));
-
-	tot = sizeof(struct iphdr) + sizeof(struct udphdr) +
-	      sizeof(struct message_data) + plain + POLY1305_DIGEST_SIZE;
-	oip = (struct iphdr *)(hdr + ETH_HLEN);
-	oip->tot_len = htons(tot);
-	oip->check = 0;
-	oip->check = ip_fast_csum((const u8 *)oip, oip->ihl);
-	udp = (struct udphdr *)(oip + 1);
-	udp->len = htons(tot - sizeof(struct iphdr));
-
-	wg = (struct message_data *)(udp + 1);
-	wg->header.type = cpu_to_le32(MESSAGE_DATA);
-	wg->key_idx = l->rcv_idx;
-	wg->counter = cpu_to_le64(ctr);
-
-	dpaa_wgfp_tx_submit(f, &tx, DPAA_WGFP_TX_HEADROOM, frame_len);
 	return 1;
 }
 
@@ -985,6 +1039,11 @@ struct wgfp_binds {
 	bool stopping;
 };
 
+struct wgfp_rx_cnt {
+	u64 bytes;	/* single writer: this CPU in BH-disabled NAPI */
+	u64 folded;	/* single writer: wgfp_rx_fold() */
+};
+
 /* One peer with learned flows.  Created by the first flow, freed by the aging
  * pass once it has none; flows point at it (fl->pst) and keep it alive. */
 struct wgfp_pst {
@@ -999,7 +1058,7 @@ struct wgfp_pst {
 	unsigned long last_refresh_kick;/* rate-limit TX alloc failure refresh */
 	unsigned int nflows;		/* under wgfp_flows_lock */
 	struct wgfp_flow *rxfl;		/* P3 outer record, under the lock */
-	atomic64_t __percpu *rx_pend;	/* P6 bytes not yet in peer->rx_bytes */
+	struct wgfp_rx_cnt __percpu *rx_pend;	/* P6 bytes not yet in peer->rx_bytes */
 	int last_rx_egress;		/* P6 speculative TX slot egress hint */
 	int last_rx_ifindex;		/* P6 speculative TX slot ifindex hint */
 	bool stopping;
@@ -1008,13 +1067,16 @@ struct wgfp_pst {
 /* P6 receive statistics.  Upstream update_rx_stats() adds every packet to
  * peer->rx_bytes, one cache line that all four CPUs write in spread mode
  * (0.7% of the download profile), without synchronisation.  The bytes collect
- * per CPU instead and wgfp_rx_fold() moves them to the peer from the refresh
- * worker once a second and at stop, so the peer's transfer count lags by up
- * to a second.  The device counters stay per packet and per CPU. */
+ * per CPU (single-writer monotonic u64, no ARMv8.0 ldxr/stxr) and
+ * wgfp_rx_fold() moves the delta to the peer from the refresh worker once a
+ * second and at stop, so the peer's transfer count lags by up to a second.
+ * The device counters stay per packet and per CPU. */
 static void wgfp_rx_stats(struct wgfp_pst *pst, u32 len)
 {
+	struct wgfp_rx_cnt *c = this_cpu_ptr(pst->rx_pend);
+
 	dev_sw_netstats_rx_add(pst->peer->device->dev, len);
-	atomic64_add(len, this_cpu_ptr(pst->rx_pend));
+	WRITE_ONCE(c->bytes, c->bytes + len);
 }
 
 static void wgfp_rx_fold(struct wgfp_pst *pst)
@@ -1022,8 +1084,13 @@ static void wgfp_rx_fold(struct wgfp_pst *pst)
 	u64 sum = 0;
 	int cpu;
 
-	for_each_possible_cpu(cpu)
-		sum += atomic64_xchg(per_cpu_ptr(pst->rx_pend, cpu), 0);
+	for_each_possible_cpu(cpu) {
+		struct wgfp_rx_cnt *c = per_cpu_ptr(pst->rx_pend, cpu);
+		u64 cur = READ_ONCE(c->bytes);
+
+		sum += cur - c->folded;
+		c->folded = cur;
+	}
 	if (sum)
 		pst->peer->rx_bytes += sum;
 }
@@ -2216,28 +2283,34 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	/* outer IP + UDP + WireGuard header in front of the inner packet */
 	added = t->hlen + sizeof(struct message_data);
 	plain = min_t(u32, mtu, ALIGN(ip_len, MESSAGE_PADDING_MULTIPLE));
-	if (unlikely(added + plain + POLY1305_DIGEST_SIZE >
-		     DPAA_WGFP_TX_BUF_SIZE))
-		goto decline_flow;
-	/* Roaming: unlocked compare, as wg_socket_set_peer_endpoint() does; a
-	 * torn read costs one punt.  The stopping test pairs with the
-	 * synchronize_rcu() before the refresh work is cancelled for good. */
-	if (unlikely(!wgfp_endpoint_matches(peer, t))) {
-		if (!READ_ONCE(pst->stopping))
-			mod_delayed_work(system_wq, &pst->refresh, 0);
-		goto decline;
-	}
-	kp = rcu_dereference(peer->keypairs.current_keypair);
-	if (unlikely(!kp || !READ_ONCE(kp->sending.is_valid) ||
-		     wg_birthdate_has_expired(kp->sending.birthdate, REJECT_AFTER_TIME)))
-		goto decline;
 	{
+		/* Keep scratch_b0 = dst - 64 strictly >= DPAA_WGFP_TX_HEADROOM
+		 * (64) so IPv4 outer (added=58) never touches [0..63] metadata
+		 * and lands dst on a 64B-aligned cacheline (offset 128). */
+		u32 pad_off = added < CHACHA_BLOCK_SIZE ?
+			      CHACHA_BLOCK_SIZE - added : 0;
+		u32 off = DPAA_WGFP_TX_HEADROOM + pad_off;
 		u32 frame_len = added + plain + POLY1305_DIGEST_SIZE;
 		struct dpaa_wgfp_tx_buf tx;
 		u8 *dst;
 
+		if (unlikely(pad_off + frame_len > DPAA_WGFP_TX_BUF_SIZE))
+			goto decline_flow;
+		/* Roaming: unlocked compare, as wg_socket_set_peer_endpoint() does; a
+		 * torn read costs one punt.  The stopping test pairs with the
+		 * synchronize_rcu() before the refresh work is cancelled for good. */
+		if (unlikely(!wgfp_endpoint_matches(peer, t))) {
+			if (!READ_ONCE(pst->stopping))
+				mod_delayed_work(system_wq, &pst->refresh, 0);
+			goto decline;
+		}
+		kp = rcu_dereference(peer->keypairs.current_keypair);
+		if (unlikely(!kp || !READ_ONCE(kp->sending.is_valid) ||
+			     wg_birthdate_has_expired(kp->sending.birthdate, REJECT_AFTER_TIME)))
+			goto decline;
+
 		if (unlikely(!dpaa_wgfp_tx_alloc(t->egress, t->ifindex,
-						 frame_len, &tx))) {
+						 pad_off + frame_len, &tx))) {
 			unsigned long next = READ_ONCE(pst->last_refresh_kick);
 
 			if (!READ_ONCE(pst->stopping) &&
@@ -2252,7 +2325,7 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 			dpaa_wgfp_tx_cancel(&tx);
 			goto decline;
 		}
-		hdr = (u8 *)tx.buf + DPAA_WGFP_TX_HEADROOM;
+		hdr = (u8 *)tx.buf + off;
 		dst = hdr + added;
 		/* Out-of-place 1-pass seal from read-only DMA_FROM_DEVICE f->buf. */
 		wgfp_seal_dst(dst, inner, ip_len, plain, tup.family,
@@ -2299,7 +2372,7 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 			}
 		}
 		dpaa_wgfp_stat_inc(&wgfp_sealed);
-		dpaa_wgfp_tx_submit(f, &tx, DPAA_WGFP_TX_HEADROOM, frame_len);
+		dpaa_wgfp_tx_submit(f, &tx, off, frame_len);
 		return 1;
 	}
 decline_flow:
@@ -2547,7 +2620,7 @@ static struct wgfp_pst *wgfp_pst_get_locked(struct wg_peer *peer,
 	pst = kzalloc(sizeof(*pst), GFP_ATOMIC);
 	if (!pst)
 		return NULL;
-	pst->rx_pend = alloc_percpu_gfp(atomic64_t, GFP_ATOMIC);
+	pst->rx_pend = alloc_percpu_gfp(struct wgfp_rx_cnt, GFP_ATOMIC);
 	if (!pst->rx_pend) {
 		kfree(pst);
 		return NULL;

@@ -52,8 +52,8 @@ warn() { echo "WARNING: $*" >&2; }
 
 # First commit of the patch range: after the files base commit when there is one.
 range_base() {
-    local tag="v$KERNEL_VERSION" base
-    base=$(git log --format=%H --grep="^$FILES_TRAILER\$" "$tag..HEAD" | tail -1)
+    local tag="refs/tags/v$KERNEL_VERSION" ref="${1:-HEAD}" base
+    base=$(git log --format=%H --grep="^$FILES_TRAILER\$" "$tag..$ref" | tail -1)
     echo "${base:-$tag}"
 }
 
@@ -192,23 +192,31 @@ cmd_export() {
 
 # ── verify: non-destructive round-trip identity check ────────────────────
 
-cmd_verify() {
+cmd_verify() (
     local KSRC="${1:-/tmp/linux-stable}"
-    local tmp=$(mktemp -d)
-    trap "rm -rf $tmp" EXIT
+    local tmp
+    tmp=$(mktemp -d) || die "Could not create a temporary export directory"
+    trap 'rm -rf -- "$tmp"' EXIT
 
-    # Export to temp directory (NEVER to real PATCH_DIR)
+    # Export the canonical branch without switching or modifying the worktree.
     cd "$KSRC"
-    git checkout "$KERNEL_BRANCH" 2>/dev/null || \
+    local branch_ref="refs/heads/$KERNEL_BRANCH"
+    local tag_ref="refs/tags/v$KERNEL_VERSION"
+    git rev-parse --verify --quiet "$branch_ref^{commit}" >/dev/null || \
         die "Kernel branch $KERNEL_BRANCH not found — run 'import' first"
+    git rev-parse --verify --quiet "$tag_ref^{commit}" >/dev/null || \
+        die "Kernel tag v$KERNEL_VERSION not found"
+    git merge-base --is-ancestor "$tag_ref" "$branch_ref" || \
+        die "Kernel tag v$KERNEL_VERSION is not an ancestor of $KERNEL_BRANCH"
 
-    local base; base=$(range_base)
+    local base; base=$(range_base "$branch_ref")
     git format-patch --zero-commit --no-signature --no-numbered \
-        --output-directory "$tmp" "$base..HEAD"
+        --output-directory "$tmp" "$base..$branch_ref"
 
     # Rename using Patch-Name trailers (matching export logic for comparison)
+    shopt -s nullglob
     local n=0
-    for f in $(ls "$tmp"/*.patch | sort); do
+    for f in "$tmp"/*.patch; do
         local patch_name
         n=$((n + 1))
         # See cmd_export: --zero-commit zeros the From SHA.  Read Patch-Name
@@ -220,9 +228,11 @@ cmd_verify() {
     done
 
     # Compare against real patch directory — byte-for-byte
-    local ok=0 same_diff=0 mismatch=0 new_patches=0 missing=0
-    for f in "$PATCH_DIR"/*.patch; do
-        local name=$(basename "$f")
+    local ok=0 same_diff=0 mismatch=0 new_patches=0 missing=0 name
+    local source_patches=("$PATCH_DIR"/*.patch)
+    [ ${#source_patches[@]} -gt 0 ] || die "No board patches found in $PATCH_DIR"
+    for f in "${source_patches[@]}"; do
+        name=${f##*/}
         if [ -f "$tmp/$name" ]; then
             if cmp -s "$f" "$tmp/$name"; then
                 ok=$((ok + 1))
@@ -239,7 +249,7 @@ cmd_verify() {
         fi
     done
     for f in "$tmp"/*.patch; do
-        local name=$(basename "$f")
+        name=${f##*/}
         if [ ! -f "$PATCH_DIR/$name" ]; then
             echo "NEW-IN-EXPORT: $name (in canonical branch but not in working tree)"
             new_patches=$((new_patches + 1))
@@ -249,15 +259,14 @@ cmd_verify() {
     echo ""
     echo "### Round-trip verify: OK=$ok  SAME-DIFF=$same_diff  MISMATCH=$mismatch  MISSING=$missing  NEW=$new_patches"
 
-    if [ $mismatch -eq 0 ] && [ $new_patches -eq 0 ]; then
+    if [ $mismatch -eq 0 ] && [ $missing -eq 0 ] && [ $new_patches -eq 0 ]; then
         echo "### Round-trip identity VERIFIED (${ok} byte-identical, ${same_diff} identical diffs with export-format headers)"
         return 0
     else
-        warn "$mismatch patch(es) differ — export needed"
-        [ $mismatch -gt 0 ] && return 1
-        return 0
+        warn "Round-trip differs: $mismatch mismatched, $missing missing, $new_patches unexpected"
+        return 1
     fi
-}
+)
 
 case "${1:-help}" in
     import)  shift; cmd_import "$@";;

@@ -23,12 +23,14 @@
 struct net_device;
 struct sk_buff;
 
+/* Single-writer per-CPU counter increment for BH-disabled NAPI context;
+ * avoids ARMv8.0 ldxr/stxr and redundant preempt_disable/enable. Callers
+ * outside BH-disabled context must disable BH around this call. */
 static inline void dpaa_wgfp_stat_inc(atomic64_t __percpu *stat)
 {
-	atomic64_t *local = get_cpu_ptr(stat);
+	atomic64_t *local = this_cpu_ptr(stat);
 
-	atomic64_inc(local);
-	put_cpu_ptr(stat);
+	WRITE_ONCE(local->counter, READ_ONCE(local->counter) + 1);
 }
 
 static inline u64 dpaa_wgfp_stat_sum(const atomic64_t __percpu *stat)
@@ -37,7 +39,7 @@ static inline u64 dpaa_wgfp_stat_sum(const atomic64_t __percpu *stat)
 	int cpu;
 
 	for_each_possible_cpu(cpu)
-		total += atomic64_read(per_cpu_ptr(stat, cpu));
+		total += (u64)READ_ONCE(per_cpu_ptr(stat, cpu)->counter);
 	return total;
 }
 

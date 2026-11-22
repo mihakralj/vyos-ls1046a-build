@@ -34,6 +34,8 @@ typedef uint64_t u64;
 #define cpu_to_le64(x) (x)
 #define asmlinkage
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define likely(x) (x)
+#define unlikely(x) (x)
 #define module_param(a, b, c)
 #define MODULE_PARM_DESC(a, b)
 
@@ -262,7 +264,13 @@ int main(void)
 	static const u32 lens[] = { 1, 15, 16, 17, 20, 40, 63, 64, 65, 127, 128, 129,
 				    191, 192, 255, 256, 257, 319, 320, 321,
 				    576, 577, 1280, 1419, 1420, 1424, 1440, 1472, 1500 };
-	u8 key[32], src[1500], src_copy[1500], pt[1500], ref[1516], out[1516];
+	u8 key[32], src[1500], src_copy[1500], pt[1500], ref[1516];
+	u8 out_buf[16 + CHACHA_BLOCK_SIZE + 1516 + 16];
+	u8 *out = out_buf + 16 + CHACHA_BLOCK_SIZE;
+	u8 guard_a5[16], zero64[CHACHA_BLOCK_SIZE];
+
+	memset(guard_a5, 0xa5, sizeof(guard_a5));
+	memset(zero64, 0, sizeof(zero64));
 
 	for (int i = 0; i < 32; i++)
 		key[i] = 0x20 + i;
@@ -304,15 +312,32 @@ int main(void)
 
 				for (int nm = 0; nm < 2; nm++) {
 					unsigned int neon_min = nm ? UINT_MAX : 0;
-					int prev_sec = neon_sections;
 
-					memset(out, 0x5a, sizeof(out));
-					wgfp_seal_one_dst(out, src, ip_len, plain, fam,
-							  nonce, key, neon_min);
-					assert(neon_depth == 0);
-					assert(neon_sections == prev_sec + (nm ? 0 : 1));
-					assert(memcmp(out, ref, plain + 16) == 0);
-					assert(memcmp(src, src_copy, ip_len) == 0);
+					for (int sb = 0; sb < 2; sb++) {
+						int prev_sec = neon_sections;
+
+						memset(out_buf, 0xa5, sizeof(out_buf));
+						memset(out, 0x5a, plain + 16);
+						wgfp_seal_one_dst(out, src, ip_len, plain, fam,
+								  sb != 0, nonce, key, neon_min);
+						assert(neon_depth == 0);
+						assert(neon_sections == prev_sec + (nm ? 0 : 1));
+						assert(memcmp(out, ref, plain + 16) == 0);
+						assert(memcmp(src, src_copy, ip_len) == 0);
+						/* Guard before dst - 64 is never touched */
+						assert(memcmp(out_buf, guard_a5, 16) == 0);
+						/* Trailing guard after ciphertext+tag is never touched */
+						assert(memcmp(out + plain + 16, guard_a5, 16) == 0);
+						if (!sb || nm) {
+							/* No scratch_b0 (or non-NEON): dst-64..dst-1 untouched */
+							for (int k = 0; k < CHACHA_BLOCK_SIZE; k++)
+								assert(out_buf[16 + k] == 0xa5);
+						} else {
+							/* NEON + scratch_b0: block-0 keystream zeroized */
+							assert(memcmp(out - CHACHA_BLOCK_SIZE, zero64,
+								      CHACHA_BLOCK_SIZE) == 0);
+						}
+					}
 				}
 			}
 		}
@@ -329,11 +354,23 @@ int main(void)
 		memset(pt + ip_len, 0, plain - ip_len);
 		ref_aead_encrypt(ref, pt, plain, nonce, key);
 		for (int nm = 0; nm < 2; nm++) {
-			memset(out, 0x5a, sizeof(out));
-			wgfp_seal_one_dst(out, src, ip_len, plain, 0,
-					  nonce, key, nm ? UINT_MAX : 0);
-			assert(memcmp(out, ref, plain + 16) == 0);
-			assert(memcmp(src, src_copy, ip_len) == 0);
+			for (int sb = 0; sb < 2; sb++) {
+				memset(out_buf, 0xa5, sizeof(out_buf));
+				memset(out, 0x5a, plain + 16);
+				wgfp_seal_one_dst(out, src, ip_len, plain, 0,
+						  sb != 0, nonce, key, nm ? UINT_MAX : 0);
+				assert(memcmp(out, ref, plain + 16) == 0);
+				assert(memcmp(src, src_copy, ip_len) == 0);
+				assert(memcmp(out_buf, guard_a5, 16) == 0);
+				assert(memcmp(out + plain + 16, guard_a5, 16) == 0);
+				if (!sb || nm) {
+					for (int k = 0; k < CHACHA_BLOCK_SIZE; k++)
+						assert(out_buf[16 + k] == 0xa5);
+				} else {
+					assert(memcmp(out - CHACHA_BLOCK_SIZE, zero64,
+						      CHACHA_BLOCK_SIZE) == 0);
+				}
+			}
 		}
 	}
 	puts("wgfp_seal_one_dst: ok");

@@ -10,15 +10,17 @@
 #
 # Usage: bin/testrig-wireguard-multi.sh [run|setup|teardown]
 # Env:   TUNNELS=4 ACTIVE=<n>  (n of the tunnels carry traffic; default all)   DIRS="up down"  DUR=30 STEADY_FROM=10
+#        MEASURE_TO defaults to DUR-1; TCP uses duration-weighted complete intervals.
 #        STREAMS=2 (per tunnel)  REPS=3  DUT_KIND=ask2|vendor  OUT=<csv>
 #        WGFP=1 binds the DPAA WireGuard fast path to all wgm<K> after setup (multi-peer gate)
 #        ASK2 software and WGFP runs both require the exclusive wgfp_peer_lease reservation.
 #        WG_SKIP_SERVERS=1 leaves servers untouched; for run also set WG_EXTERNAL_IPERF=1.
 #        WG_IPERF_BASE selects the externally managed server ports (default 5240).
-#        WGFP_COUNTER_LOG=<path> records WGFP counters before and after each cell.
+#        WGFP_COUNTER_LOG=<path> gates each cell and a post-run settle sample.
 #        WG_SKIP_FW4=1 leaves the vendor's existing forwarding policy unchanged;
 #        use it only when that policy already permits the test traffic.
 #        WG_CLIENT_TIMEOUT caps each iperf client in seconds (default DUR+45).
+#        WG_GEN_QDISC=fq adds fq to owned generator tunnels only; it sets no explicit iperf rate cap.
 #        INNER=6 carries IPv6 inside the tunnels (fd99:(210+K)::/64, DUT ::1, dell2 ::113; dell1 fd99:1::112)
 #        instead of IPv4; the outer transport stays IPv4. JSON files then start with wgm6- and counter cells
 #        are labelled <N>v6.
@@ -26,7 +28,9 @@
 #        fd99:2::113, eth3: fd99:1::185 <-> fd99:1::112), as bin/testrig-wireguard.sh OUTER=6 does.
 # Everything is runtime-only and removed by an EXIT trap (KEEP=1 leaves it up).
 set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
 . "$(dirname "$0")/testrig-env.sh"
+if [ "${RIG_PARITY:-0}" = 1 ]; then . "$HERE/testrig-parity-profile.sh" || exit 2; fi
 . "$(dirname "$0")/testrig-wgfp-counters.sh"
 . "$(dirname "$0")/testrig-wg-lease.sh"
 . "$(dirname "$0")/testrig-wg-resource.sh"
@@ -35,7 +39,14 @@ DUT=${DUT:-$(rig_dut "$DUT_KIND")} || exit 2
 if [ "$DUT_KIND" = vendor ]; then RIG_NS=${RIG_NS:-$VENDOR_NS}; else RIG_NS=${RIG_NS:-}; fi
 rig_require GEN1 GEN2
 TUNNELS=${TUNNELS:-4}; ACTIVE=${ACTIVE:-$TUNNELS}; DIRS=${DIRS:-"up down"}; DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}
+MEASURE_TO=${MEASURE_TO:-$((DUR-1))}
 STREAMS=${STREAMS:-2}; REPS=${REPS:-3}; WGMTU=${WGMTU:-1420}; INNER=${INNER:-4}; OUTER=${OUTER:-4}
+case ${1:-run} in
+  teardown) WG_GEN_QDISC=default ;;
+  *)
+    WG_GEN_QDISC=${WG_GEN_QDISC:-default}
+    case $WG_GEN_QDISC in default|fq) ;; *) echo "WG_GEN_QDISC must be default or fq" >&2; exit 2 ;; esac ;;
+esac
 case $INNER in 4) JPRE=wgm; CTAG="";; 6) JPRE=wgm6; CTAG=v6;; *) echo "INNER must be 4 or 6" >&2; exit 2;; esac
 if ! [[ $TUNNELS =~ ^([1-9]|1[0-6])$ && $ACTIVE =~ ^([1-9]|1[0-6])$ ]] ||
    (( ACTIVE > TUNNELS )); then
@@ -54,7 +65,7 @@ if [ "$IPERF_BASE" != 5240 ] && [ "${WG_SKIP_SERVERS:-0}" != 1 ]; then
   echo "WG_IPERF_BASE requires WG_SKIP_SERVERS=1 and externally managed servers" >&2; exit 2
 fi
 OUT=${OUT:-/mnt/builds/ask2-review/oracle/wgm-$(date +%Y%m%d-%H%M)-${DUT_KIND}.csv}
-J=${J:-/mnt/builds/ask2-review/oracle/json-wg}; mkdir -p "$J"
+J=${J:-/mnt/builds/ask2-review/oracle/json-wg}
 SSHO="-o BatchMode=yes -o ConnectTimeout=8 $RIG_SSHK"
 NSX="sudo"; [ -n "$RIG_NS" ] && NSX="sudo ip netns exec $RIG_NS"
 dut(){ local c=$1; [ "$DUT_KIND" = vendor ] && c=${c//sudo /}; ssh -n $SSHO $DUT "$c"; }
@@ -71,6 +82,12 @@ case $WG_PORT in
         DUT_OUT6=fd99:1::185; D2_OUT6=fd99:1::112 ;;
   *) echo "WG_PORT must be eth3 or eth4" >&2; exit 2 ;;
 esac
+if [ "${1:-}" = topology ]; then
+  [ "$#" = 1 ] || { echo "topology takes no arguments" >&2; exit 2; }
+  printf '%s %s %s %s\n' "$D2_OUT" "$DUT_OUT" "$D2_OUT6" "$DUT_OUT6"
+  exit 0
+fi
+mkdir -p "$J"
 # outer endpoints as WireGuard writes them (IPv6 in brackets)
 case $OUTER in
   4) EP_DUT=$DUT_OUT; EP_FAR=$D2_OUT ;;
@@ -100,7 +117,12 @@ wg_dut_link(){
   duti "sudo sh -s -- $1 wgm$2 wgo-$WG_OWNER_TOKEN-d$2" < "$WG_LINK_HELPER"
 }
 wg_far_link(){
-  $D2I "$NSX sh -s -- $1 wgm$2 wgo-$WG_OWNER_TOKEN-f$2" < "$WG_LINK_HELPER"
+  local qdisc=""
+  if [ "$1" = create ] && [ "$WG_GEN_QDISC" = fq ]; then
+    qdisc=" fq"
+    echo "Generator wgm$2 tunnel qdisc: fq (no explicit iperf rate cap)" >&2
+  fi
+  $D2I "$NSX sh -s -- $1 wgm$2 wgo-$WG_OWNER_TOKEN-f$2$qdisc" < "$WG_LINK_HELPER"
 }
 wg_route(){
   local side=$1 action=$2 k=$3 priority table realm subnet
@@ -225,21 +247,22 @@ setup(){
   fi
 }
 
-steady(){ python3 - "$STEADY_FROM" "$@" <<'PY'
-import json,math,sys
-f=float(sys.argv[1]); direction=sys.argv[2]; tot=0; per=[]; retr=0
-for p in sys.argv[3:]:
-    try: j=json.load(open(p))
-    except (OSError,ValueError) as exc:
+steady(){ PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$STEADY_FROM" "$DUR" "${MEASURE_TO:-$((DUR-1))}" "$STREAMS" "$@" <<'PY'
+import json,sys
+from testrig_iperf import measure_tcp, report_json
+f=float(sys.argv[1]); duration=float(sys.argv[2]); measure_to=float(sys.argv[3])
+streams=int(sys.argv[4]); direction=sys.argv[5]; tot=0; per=[]; retr=0
+if not sys.argv[6:]:
+    sys.exit("ERROR: missing per-tunnel iperf results")
+for p in sys.argv[6:]:
+    try:
+        with open(p) as source:
+            j=json.load(source)
+        report=measure_tcp(j, duration, f, measure_to, direction=direction, streams=streams)
+        report_json(p, report)
+    except (OSError,ValueError,TypeError,KeyError) as exc:
         print(f"ERROR: invalid iperf output {p}: {exc}",file=sys.stderr); sys.exit(1)
-    intervals=[i for i in j.get('intervals',[]) if i['sum']['start']>=f-0.01 and not i['sum'].get('omitted')]
-    if direction=='bidir' and any('sum_bidir_reverse' not in i for i in intervals):
-        print(f"ERROR: missing reverse iperf intervals in {p}",file=sys.stderr); sys.exit(1)
-    a=[i['sum']['bits_per_second']+i.get('sum_bidir_reverse',{}).get('bits_per_second',0) for i in intervals]
-    g=sum(a)/len(a)/1e9 if a else 0
-    if (j.get('error') or not math.isfinite(g) or g<=0 or
-            any(not math.isfinite(value) or value<0 for value in a)):
-        print(f"ERROR: iperf produced no traffic or failed for {p}: {j.get('error', '')}",file=sys.stderr); sys.exit(1)
+    g=report["gbps"]
     if direction=='bidir':
         for key in ('sum_sent','sum_sent_bidir_reverse'):
             value=j.get('end',{}).get(key,{}).get('retransmits')
@@ -291,6 +314,7 @@ esac
   { echo "WG_SKIP_SERVERS=1 with run requires WG_EXTERNAL_IPERF=1" >&2; exit 2; }
 [ -z "${WGFP_COUNTER_LOG:-}" ] || [ "${WGFP:-0}" = 1 ] ||
   { echo "WGFP_COUNTER_LOG requires WGFP=1" >&2; exit 2; }
+wgfp_counter_preflight || exit 4
 
 ENVTXT=$(dut 'echo "kernel: $(uname -r)"; echo "lockdep: $([ -e /proc/lockdep ] && echo PRESENT || echo absent)"; echo "gov: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null) $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)"' 2>/dev/null); echo "$ENVTXT"
 if echo "$ENVTXT" | grep -q "lockdep: PRESENT"; then echo "REFUSING: lock debugging kernel" >&2; exit 5; fi
@@ -320,7 +344,7 @@ EOS
     for k in $(seq 0 $((ACTIVE-1))); do
       f="$J/$JPRE-$dir-n$ACTIVE-k$k-r$rep.json"; files="$files $f"
       if [ "$INNER" = 6 ]; then dst=$(far6 $k); src=$P6; else dst=10.99.$(sub $k).113; src=$P4; fi
-      $D1 "$NSX timeout --signal=TERM --kill-after=5s ${WG_CLIENT_TIMEOUT}s iperf3 -c $dst -B $src -p $(sport $k) -P $STREAMS -t $DUR -i 1 -Z -J $flag" > "$f" &
+      $D1 "$NSX timeout --signal=TERM --kill-after=5s ${WG_CLIENT_TIMEOUT}s iperf3 -c $dst -B $src -p $(sport $k) -P $STREAMS -t $DUR -i 1 -Z -J ${IPERF_ARGS:-} $flag" > "$f" &
       pids="$pids $!"
     done
     client_status=0
@@ -337,9 +361,10 @@ EOS
     rates=$(steady "$dir" $files) || { echo "ERROR: unable to parse iperf results" >&2; exit 1; }
     read gbps retr per <<< "$rates"
     read busy hot < <(cpu_summary "$dut_stat")
+    sleep 5
+    wgfp_counter_sample "$TUNNELS$CTAG" "$dir" "$rep" settle || exit 1
     printf 'tunnels %s active %s %-4s r%s %7s Gbit/s  retr %-8s dutbusy %5s%%  hot %s  per-tunnel %s\n' "$TUNNELS" "$ACTIVE" "$dir" "$rep" "$gbps" "$retr" "$busy" "$hot" "$per"
     echo "$(date +%H:%M:%S),$TUNNELS,$ACTIVE,$dir,$rep,$gbps,$retr,$busy,$hot,$per" >> "$OUT"
-    sleep 5
   done
 done
 python3 - "$OUT" <<'PY'

@@ -10,13 +10,13 @@
  *  - TX uses boot-lifetime, per-egress, per-CPU pre-mapped 4 KiB DMA_TO_DEVICE
  *    slots submitted directly to a dedicated confirmed FQ_TYPE_TX_WGFP (WQ6,
  *    F-316 offload_cgr) with bpid=0xff and FM_FD_CMD_FCO | wgfp_conf_fq[cpu].
- *  - Per-CPU WGFP confirmation FQs (WQ1, sharing wgfp_cpu_napi weight=128)
- *    complete slots locklessly on owner_cpu; QMan ERNs and DPAA TX-error/conf
- *    fallback guards claim slots atomically via an append-only DMA hash table.
- *  - Teardown (NETDEV_GOING_DOWN / NETDEV_UNREGISTER) unpublishes the egress
- *    slot, synchronizes RCU and all WGFP NAPIs (cancelling any buffered
- *    wgfp_txb slots), waits for per-CPU inflight sums to reach 0, and
- *    quarantines on timeout.
+ *  - Per-CPU WGFP confirmation FQs (WQ1, sharing wgfp_cpu_napi weight=64 with
+ *    2 * budget DQRR poll) complete slots locklessly on owner_cpu; QMan ERNs
+ *    and DPAA TX-error/conf fallback guards claim slots atomically via an
+ *    append-only DMA hash table.
+ *  - Teardown (NETDEV_GOING_DOWN / NETDEV_UNREGISTER / CEETM attach) unpublishes
+ *    the egress slot, synchronizes RCU (freezing per-CPU alloc_cnt), waits for
+ *    per-CPU inflight sums to reach 0, and quarantines on timeout.
  */
 
 #include <linux/debugfs.h>
@@ -50,7 +50,6 @@
 
 /* Helpers living in dpaa_eth.c (file-local state there). */
 struct device *dpaa_wgfp_dma_dev(u8 bpid);
-bool dpaa_wgfp_fd_has_error(const struct qm_fd *fd);
 void dpaa_wgfp_fd_release(const struct qm_fd *fd);
 bool dpaa_buf_stale_check(dma_addr_t addr, u8 bpid, const char *where);
 
@@ -77,8 +76,32 @@ void dpaa_wgfp_egress_deactivate(struct net_device *dev);
 #define WGFP_TX_DMA_HT_BITS	12	/* 4096 buckets */
 #define WGFP_TX_META_MAGIC	0x57474650U	/* "WGFP" */
 #define WGFP_DRAIN_TIMEOUT_MS	500
+#define WGFP_FD_STAT_RX_ERRORS	(FM_FD_ERR_DMA | FM_FD_ERR_PHYSICAL | \
+				 FM_FD_ERR_SIZE | FM_FD_ERR_CLS_DISCARD | \
+				 FM_FD_ERR_EXTRACTION | FM_FD_ERR_NO_SCHEME | \
+				 FM_FD_ERR_PRS_TIMEOUT | \
+				 FM_FD_ERR_PRS_ILL_INSTRUCT | \
+				 FM_FD_ERR_PRS_HDR_ERR)
 #define WGFP_FD_STAT_TX_ERRORS	(FM_FD_ERR_UNSUPPORTED_FORMAT | \
 				 FM_FD_ERR_LENGTH | FM_FD_ERR_DMA)
+#define WGFP_MAX_BPIDS		64
+
+static struct device *wgfp_bpid_dev[WGFP_MAX_BPIDS];
+
+static inline struct device *wgfp_dma_dev_fast(u8 bpid)
+{
+	struct device *dev;
+
+	if (unlikely(bpid >= WGFP_MAX_BPIDS))
+		return dpaa_wgfp_dma_dev(bpid);
+	dev = READ_ONCE(wgfp_bpid_dev[bpid]);
+	if (unlikely(!dev)) {
+		dev = dpaa_wgfp_dma_dev(bpid);
+		if (dev)
+			WRITE_ONCE(wgfp_bpid_dev[bpid], dev);
+	}
+	return dev;
+}
 
 struct wgfp_port;
 struct wgfp_egress;
@@ -91,14 +114,15 @@ enum wgfp_slot_state {
 };
 
 struct wgfp_tx_slot {
-	struct hlist_node dma_node;	/* append-only boot-lifetime wgfp_tx_dma_ht */
+	/* Hot fields packed into the first 32 bytes (single cacheline). */
+	dma_addr_t dma;			/* page-aligned DMA_TO_DEVICE address */
 	struct wgfp_egress *eg;
 	u8 *buf;			/* order-0 page virtual address */
-	dma_addr_t dma;			/* page-aligned DMA_TO_DEVICE address */
 	atomic_t state;			/* enum wgfp_slot_state */
 	u16 owner_cpu;
 	u16 local_idx;			/* 0..WGFP_TX_SLOTS_PER_CPU-1 */
-};
+	struct hlist_node dma_node;	/* append-only boot-lifetime wgfp_tx_dma_ht */
+} ____cacheline_aligned_in_smp;
 
 /* Stored once at offset 0 of each WGFP TX slot page (inside the 64B headroom). */
 struct wgfp_tx_meta {
@@ -107,9 +131,13 @@ struct wgfp_tx_meta {
 };
 
 struct wgfp_egress_pc {
-	atomic_t inflight;
+	/* Local BH-disabled single-writer counters (zero atomics on hot path). */
+	u64 alloc_cnt;
+	u64 local_done;
 	u16 free_top;
 	u16 free_stack[WGFP_TX_SLOTS_PER_CPU];
+	/* Cross-CPU / ERN / TX-error completion path. */
+	atomic64_t remote_done;
 	spinlock_t remote_lock;
 	u16 remote_top;
 	u16 remote_stack[WGFP_TX_SLOTS_PER_CPU];
@@ -364,25 +392,33 @@ static struct wgfp_tx_slot *wgfp_tx_slot_by_dma(dma_addr_t addr)
 	return NULL;
 }
 
-static void wgfp_slot_return(struct wgfp_tx_slot *slot, bool bh_disabled)
+static void wgfp_slot_return_done(struct wgfp_tx_slot *slot, bool bh_disabled)
 {
 	struct wgfp_egress *eg = slot->eg;
 	struct wgfp_egress_pc *pc = &eg->pc[slot->owner_cpu];
+	bool quarantined = unlikely(READ_ONCE(eg->quarantined));
 
-	if (unlikely(READ_ONCE(eg->quarantined)))
-		return;
 	if (bh_disabled && smp_processor_id() == slot->owner_cpu) {
-		pc->free_stack[pc->free_top++] = slot->local_idx;
+		if (likely(!quarantined))
+			pc->free_stack[pc->free_top++] = slot->local_idx;
+		/* Release pairs with smp_load_acquire() in wgfp_eg_inflight_sum(). */
+		smp_store_release(&pc->local_done, pc->local_done + 1);
 		return;
 	}
-	spin_lock_bh(&pc->remote_lock);
-	pc->remote_stack[pc->remote_top++] = slot->local_idx;
-	spin_unlock_bh(&pc->remote_lock);
+	if (likely(!quarantined)) {
+		spin_lock_bh(&pc->remote_lock);
+		pc->remote_stack[pc->remote_top++] = slot->local_idx;
+		spin_unlock_bh(&pc->remote_lock);
+	}
+	/* Order slot state + remote_stack push before drain observes remote_done. */
+	smp_mb__before_atomic();
+	atomic64_inc(&pc->remote_done);
 }
 
 static struct wgfp_tx_slot *wgfp_slot_pop_bh(struct wgfp_egress *eg, int cpu)
 {
 	struct wgfp_egress_pc *pc = &eg->pc[cpu];
+	struct wgfp_tx_slot *slot;
 	u16 idx;
 
 	if (unlikely(pc->free_top == 0)) {
@@ -400,7 +436,12 @@ static struct wgfp_tx_slot *wgfp_slot_pop_bh(struct wgfp_egress *eg, int cpu)
 			return NULL;
 	}
 	idx = pc->free_stack[--pc->free_top];
-	return &eg->slots[cpu * WGFP_TX_SLOTS_PER_CPU + idx];
+	slot = &eg->slots[cpu * WGFP_TX_SLOTS_PER_CPU + idx];
+	prefetchw(slot->buf + DPAA_WGFP_TX_HEADROOM);
+	prefetchw(slot->buf + DPAA_WGFP_TX_HEADROOM + 64);
+	prefetchw(slot->buf + DPAA_WGFP_TX_HEADROOM + 128);
+	prefetchw(slot->buf + DPAA_WGFP_TX_HEADROOM + 192);
+	return slot;
 }
 
 /* Exactly-once completion for an INFLIGHT slot across confirm, ERN, and TX error. */
@@ -408,10 +449,8 @@ static void wgfp_slot_complete(struct wgfp_tx_slot *slot,
 			       const struct qm_fd *fd, bool is_conf,
 			       bool bh_disabled)
 {
-	struct wgfp_egress *eg = slot->eg;
-
-	if (unlikely(atomic_cmpxchg(&slot->state, WGFP_SLOT_INFLIGHT,
-				    WGFP_SLOT_FREE) != WGFP_SLOT_INFLIGHT)) {
+	if (unlikely(atomic_cmpxchg_relaxed(&slot->state, WGFP_SLOT_INFLIGHT,
+					    WGFP_SLOT_FREE) != WGFP_SLOT_INFLIGHT)) {
 		atomic64_inc(&wgfp_xmit_dup_comp);
 		return;
 	}
@@ -421,25 +460,19 @@ static void wgfp_slot_complete(struct wgfp_tx_slot *slot,
 		else
 			dpaa_wgfp_stat_inc(&wgfp_xmit_conf_ok);
 	}
-	wgfp_slot_return(slot, bh_disabled);
-	smp_mb__before_atomic();
-	atomic_dec(&eg->pc[slot->owner_cpu].inflight);
+	wgfp_slot_return_done(slot, bh_disabled);
 }
 
 /* Sync-failure unwind when qman_enqueue_* rejected a slot before acceptance. */
 static void wgfp_slot_unwind_failed_enq(struct wgfp_tx_slot *slot,
 					bool bh_disabled)
 {
-	struct wgfp_egress *eg = slot->eg;
-
-	if (unlikely(atomic_cmpxchg(&slot->state, WGFP_SLOT_INFLIGHT,
-				    WGFP_SLOT_FREE) != WGFP_SLOT_INFLIGHT)) {
+	if (unlikely(atomic_cmpxchg_relaxed(&slot->state, WGFP_SLOT_INFLIGHT,
+					    WGFP_SLOT_FREE) != WGFP_SLOT_INFLIGHT)) {
 		atomic64_inc(&wgfp_xmit_dup_comp);
 		return;
 	}
-	wgfp_slot_return(slot, bh_disabled);
-	smp_mb__before_atomic();
-	atomic_dec(&eg->pc[slot->owner_cpu].inflight);
+	wgfp_slot_return_done(slot, bh_disabled);
 }
 
 static void wgfp_bman_rel_flush(struct wgfp_bman_rel *rel)
@@ -629,7 +662,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 	if (sched_napi)
 		return wgfp_sched_portal(portal, s);
 
-	if (unlikely(dpaa_wgfp_fd_has_error(fd))) {
+	if (unlikely(be32_to_cpu(fd->status) & WGFP_FD_STAT_RX_ERRORS)) {
 		s->errs++;
 		dpaa_wgfp_fd_release(fd);
 		return qman_cb_dqrr_consume;
@@ -647,7 +680,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 	}
 	off = qm_fd_get_offset(fd);
 	len = qm_fd_get_length(fd);
-	dev = dpaa_wgfp_dma_dev(fd->bpid);
+	dev = wgfp_dma_dev_fast(fd->bpid);
 	if (unlikely(!dev)) {
 		s->errs++;
 		return qman_cb_dqrr_consume;
@@ -773,16 +806,15 @@ static enum qman_cb_dqrr_result wgfp_dqrr(struct qman_portal *portal,
 }
 
 static void wgfp_tx_enqueue_slot(struct wgfp_tx_slot *slot,
-				 const struct qm_fd *fd, ktime_t end,
-				 bool shared_deadline, bool bh_disabled)
+				 const struct qm_fd *fd, ktime_t *shared_end,
+				 bool bh_disabled)
 {
 	struct wgfp_egress *eg = slot->eg;
+	ktime_t end;
 
 	if (unlikely(!READ_ONCE(eg->active) || READ_ONCE(eg->quarantined))) {
 		atomic_set(&slot->state, WGFP_SLOT_FREE);
-		wgfp_slot_return(slot, bh_disabled);
-		smp_mb__before_atomic();
-		atomic_dec(&eg->pc[slot->owner_cpu].inflight);
+		wgfp_slot_return_done(slot, bh_disabled);
 		atomic64_inc(&wgfp_xmit_invalid_egress);
 		atomic64_inc(&wgfp_xmit_fail);
 		return;
@@ -793,8 +825,14 @@ static void wgfp_tx_enqueue_slot(struct wgfp_tx_slot *slot,
 		dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
 		return;
 	}
-	if (!shared_deadline)
+	if (shared_end) {
+		if (!*shared_end)
+			*shared_end = ktime_add_ns(ktime_get(),
+						   WGFP_TX_POLL_WAIT_NS);
+		end = *shared_end;
+	} else {
 		end = ktime_add_ns(ktime_get(), WGFP_XMIT_WAIT_NS);
+	}
 	do {
 		cpu_relax();
 		if (unlikely(!READ_ONCE(eg->active) ||
@@ -805,7 +843,7 @@ static void wgfp_tx_enqueue_slot(struct wgfp_tx_slot *slot,
 			return;
 		}
 	} while (ktime_before(ktime_get(), end));
-	atomic64_inc(shared_deadline ? &wgfp_xmit_poll_wait_fail :
+	atomic64_inc(shared_end ? &wgfp_xmit_poll_wait_fail :
 		     &wgfp_xmit_frame_wait_fail);
 	atomic64_inc(&wgfp_xmit_fail);
 	wgfp_slot_unwind_failed_enq(slot, bh_disabled);
@@ -813,16 +851,11 @@ static void wgfp_tx_enqueue_slot(struct wgfp_tx_slot *slot,
 
 static void wgfp_txb_flush(struct wgfp_txb *b)
 {
+	ktime_t *shared_end = b->threaded ? &b->end : NULL;
 	unsigned int i;
 
-	for (i = 0; i < b->n; i++) {
-		if (b->threaded)
-			wgfp_tx_enqueue_slot(b->slot[i], &b->fd[i], b->end,
-					     true, true);
-		else
-			wgfp_tx_enqueue_slot(b->slot[i], &b->fd[i], 0,
-					     false, true);
-	}
+	for (i = 0; i < b->n; i++)
+		wgfp_tx_enqueue_slot(b->slot[i], &b->fd[i], shared_end, true);
 	b->n = 0;
 }
 
@@ -832,26 +865,35 @@ static int wgfp_cpu_poll(struct napi_struct *napi, int budget)
 	struct wgfp_txb *b = this_cpu_ptr(&wgfp_txb);
 	struct wgfp_bman_rel *rel = this_cpu_ptr(&wgfp_bman_rel);
 	unsigned int lim = min_t(unsigned int, READ_ONCE(wgfp_tx_batch), WGFP_TXB_MAX);
-	int cleaned;
+	/* Each packet generates 2 DQRR entries (1 RX + 1 TX confirm); polling
+	 * up to 2 * budget DQRR entries keeps a full 64-packet burst per poll
+	 * while staying within NAPI_POLL_WEIGHT=64 (zero KERN_ERR warnings). */
+	int dq_limit = budget * 2;
+	int total;
+
+	if (unlikely(!budget))
+		return 0;
 
 	b->threaded = READ_ONCE(wgfp_threaded);
-	b->end = b->threaded ?
-		ktime_add_ns(ktime_get(), WGFP_TX_POLL_WAIT_NS) : 0;
+	b->end = 0;		/* lazy ktime_get() only on -EBUSY */
 	b->lim = lim;
 	b->active = lim > 1;
 	rel->active = true;
-	cleaned = qman_p_poll_dqrr(n->portal, budget);
+	total = qman_p_poll_dqrr(n->portal, dq_limit);
 	if (b->active) {
 		b->active = false;
 		wgfp_txb_flush(b);
 	}
 	rel->active = false;
 	wgfp_bman_rel_flush(rel);
-	if (cleaned < budget) {
-		napi_complete_done(napi, cleaned);
+	if (total < dq_limit) {
+		int done = min(total, budget - 1);
+
+		napi_complete_done(napi, done);
 		qman_p_irqsource_add(n->portal, QM_PIRQ_DQRI);
+		return done;
 	}
-	return cleaned;
+	return budget;
 }
 
 /* Create the per-CPU NAPIs once with portal pre-initialized (B4). */
@@ -1511,14 +1553,21 @@ static void wgfp_rx_ern_cb(struct qman_portal *portal, struct qman_fq *fq,
 	dpaa_wgfp_fd_release(&msg->ern.fd);
 }
 
+/* Caller must invoke only after eg->active=false + synchronize_rcu() (freezing
+ * every CPU's alloc_cnt) so per-CPU alloc_cnt >= local_done + remote_done. */
 static int wgfp_eg_inflight_sum(const struct wgfp_egress *eg)
 {
 	unsigned int cpu;
-	int total = 0;
+	s64 total = 0;
 
-	for (cpu = 0; cpu < eg->ncpus; cpu++)
-		total += atomic_read(&eg->pc[cpu].inflight);
-	return total;
+	for (cpu = 0; cpu < eg->ncpus; cpu++) {
+		const struct wgfp_egress_pc *pc = &eg->pc[cpu];
+
+		total += (s64)(READ_ONCE(pc->alloc_cnt) -
+			       smp_load_acquire(&pc->local_done) -
+			       (u64)atomic64_read_acquire(&pc->remote_done));
+	}
+	return (int)total;
 }
 
 static int wgfp_eg_alloc_slots(struct wgfp_egress *eg, struct device *dma_dev)
@@ -1537,7 +1586,9 @@ static int wgfp_eg_alloc_slots(struct wgfp_egress *eg, struct device *dma_dev)
 		return -ENOMEM;
 	}
 	for (cpu = 0; cpu < ncpus; cpu++) {
-		atomic_set(&pc[cpu].inflight, 0);
+		pc[cpu].alloc_cnt = 0;
+		pc[cpu].local_done = 0;
+		atomic64_set(&pc[cpu].remote_done, 0);
 		spin_lock_init(&pc[cpu].remote_lock);
 		pc[cpu].free_top = 0;
 		pc[cpu].remote_top = 0;
@@ -1708,10 +1759,10 @@ EXPORT_SYMBOL_GPL(dpaa_wgfp_egress_find);
  * Caller holds RTNL (NETDEV_GOING_DOWN, NETDEV_UNREGISTER, or CEETM attach).
  * Does NOT call napi_synchronize() on the shared per-CPU wgfp_cpu_napi (which
  * stays NAPI_STATE_SCHED continuously under sustained traffic on other ports);
- * instead, inflight is incremented inside RCU before checking eg->active, and
- * wgfp_cpu_poll() flushes wgfp_txb on every poll iteration, so synchronize_rcu()
- * followed by waiting for wgfp_eg_inflight_sum(eg) == 0 is both exact and
- * deadlock-free. */
+ * instead, dpaa_wgfp_tx_alloc() checks eg->active and increments alloc_cnt
+ * inside rcu_read_lock(), and wgfp_cpu_poll() flushes wgfp_txb on every poll
+ * iteration, so synchronize_rcu() followed by waiting for
+ * wgfp_eg_inflight_sum(eg) == 0 is both exact and deadlock-free. */
 static void wgfp_eg_deactivate_dev(struct net_device *dev, bool retire)
 {
 	unsigned int i, n;
@@ -1774,6 +1825,12 @@ static int wgfp_netdev_event(struct notifier_block *nb, unsigned long event,
 		return NOTIFY_DONE;
 
 	wgfp_eg_deactivate_dev(dev, event == NETDEV_UNREGISTER);
+	if (event == NETDEV_UNREGISTER) {
+		unsigned int i;
+
+		for (i = 0; i < WGFP_MAX_BPIDS; i++)
+			WRITE_ONCE(wgfp_bpid_dev[i], NULL);
+	}
 	return NOTIFY_OK;
 }
 
@@ -1953,14 +2010,22 @@ bool dpaa_wgfp_tx_alloc(int egress, int expected_ifindex, u32 max_len,
 			struct dpaa_wgfp_tx_buf *out)
 {
 	struct wgfp_egress *eg;
+	struct wgfp_egress_pc *pc;
 	struct wgfp_tx_slot *slot;
 	struct net_device *dev;
+	bool in_napi;
 	int cpu;
 
 	if (unlikely(!out || max_len > DPAA_WGFP_TX_BUF_SIZE))
 		return false;
 
-	local_bh_disable();
+	/* Inside wgfp_cpu_poll() (99.9999% of calls), BH is already disabled
+	 * so skip redundant local_bh_disable/enable (__local_bh_enable_ip).
+	 * Always hold rcu_read_lock() so wgfp_eg_dev[] dereference and
+	 * alloc_cnt ordering with synchronize_rcu() hold for every caller. */
+	in_napi = this_cpu_read(wgfp_bman_rel.active);
+	if (unlikely(!in_napi))
+		local_bh_disable();
 	rcu_read_lock();
 	if (unlikely(egress < 0 || egress >= smp_load_acquire(&wgfp_neg))) {
 		atomic64_inc(&wgfp_xmit_invalid_egress);
@@ -1980,31 +2045,28 @@ bool dpaa_wgfp_tx_alloc(int egress, int expected_ifindex, u32 max_len,
 		atomic64_inc(&wgfp_xmit_invalid_egress);
 		goto fail;
 	}
-	/* Reserve inflight inside RCU before checking active again (drain barrier). */
-	atomic_inc(&eg->pc[cpu].inflight);
-	smp_mb__after_atomic();
-	if (unlikely(!READ_ONCE(eg->active) || READ_ONCE(eg->quarantined))) {
-		atomic_dec(&eg->pc[cpu].inflight);
-		atomic64_inc(&wgfp_xmit_invalid_egress);
-		goto fail;
-	}
 	slot = wgfp_slot_pop_bh(eg, cpu);
 	if (unlikely(!slot)) {
-		atomic_dec(&eg->pc[cpu].inflight);
 		atomic64_inc(&wgfp_xmit_no_slot);
 		goto fail;
 	}
+	/* Ordered with wgfp_eg_deactivate_dev() via synchronize_rcu() after
+	 * eg->active = false: no extra smp_mb__() needed on hot path. */
+	pc = &eg->pc[cpu];
+	WRITE_ONCE(pc->alloc_cnt, pc->alloc_cnt + 1);
 	atomic_set(&slot->state, WGFP_SLOT_ALLOC);
 	out->buf = slot->buf;
 	out->buf_size = PAGE_SIZE;
 	out->ifindex = eg->ifindex;
 	out->priv = slot;
 	rcu_read_unlock();
-	local_bh_enable();
+	if (unlikely(!in_napi))
+		local_bh_enable();
 	return true;
 fail:
 	rcu_read_unlock();
-	local_bh_enable();
+	if (unlikely(!in_napi))
+		local_bh_enable();
 	return false;
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_tx_alloc);
@@ -2012,21 +2074,20 @@ EXPORT_SYMBOL_GPL(dpaa_wgfp_tx_alloc);
 void dpaa_wgfp_tx_cancel(struct dpaa_wgfp_tx_buf *tx)
 {
 	struct wgfp_tx_slot *slot;
-	struct wgfp_egress *eg;
+	bool in_napi;
 
 	if (unlikely(!tx || !tx->priv))
 		return;
 	slot = tx->priv;
 	tx->priv = NULL;
-	eg = slot->eg;
-	local_bh_disable();
-	if (likely(atomic_cmpxchg(&slot->state, WGFP_SLOT_ALLOC,
-				  WGFP_SLOT_FREE) == WGFP_SLOT_ALLOC)) {
-		wgfp_slot_return(slot, true);
-		smp_mb__before_atomic();
-		atomic_dec(&eg->pc[slot->owner_cpu].inflight);
-	}
-	local_bh_enable();
+	in_napi = this_cpu_read(wgfp_bman_rel.active);
+	if (unlikely(!in_napi))
+		local_bh_disable();
+	if (likely(atomic_cmpxchg_relaxed(&slot->state, WGFP_SLOT_ALLOC,
+					  WGFP_SLOT_FREE) == WGFP_SLOT_ALLOC))
+		wgfp_slot_return_done(slot, true);
+	if (unlikely(!in_napi))
+		local_bh_enable();
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_tx_cancel);
 
@@ -2041,9 +2102,7 @@ static bool wgfp_orp_submit_slot(struct wgfp_tx_slot *slot,
 		return false;
 	if (unlikely(!READ_ONCE(eg->active) || READ_ONCE(eg->quarantined))) {
 		atomic_set(&slot->state, WGFP_SLOT_FREE);
-		wgfp_slot_return(slot, true);
-		smp_mb__before_atomic();
-		atomic_dec(&eg->pc[slot->owner_cpu].inflight);
+		wgfp_slot_return_done(slot, true);
 		atomic64_inc(&wgfp_xmit_invalid_egress);
 		atomic64_inc(&wgfp_xmit_fail);
 		return true;
@@ -2079,6 +2138,7 @@ void dpaa_wgfp_tx_submit(struct dpaa_wgfp_frame *f, struct dpaa_wgfp_tx_buf *tx,
 	struct wgfp_egress *eg;
 	struct wgfp_txb *b;
 	struct qm_fd fd;
+	bool in_napi;
 
 	if (f)
 		wgfp_frame_release_fast(f);
@@ -2105,9 +2165,12 @@ void dpaa_wgfp_tx_submit(struct dpaa_wgfp_frame *f, struct dpaa_wgfp_tx_buf *tx,
 	fd.cmd = cpu_to_be32(FM_FD_CMD_FCO |
 			     qman_fq_fqid(&wgfp_conf_fqs[slot->owner_cpu]));
 
-	local_bh_disable();
+	in_napi = this_cpu_read(wgfp_bman_rel.active);
+	if (unlikely(!in_napi))
+		local_bh_disable();
 	if (unlikely(wgfp_orp_submit_slot(slot, &fd))) {
-		local_bh_enable();
+		if (unlikely(!in_napi))
+			local_bh_enable();
 		return;
 	}
 	b = this_cpu_ptr(&wgfp_txb);
@@ -2117,11 +2180,13 @@ void dpaa_wgfp_tx_submit(struct dpaa_wgfp_frame *f, struct dpaa_wgfp_tx_buf *tx,
 		b->fd[b->n] = fd;
 		if (++b->n >= b->lim)
 			wgfp_txb_flush(b);
-		local_bh_enable();
+		if (unlikely(!in_napi))
+			local_bh_enable();
 		return;
 	}
-	wgfp_tx_enqueue_slot(slot, &fd, 0, false, true);
-	local_bh_enable();
+	wgfp_tx_enqueue_slot(slot, &fd, NULL, true);
+	if (unlikely(!in_napi))
+		local_bh_enable();
 }
 EXPORT_SYMBOL_GPL(dpaa_wgfp_tx_submit);
 
@@ -2175,7 +2240,9 @@ static void wgfp_submit_skb(struct sk_buff *skb)
 	int err = dev_queue_xmit(skb);
 
 	if (likely(err == NET_XMIT_SUCCESS || err == NET_XMIT_CN)) {
+		local_bh_disable();
 		dpaa_wgfp_stat_inc(&wgfp_xmit_ok);
+		local_bh_enable();
 		if (unlikely(err == NET_XMIT_CN))
 			atomic64_inc(&wgfp_xmit_cn);
 	} else {

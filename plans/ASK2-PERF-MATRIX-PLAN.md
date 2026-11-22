@@ -1,11 +1,21 @@
 # ASK2-only performance matrix and system-metric battery
 
-**Status:** Design only (2026-11-07). No driver from this plan exists yet; the
-`M01–M13` catalogue rows and the matrix driver mapping described in §6.9 are
-pending and will start as `open`. This suite is deliberately **ASK2-only**: the
-vendor stacks (OWRT, OPNS) are not executed by it, and no vendor column is
-printed. Vendor figures quoted anywhere in this document are stored only as
-targets in catalogue evidence.
+**Status:** The Layer A driver is partial; the `M01–M13` catalogue rows and
+the matrix driver mapping described in §6.9 remain pending. This suite is
+deliberately **ASK2-only**: the vendor stacks (OWRT, OPNS) are not executed by
+it, and no vendor column is printed. Vendor figures quoted anywhere in this
+document are stored only as targets in catalogue evidence.
+
+**Runner safety gate.** The partial driver's results are not a completed
+acceptance battery. The jumbo runner is disabled until ASK
+disengagement and MTU restoration are ownership-safe. The combined-WAN runner
+is also disabled: its former setup and cleanup could alter unowned PPP, link,
+route and process state. Re-enable it only after exclusive ownership and
+partial-failure cleanup are established. The legacy ASK2 bridge runner is
+disabled before remote access: its cleanup could change unowned resources and
+reboot the DUT even when the initial check failed. A matched bridge adapter
+also needs safe port-role changes and FE teardown. These quarantines are not
+lifecycle fixes.
 
 ## Goal
 

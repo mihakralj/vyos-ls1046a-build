@@ -43,7 +43,33 @@ In the earlier separate cold-boot capture with full FE record dumps, eight table
 
 The post-run live ASK settings were `offload_delay_ms=500`, `offload_flood_rate=1000`, and both volume thresholds zero. The current source applies these admission gates when a flow is offered for offload, not as a per-packet mouse/elephant decision. The BBR sampler saw 32 FE record address suffixes with the same sampled set from about 1.6 through 24.6 seconds, including the blackout; suffixes and one-second samples cannot prove uninterrupted record identity or exclude replacement between samples. These observations do not support the admission delay alone as an explanation for the later blackout, but do not rule out other lifecycle defects or establish that the current source exactly matches the deployed module.
 
-**Jumbo runner.** `bin/testrig-ask2-9k.sh` (`preflight`, `up`, `down`, `status`, `run`) takes a lease bound to the DUT `boot_id` under an flock, claims the four DUT1-facing generator links through `testrig-vendor-mtu.sh` owner altnames, and changes MTU only while ASK offload is disengaged and verified through `fe_arm`. It reads back every endpoint, re-arms ports 0x10/0x11, and runs DF probes on the routed, VLAN and VLAN-port paths (IPv4 8972 B, IPv6 8952 B). `down` refuses foreign MTU values and restores 1500 on both sides. `run` calls `down` from an EXIT trap. Host tests: `tests/testrig_ask2_9k.py`. Hardware `up`/`down` was validated on a cold boot.
+**Jumbo runner.** `bin/testrig-ask2-9k.sh` permits read-only `preflight` and
+`status`; `up`, `down` and `run` refuse before remote access until FE
+disengagement and restoration are safe. An existing lease is retained; no
+ownership-safe recovery procedure is established. Do not delete the lease,
+change offload state or run other traffic tests on potentially affected links
+until the ownership and hardware state have been resolved. `status` and
+`--preflight` do not prove FE walker or QMan drain. The candidate transition
+code takes a boot-bound lease,
+claims generator links, attempts to disengage ASK, checks `fe_arm`, changes
+MTUs, re-arms and probes the paths. Host tests model its ownership checks.
+Earlier cold-boot `up`/`down` validation does not prove FE walker or QMan
+quiescence.
+
+**Paired routed jumbo coordinator.** `bin/testrig-paired-jumbo.sh` alternates
+VyOS then OpenWrt for each repetition of `unicast-9k`, `nat-9k`, `vlan-9k`
+and `vlan-port-9k`. It requires a finished 1500-byte paired reference in
+`PARITY_REFERENCE_DIR`, independently confirmed boot IDs in
+`PARITY_ASK2_COLD_BOOT_ID` and `PARITY_VENDOR_COLD_BOOT_ID`, the eight
+`BR_G{1,2}_IPV{4,6}` / `JUMBO_G{1,2}_VLAN{4,6}` endpoints, and `JUMBO_BPID`.
+The pool must match the live BPID of both OpenWrt test ports. `--preflight`
+checks both adapters and sends baseline pings without changing MTUs. A normal
+run checks generator settings, source hashes and owned cleanup before accepting
+paired results. Its socket checks cover the benchmark ports and sockets bound
+to the test addresses, not all possible raw or kernel traffic. Matched live
+preflight passed on the same cold boots as the 1500-byte reference without
+changing MTUs. Normal paired runs are disabled until ownership-safe offload
+disengagement and restoration are proven; `bridge-9k` is not supported.
 
 **Jumbo loss stage unresolved.** Matched cold-boot runs (`RIG_PARITY=1`, BBR, P8, 32 s, unicast-v4 bidirectional) gave 10.65, 11.62 and 10.57 Gbit/s; a direction stalled for about 12 s. A 1 Hz read-only mEMAC/BMI sampler, with `FMBM_RSTC` set to 0x80000000 on 0x10/0x11/0x30/0x31 (it is 0 after a cold boot), found correlated MAC RX-minus-TX gaps and BMI `rfdc` (+0x214) increments on the affected receive path. `rfdc` is a generic frame-discard counter, so this correlation does not identify a status bit or prove that the counted frames are the missing ACKs. `rodc`/`rldec`, MAC `tfcs`/`terr`, generator `rx_crc_errors`, and sampled QMan congestion/error counters stayed at zero; these observations weaken, but do not exclude, silent failures at those stages. Earlier `fdc` zero readings were taken with BMI statistics disabled and are inconclusive. DUT2 did not stall under the same harness.
 

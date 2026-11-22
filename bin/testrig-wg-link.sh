@@ -2,13 +2,19 @@
 # Manage test links by a unique kernel alternative name, never by a fixed name.
 set -eu
 
-if [ "$#" -ne 3 ]; then
-  echo "usage: $0 create|delete <interface> <ownership-name>" >&2
+if [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; then
+  echo "usage: $0 create|delete <interface> <ownership-name> [fq]" >&2
   exit 2
 fi
 operation=$1
 name=$2
 owner=$3
+qdisc=${4:-default}
+if { [ "$qdisc" != default ] && [ "$qdisc" != fq ]; } ||
+   { [ "$#" -eq 4 ] && [ "$operation" != create ]; }; then
+  echo "ERROR: invalid test link qdisc" >&2
+  exit 2
+fi
 if ! printf '%s\n' "$name" | grep -Eq '^[A-Za-z0-9_.-]{1,15}$' ||
    ! printf '%s\n' "$owner" | grep -Eq '^wgo-[0-9a-f]{32}-[a-z0-9]+$'; then
   echo "ERROR: invalid test interface or ownership name" >&2
@@ -33,6 +39,15 @@ case $operation in
     if ! ip link property add dev "$tmp" altname "$owner"; then
       echo "ERROR: cannot verify ownership of temporary link $tmp; retain the lease" >&2
       exit 1
+    fi
+    if [ "$qdisc" = fq ]; then
+      if ! tc qdisc add dev "$tmp" root fq ||
+         ! tc qdisc show dev "$tmp" | grep -Eq '^qdisc fq [^ ]+ root( |$)'; then
+        echo "ERROR: cannot configure fq on owned link $tmp" >&2
+        if ip link del "$owner"; then exit 12; fi
+        echo "ERROR: owned link $owner requires cleanup" >&2
+        exit 1
+      fi
     fi
     if ! ip link set dev "$tmp" name "$name"; then
       echo "ERROR: cannot rename owned link to $name" >&2

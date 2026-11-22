@@ -44,6 +44,103 @@ def test_owned_link_cleanup_preserves_other_links():
     assert result.returncode == 0, result.stderr
 
 
+def fake_tc(tmp_path, failure="", output="qdisc fq 8001: root refcnt 2"):
+    tc = tmp_path / "tc"
+    tc.write_text(
+        '#!/bin/sh\n'
+        'echo "$*" >> "$TC_LOG"\n'
+        'if [ "$2" = "$TC_FAILURE" ]; then exit 1; fi\n'
+        'if [ "$2" = show ]; then printf "%s\\n" "$TC_OUTPUT"; fi\n'
+    )
+    tc.chmod(0o755)
+    return os.environ | {
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "TC_LOG": str(tmp_path / "tc.log"),
+        "TC_FAILURE": failure,
+        "TC_OUTPUT": output,
+    }
+
+
+def test_default_does_not_change_the_link_qdisc(tmp_path):
+    env = fake_tc(tmp_path, "add")
+    result = run_in_namespace(
+        'sh "$1" create wg0 "$2"; sh "$1" delete wg0 "$2"',
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "tc.log").exists()
+
+
+def test_fq_uses_the_real_kernel_qdisc():
+    if not shutil.which("tc"):
+        pytest.skip("tc is required")
+    result = run_in_namespace(
+        'sh "$1" create wg0 "$2" fq; '
+        'tc qdisc show dev wg0 | grep -Eq "^qdisc fq [^ ]+ root( |$)"; '
+        'sh "$1" delete wg0 "$2"; ! ip link show wg0 >/dev/null 2>&1'
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_fq_is_added_to_the_owned_temporary_link(tmp_path):
+    env = fake_tc(tmp_path)
+    result = run_in_namespace(
+        'ip link add other0 type wireguard; '
+        'sh "$1" create wg0 "$2" fq; ip link show "$2" >/dev/null; '
+        'sh "$1" delete wg0 "$2"; '
+        '! ip link show wg0 >/dev/null 2>&1; ip link show other0 >/dev/null',
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "tc.log").read_text().splitlines() == [
+        "qdisc add dev wt0123456789 root fq",
+        "qdisc show dev wt0123456789",
+    ]
+
+
+@pytest.mark.parametrize("failure", ["add", "show"])
+def test_fq_failure_removes_only_the_owned_link(tmp_path, failure):
+    env = fake_tc(tmp_path, failure)
+    result = run_in_namespace(
+        'ip link add other0 type wireguard; '
+        'if sh "$1" create wg0 "$2" fq; then exit 1; else rc=$?; fi; '
+        '[ "$rc" -eq 12 ]; ! ip link show "$2" >/dev/null 2>&1; '
+        '! ip link show wg0 >/dev/null 2>&1; ip link show other0 >/dev/null',
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_fq_readback_mismatch_removes_only_the_owned_link(tmp_path):
+    env = fake_tc(tmp_path, output="qdisc noqueue 0: root")
+    result = run_in_namespace(
+        'ip link add other0 type wireguard; '
+        'if sh "$1" create wg0 "$2" fq; then exit 1; else rc=$?; fi; '
+        '[ "$rc" -eq 12 ]; ! ip link show "$2" >/dev/null 2>&1; '
+        'ip link show other0 >/dev/null',
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_fq_failure_retains_the_lease_when_owned_link_cannot_be_removed(tmp_path):
+    env = fake_tc(tmp_path, "add")
+    ip = shutil.which("ip")
+    wrapper = tmp_path / "ip"
+    wrapper.write_text(
+        f'#!/bin/sh\nif [ "$1 $2" = "link del" ]; then exit 1; fi\n'
+        f'exec "{ip}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    result = run_in_namespace(
+        'if sh "$1" create wg0 "$2" fq; then exit 1; else rc=$?; fi; '
+        '[ "$rc" -eq 1 ]; ip link show "$2" >/dev/null; '
+        '! ip link show wg0 >/dev/null 2>&1',
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_create_refuses_existing_interface_without_deleting_it():
     result = run_in_namespace(
         'ip link add wg0 type wireguard; old=$(ip -o link show wg0); '

@@ -30,6 +30,8 @@ typedef int64_t atomic64_t;
 #define dpaa_wgfp_stat_inc(p) atomic64_inc(p)
 #define rcu_read_lock() ((void)0)
 #define rcu_read_unlock() ((void)0)
+#define local_bh_disable() ((void)0)
+#define local_bh_enable() ((void)0)
 #define rcu_dereference(p) (p)
 #define smp_load_acquire(p) (*(p))
 #define this_cpu_ptr(p) (p)

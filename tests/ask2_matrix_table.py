@@ -2,6 +2,9 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.host
 spec = importlib.util.spec_from_file_location(
     "amt", Path(__file__).resolve().parents[1] / "bin/ask2-matrix-table.py")
 amt = importlib.util.module_from_spec(spec)
@@ -45,3 +48,13 @@ def test_table(tmp_path):
     rows_csv = (tmp_path / "matrix.csv").read_text().splitlines()
     assert rows_csv[0] == "type,fam,dir,gbps,n,verdicts,mean,stdev,min"
     assert "unicast,v4,up,9.420,3,HW,9.373,0.064,9.300" in rows_csv
+
+
+def test_mirrored_wireguard_cells_are_included(tmp_path):
+    (tmp_path / "wg-185-eth3.csv").write_text(
+        "ts,cell,dir,rep,gbps\nt,wg-v4-eth3,up,1,2.50\n")
+    (tmp_path / "wg6-185-eth3.csv").write_text(
+        "ts,cell,dir,rep,gbps\nt,wg-v6-eth3,down,1,3.50\n")
+    table = amt.collect(tmp_path)
+    assert table[("wireguard", "4", "up")][0] == 2.5
+    assert table[("wireguard6", "6", "down")][0] == 3.5

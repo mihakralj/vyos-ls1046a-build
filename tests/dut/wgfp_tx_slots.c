@@ -16,6 +16,7 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+typedef int64_t s64;
 typedef uint64_t dma_addr_t;
 typedef int64_t ktime_t;
 
@@ -81,6 +82,8 @@ typedef int64_t ktime_t;
 #define pr_info(...) do { } while (0)
 #define pr_err(...) do { } while (0)
 #define this_cpu_ptr(p) (p)
+#define this_cpu_read(x) (x)
+#define prefetchw(p) ((void)(p))
 #define time_before(a, b) ((long)((a) - (b)) < 0)
 #define msecs_to_jiffies(ms) (ms)
 
@@ -100,6 +103,12 @@ static inline int atomic_cmpxchg(atomic_t *a, int o, int n)
 		a->counter = n;
 	return cur;
 }
+#define atomic_cmpxchg_relaxed(a, o, n) atomic_cmpxchg((a), (o), (n))
+#define WGFP_MAX_BPIDS 64
+static struct device *wgfp_bpid_dev[WGFP_MAX_BPIDS];
+static inline int64_t atomic64_read(const atomic64_t *a) { return a->counter; }
+#define atomic64_read_acquire(a) atomic64_read(a)
+static inline void atomic64_set(atomic64_t *a, int64_t v) { a->counter = v; }
 static inline void atomic64_inc(atomic64_t *a) { a->counter++; }
 #define dpaa_wgfp_stat_inc(p) atomic64_inc(p)
 
@@ -202,22 +211,24 @@ enum wgfp_slot_state {
 	WGFP_SLOT_INFLIGHT = 3,
 };
 struct wgfp_tx_slot {
-	struct hlist_node dma_node;
+	dma_addr_t dma;
 	struct wgfp_egress *eg;
 	u8 *buf;
-	dma_addr_t dma;
 	atomic_t state;
 	u16 owner_cpu;
 	u16 local_idx;
-};
+	struct hlist_node dma_node;
+} ____cacheline_aligned_in_smp;
 struct wgfp_tx_meta {
 	u32 magic;
 	struct wgfp_tx_slot *slot;
 };
 struct wgfp_egress_pc {
-	atomic_t inflight;
+	u64 alloc_cnt;
+	u64 local_done;
 	u16 free_top;
 	u16 free_stack[WGFP_TX_SLOTS_PER_CPU];
+	atomic64_t remote_done;
 	spinlock_t remote_lock;
 	u16 remote_top;
 	u16 remote_stack[WGFP_TX_SLOTS_PER_CPU];
@@ -649,11 +660,13 @@ int main(void)
 	wgfp_conf_dqrr(NULL, &wgfp_conf_fqs[0], &dq, false);
 	assert(wgfp_eg_inflight_sum(&wgfp_egresses[eg3]) == 0);
 
-	/* 13. NETDEV_UNREGISTER permanently retires slot */
+	/* 13. NETDEV_UNREGISTER permanently retires slot and clears BPID cache */
 	eg4 = dpaa_wgfp_egress(&eth4);
 	assert(eg4 == 1);
+	wgfp_bpid_dev[7] = &dma_dev;
 	assert(wgfp_netdev_event(NULL, NETDEV_UNREGISTER, &eth4) == NOTIFY_OK);
 	assert(wgfp_egresses[eg4].retired && !wgfp_egresses[eg4].active);
+	assert(wgfp_bpid_dev[7] == NULL);
 	assert(dpaa_wgfp_egress(&eth4) == -EBUSY);
 
 	/* 14. Batched BMan RX release (8 per RCR + BPID change flush) */
@@ -673,6 +686,43 @@ int main(void)
 	wgfp_bman_rel_flush(&wgfp_bman_rel);
 	assert(bman_batch_calls == 3 && bman_last_n == 1 && bman_last_bpid == 8);
 	assert(bman_batch_total == 10 && bman_direct_calls == 0);
+
+	/* 15. In-NAPI BH-elision path (wgfp_bman_rel.active = true) + lazy b->end */
+	{
+		struct net_device eth5 = { .name = "eth5", .ifindex = 5, .running = true,
+					   .priv = { .tx_dma_dev = &dma_dev } };
+		int eg5 = dpaa_wgfp_egress(&eth5);
+		assert(eg5 == 2);
+		wgfp_bman_rel.active = true;
+		wgfp_txb.active = true;
+		wgfp_txb.threaded = true;
+		wgfp_txb.end = 0;
+		wgfp_txb.lim = 4;
+		wgfp_txb.n = 0;
+		assert(bh_depth == 0);
+		assert(dpaa_wgfp_tx_alloc(eg5, 5, 200, &tx));
+		assert(bh_depth == 0);
+		dpaa_wgfp_tx_submit(NULL, &tx, DPAA_WGFP_TX_HEADROOM, 200);
+		assert(bh_depth == 0 && wgfp_txb.n == 1 && wgfp_txb.end == 0);
+		wgfp_txb_flush(&wgfp_txb);
+		/* No -EBUSY -> lazy b->end stayed 0 (zero ktime_get calls) */
+		assert(wgfp_txb.end == 0 && wgfp_eg_inflight_sum(&wgfp_egresses[eg5]) == 1);
+		dq.fd = last_enq_fd;
+		assert(wgfp_conf_dqrr(NULL, &wgfp_conf_fqs[0], &dq, false) == qman_cb_dqrr_consume);
+		assert(wgfp_eg_inflight_sum(&wgfp_egresses[eg5]) == 0);
+		assert(wgfp_egresses[eg5].pc[0].alloc_cnt == 1);
+		assert(wgfp_egresses[eg5].pc[0].local_done == 1);
+		assert(atomic64_read(&wgfp_egresses[eg5].pc[0].remote_done) == 0);
+		/* -EBUSY populates lazy b->end once and unwinds cleanly */
+		enq_fail_mode = 1;
+		assert(dpaa_wgfp_tx_alloc(eg5, 5, 200, &tx));
+		dpaa_wgfp_tx_submit(NULL, &tx, DPAA_WGFP_TX_HEADROOM, 200);
+		wgfp_txb_flush(&wgfp_txb);
+		enq_fail_mode = 0;
+		assert(wgfp_txb.end != 0 && wgfp_eg_inflight_sum(&wgfp_egresses[eg5]) == 0);
+		wgfp_txb.active = false;
+		wgfp_bman_rel.active = false;
+	}
 
 	assert(bh_depth == 0);
 	puts("wgfp_tx_slots: ok");

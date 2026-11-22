@@ -26,8 +26,8 @@
 #   plain-v4     no tunnel, dell1 -> dell2 through the DUT (software/HW path reference)
 #   wg-v4        IPv4 inner through the DUT tunnel
 #   wg-v6        IPv6 inner through the DUT tunnel
-#   ceiling-v4   dell1 <-> dell2 wg directly over the ConnectX-3 link (enp2s0, no DUT): the
-#                generator pair's own crypto ceiling, so a DUT number is never generator-limited
+#   ceiling-v4   dell1 <-> dell2 wg directly over the ConnectX-3 link (enp2s0, no DUT): an
+#                independent pair measurement, not proof of headroom in the routed topology
 #
 # Everything is runtime-only. Links, routes, rules and iperf3 servers are
 # identified by a per-run lease; cleanup refuses resources it cannot verify.
@@ -37,20 +37,26 @@
 #   bin/testrig-wireguard.sh run ceiling-v4 plain-v4 wg-v4 wg-v6
 #   DIRS="up down bidir" STREAMS=4 DUR=30 bin/testrig-wireguard.sh run wg-v4
 #   MODE=udp LEN=1280 RATE=800M bin/testrig-wireguard.sh run wg-v4
-# Env: WG_NOTRACK=1 (outer UDP untracked by conntrack, experiment)
+# Env: WG_NOTRACK=1 (UDP port), 2 (all traffic), 3 (exact outer peer tuple).
 #      DUT_KIND=ask2|vendor   (vendor = OpenWrt NXP ASK; RIG_NS=$VENDOR_NS is implied). Hosts and key: bin/testrig-env.sh
 #      WG_PORT=eth4|eth3 (the DUT port that carries the encrypted leg; default eth4)
-#      REPS (repeat each cell/direction, summary mean/min/max/sd), DUT, DIRS, DUR, STEADY_FROM, STREAMS, WGMTU, OUTER=4|6, MODE=tcp|udp, LEN, RATE, OUT, KEEP
+#      REPS (repeat each cell/direction, summary mean/min/max/sd), DUT, DIRS, DUR, STEADY_FROM, MEASURE_TO (default DUR-1), STREAMS, WGMTU, OUTER=4|6, MODE=tcp|udp, LEN, RATE, OUT, KEEP
 #      WG_SKIP_SERVERS=1 leaves iperf servers untouched. For run, also set
 #      WG_EXTERNAL_IPERF=1 and provide the server on WG_IPERF_PORT (default 5231).
 #      ASK2 software and WGFP runs both require the exclusive wgfp_peer_lease reservation.
-#      WGFP_COUNTER_LOG=<path> records per-attempt WGFP counters before and after each cell.
+#      WGFP_COUNTER_LOG=<path> gates each attempt and a post-run settle sample;
+#      guarded runs stop rather than retrying a failed attempt.
+#      Complete TCP stalls are retained as zero-rate evidence, not retried.
 #      WG_SKIP_FW4=1 leaves the vendor's existing forwarding policy unchanged;
 #      use it only when that policy already permits the test traffic.
-#      WG_CLIENT_TIMEOUT caps each iperf client in seconds (default DUR+45).
+#      WG_CLIENT_TIMEOUT caps each iperf client in seconds (default DUR+45);
+#      WG_STATS_TIMEOUT caps each DUT statistics read (default WG_CLIENT_TIMEOUT).
+#      WG_GEN_QDISC=fq adds fq to owned generator tunnels only; it sets no explicit iperf rate cap.
 # The vendor DUT needs WireGuard tools and a kernel module matching its exact kernel ABI.
 set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
 . "$(dirname "$0")/testrig-env.sh"
+if [ "${RIG_PARITY:-0}" = 1 ]; then . "$HERE/testrig-parity-profile.sh" || exit 2; fi
 . "$(dirname "$0")/testrig-wgfp-counters.sh"
 . "$(dirname "$0")/testrig-wg-lease.sh"
 . "$(dirname "$0")/testrig-wg-resource.sh"
@@ -58,11 +64,23 @@ DUT_KIND=${DUT_KIND:-ask2}
 DUT=${DUT:-$(rig_dut "$DUT_KIND")} || exit 2
 if [ "$DUT_KIND" = vendor ]; then RIG_NS=${RIG_NS:-$VENDOR_NS}; else RIG_NS=${RIG_NS:-}; fi
 DIRS=${DIRS:-"up down"}; DUR=${DUR:-30}; STEADY_FROM=${STEADY_FROM:-10}; STREAMS=${STREAMS:-4}
+MEASURE_TO=${MEASURE_TO:-$((DUR-1))}
 REPS=${REPS:-1}; WGMTU=${WGMTU:-1420}; OUTER=${OUTER:-4}; MODE=${MODE:-tcp}; LEN=${LEN:-1280}; RATE=${RATE:-1G}
+case $OUTER in 4|6) ;; *) echo "OUTER must be 4 or 6" >&2; exit 2;; esac
+case ${1:-run} in
+  teardown|probe-teardown) WG_GEN_QDISC=default ;;
+  *)
+    WG_GEN_QDISC=${WG_GEN_QDISC:-default}
+    case $WG_GEN_QDISC in default|fq) ;; *) echo "WG_GEN_QDISC must be default or fq" >&2; exit 2 ;; esac ;;
+esac
 if ! [[ $DUR =~ ^[1-9][0-9]{0,5}$ ]]; then echo "DUR must be a positive integer" >&2; exit 2; fi
 WG_CLIENT_TIMEOUT=${WG_CLIENT_TIMEOUT:-$((DUR+45))}
 if ! [[ $WG_CLIENT_TIMEOUT =~ ^[1-9][0-9]{0,6}$ ]] || (( WG_CLIENT_TIMEOUT <= DUR )); then
   echo "WG_CLIENT_TIMEOUT must be an integer greater than DUR" >&2; exit 2
+fi
+WG_STATS_TIMEOUT=${WG_STATS_TIMEOUT:-$WG_CLIENT_TIMEOUT}
+if ! [[ $WG_STATS_TIMEOUT =~ ^[1-9][0-9]{0,6}$ ]] || (( WG_STATS_TIMEOUT <= DUR )); then
+  echo "WG_STATS_TIMEOUT must be an integer greater than DUR" >&2; exit 2
 fi
 # RUN_ON=gen2 (alias dell2): run on gen2 (see testrig-offload-quick.sh): gen2 commands run locally, gen1 and
 # the DUT go over ssh.
@@ -70,7 +88,7 @@ RUN_ON=${RUN_ON:-agent}
 rig_require GEN1; [ "$RUN_ON" = dell2 ] || rig_require GEN2
 OUTDIR=${OUTDIR:-$RIG_OUT}
 OUT=${OUT:-$OUTDIR/wg-$(date +%Y%m%d-%H%M)-${DUT_KIND}.csv}
-J=${J:-$OUTDIR/json-wg}; mkdir -p "$J"
+J=${J:-$OUTDIR/json-wg}
 SSHO="-o BatchMode=yes -o ConnectTimeout=8 $RIG_SSHK"
 NSX="sudo"; [ -n "$RIG_NS" ] && NSX="sudo ip netns exec $RIG_NS"   # always root; netns when RIG_NS is set
 
@@ -90,6 +108,12 @@ case $WG_PORT in
         PLAIN_SRV4=10.99.1.112 ;;
   *) echo "WG_PORT must be eth3 or eth4" >&2; exit 2 ;;
 esac
+if [ "${1:-}" = topology ]; then
+  [ "$#" = 1 ] || { echo "topology takes no arguments" >&2; exit 2; }
+  printf '%s %s %s %s\n' "$O_T4" "$O_DUT4" "$O_T6" "$O_DUT6"
+  exit 0
+fi
+mkdir -p "$J"
 rig(){   # rig gen1|gen2 <-n or empty>: the command prefix that runs a command on that generator
   [ "$RUN_ON" = dell2 ] && [ "$1" = gen2 ] && { echo "bash -c"; return; }
   if [ "$1" = gen1 ]; then echo "ssh ${2:-} $SSHO $GEN1"; else echo "ssh ${2:-} $SSHO $GEN2"; fi
@@ -139,12 +163,16 @@ ceiling-v4|10.99.201.112|10.99.201.113|4|direct
 
 # ---------- tunnel plumbing ----------
 wg_link(){
-  local side=$1 action=$2
+  local side=$1 action=$2 qdisc=""
+  if [ "$action" = create ] && [ "$WG_GEN_QDISC" = fq ] && [ "$side" != dut ]; then
+    qdisc=" fq"
+    echo "Generator $side tunnel qdisc: fq (no explicit iperf rate cap)" >&2
+  fi
   case $side in
     dut)     duti "sudo sh -s -- $action wg0 wgo-$WG_OWNER_TOKEN-dut" < "$WG_LINK_HELPER";;
-    far)     $D2I "$NSX sh -s -- $action wg0 wgo-$WG_OWNER_TOKEN-far" < "$WG_LINK_HELPER";;
-    direct1) $DD1I "sudo sh -s -- $action wgd wgo-$WG_OWNER_TOKEN-direct1" < "$WG_LINK_HELPER";;
-    direct2) $DD2I "sudo sh -s -- $action wgd wgo-$WG_OWNER_TOKEN-direct2" < "$WG_LINK_HELPER";;
+    far)     $D2I "$NSX sh -s -- $action wg0 wgo-$WG_OWNER_TOKEN-far$qdisc" < "$WG_LINK_HELPER";;
+    direct1) $DD1I "sudo sh -s -- $action wgd wgo-$WG_OWNER_TOKEN-direct1$qdisc" < "$WG_LINK_HELPER";;
+    direct2) $DD2I "sudo sh -s -- $action wgd wgo-$WG_OWNER_TOKEN-direct2$qdisc" < "$WG_LINK_HELPER";;
     *) return 1;;
   esac
 }
@@ -239,7 +267,11 @@ wg_fw_remove(){
 }
 
 wg_notrack_add(){
-  duti "sudo sh -s -- add $WG_OWNER_TOKEN $WG_NOTRACK $WGP" < "$WG_NFT_HELPER"
+  if [ "$WG_NOTRACK" = 3 ]; then
+    duti "sudo sh -s -- add $WG_OWNER_TOKEN 3 $WGP $OUTER $D2_OUT $DUT_OUT" < "$WG_NFT_HELPER"
+  else
+    duti "sudo sh -s -- add $WG_OWNER_TOKEN $WG_NOTRACK $WGP" < "$WG_NFT_HELPER"
+  fi
 }
 
 wg_notrack_remove(){
@@ -391,11 +423,22 @@ preflight(){
 }
 
 # ---------- measurement ----------
-parse(){ python3 - "$1" "$STEADY_FROM" "$MODE" "$2" <<'PY'
+parse(){ PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$1" "$STEADY_FROM" "$MODE" "$2" "$DUR" "${MEASURE_TO:-$((DUR-1))}" "$STREAMS" <<'PY'
 import json,math,sys
-try: j=json.load(open(sys.argv[1]))
-except (OSError,ValueError): print("0 0 0"); sys.exit()
-if j.get('error'): print("0 0 0"); sys.exit()
+from testrig_iperf import measure_tcp, report_json
+try:
+    j=json.load(open(sys.argv[1]))
+    if sys.argv[3]!="udp":
+        report=measure_tcp(j, float(sys.argv[5]), float(sys.argv[2]), float(sys.argv[6]),
+                           direction=sys.argv[4], streams=int(sys.argv[7]))
+        report_json(sys.argv[1], report)
+    elif j.get("error"):
+        print("0 0 0"); sys.exit()
+except (OSError,ValueError,TypeError,KeyError) as exc:
+    if sys.argv[3]=="udp":
+        print("0 0 0"); sys.exit()
+    print(f"ERROR: {exc}",file=sys.stderr)
+    sys.exit(1)
 f=float(sys.argv[2]); udp=sys.argv[3]=="udp"
 def sel(key):
     return [i[key] for i in j.get('intervals',[]) if key in i and i[key]['start']>=f-0.01 and not i[key].get('omitted')]
@@ -404,7 +447,7 @@ if sys.argv[4]=="bidir" and len(a)!=len(b):
     print(f"ERROR: missing reverse iperf intervals in {sys.argv[1]}",file=sys.stderr)
     sys.exit(1)
 def mean(iv): return sum(x['bits_per_second'] for x in iv)/len(iv)/1e9 if iv else 0
-g=mean(a)+mean(b)
+g=mean(a)+mean(b) if udp else report["gbps"]
 if not math.isfinite(g) or g < 0: print("0 0 0"); sys.exit()
 e=j.get('end',{}); c=e.get('cpu_utilization_percent',{})
 if udp:
@@ -443,9 +486,10 @@ EOS
 hits_sum(){ awk '/^--$/{sec++; next} /^E /{ if(sec==0) a[$2]=$3; else b[$2]=$3 } END{ for(k in b){ d=((k in a)&&b[k]>=a[k])?b[k]-a[k]:b[k]; s+=d } print s+0 }' "$1"; }
 
 run_cell(){
-  local name=$1 a=$2 b=$3 fam=$4 kind=$5 dir flag tag win
+  local name=$1 a=$2 b=$3 fam=$4 kind=$5 dir flag tag win attempt skip_ehash=0
   name=$name$PORTSUF   # the encrypted-leg port is part of the cell identity (CSV, JSON file names)
   local NSC="$NSX"; [ "$kind" = direct ] && NSC="sudo"   # direct pair uses root namespaces
+  if [ "$DUT_KIND" = ask2 ] && [ "${WGFP:-0}" = 1 ]; then skip_ehash=1; fi
   if ! $D1 "$NSC ping -c3 -W2 -i 0.3 -I $a $b >/dev/null 2>&1"; then
     printf '%-12s %s\n' "$name" "SKIP (no path $a -> $b)"; echo "$(date +%H:%M:%S),$name,-,0,0,0,0,0,0,0,0,SKIP,-" >> "$OUT"
     if [ "${WG_SKIP_SERVERS:-0}" = 1 ]; then return 1; else return 0; fi
@@ -465,22 +509,25 @@ run_cell(){
     wgfp_counter_sample "$name" "$dir" "$rep" before "$attempt" || return 1
     dut_stat=${WG_DUT_STAT:-/tmp/wg-dut.stat}
     if [ "$DUT_KIND" = vendor ]; then
-      ssh $SSHO $DUT sh -s -- $STEADY_FROM $win > "$dut_stat" <<'EOS' &
+      timeout --signal=TERM --kill-after=5s "${WG_STATS_TIMEOUT}s" ssh $SSHO $DUT sh -s -- $STEADY_FROM $win > "$dut_stat" <<'EOS' &
 sf=$1; w=$2
 snap(){ grep '^cpu' /proc/stat; for i in eth3 eth4; do echo "N $i $(cat /sys/class/net/$i/statistics/rx_packets)"; done; echo --; }
 sleep $sf; snap; sleep $w; snap
 EOS
     else
-      ssh $SSHO $DUT bash -s -- $STEADY_FROM $win > "$dut_stat" <<'EOS' &
-sf=$1; w=$2
+      timeout --signal=TERM --kill-after=5s "${WG_STATS_TIMEOUT}s" ssh $SSHO $DUT bash -s -- $STEADY_FROM $win "$skip_ehash" > "$dut_stat" <<'EOS' &
+sf=$1; w=$2; skip_ehash=$3
 snap(){ grep '^cpu' /proc/stat; for i in eth3 eth4; do echo "N $i $(cat /sys/class/net/$i/statistics/rx_packets)"; done
-        sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats 2>/dev/null | sed -n 's/.*record_dma=\(0x[0-9a-f]*\).*pkt_count=\([0-9]*\).*/E \1 \2/p'; echo --; }
+        if [ "$skip_ehash" != 1 ]; then
+          sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats 2>/dev/null | sed -n 's/.*record_dma=\(0x[0-9a-f]*\).*pkt_count=\([0-9]*\).*/E \1 \2/p'
+        fi
+        echo --; }
 sleep $sf; snap; sleep $w; snap
 EOS
     fi
     sp=$!
     pp=""; if [ "${PROF:-0}" = 1 ]; then dut_prof $STEADY_FROM $win > "$J/$tag.prof" & pp=$!; fi
-    $D1 "$NSC timeout --signal=TERM --kill-after=5s ${WG_CLIENT_TIMEOUT}s iperf3 -c $b -B $a -p $IPERF_P -P $STREAMS -t $DUR -i 1 -Z -J $flag $udp" > "$J/$tag.json" &
+    $D1 "$NSC timeout --signal=TERM --kill-after=5s ${WG_CLIENT_TIMEOUT}s iperf3 -c $b -B $a -p $IPERF_P -P $STREAMS -t $DUR -i 1 -Z -J ${IPERF_ARGS:-} $flag $udp" > "$J/$tag.json" &
     client_status=0; wait $! || client_status=$?
     stat_status=0; wait $sp || stat_status=$?
     wgfp_counter_sample "$name" "$dir" "$rep" after "$attempt" || return 1
@@ -491,8 +538,13 @@ EOS
     parsed=$(parse "$J/$tag.json" "$dir") || { echo "ERROR: unable to parse iperf results" >&2; return 1; }
     read gbps gen xr <<< "$parsed"
     read busy sirq mx rx3 rx4 mc < <(cpu_stats "$dut_stat")
-    hw=$(hits_sum "$dut_stat")
-    if [ "$client_status" -eq 0 ] && awk -v g="$gbps" 'BEGIN{exit !(g>0)}'; then break; fi
+    if [ "$skip_ehash" = 1 ]; then hw=n/a; else hw=$(hits_sum "$dut_stat"); fi
+    # A complete TCP stall is evidence, not a reason to cherry-pick a retry.
+    if [ "$client_status" -eq 0 ] && { [ "$MODE" = tcp ] || awk -v g="$gbps" 'BEGIN{exit !(g>0)}'; }; then break; fi
+    if [ -n "${WGFP_COUNTER_LOG:-}" ]; then
+      echo "ERROR: iperf produced no traffic or failed; refusing to retry a guarded WGFP attempt" >&2
+      return 1
+    fi
     if [ "$attempt" -eq 3 ]; then
       echo "ERROR: iperf produced no traffic or failed after $attempt attempts" >&2; return 1
     fi
@@ -506,10 +558,11 @@ EOS
     done
     # Netdev RX counters can omit WGFP sink traffic; this is not wire PPS.
     pps=$(( (rx3 + rx4) / win ))
+    sleep 5
+    wgfp_counter_sample "$name" "$dir" "$rep" settle "$attempt" || return 1
     printf '%-12s %-5s r%s %7s Gbit/s  dutbusy %5s%% sirq %5s%% maxcore %5s%%  gen %3s%%  %s %s  netdev_rx_pps %s  hw_hits %s  cpu %s\n' \
       "$name" "$dir" "$rep" "$gbps" "$busy" "$sirq" "$mx" "$gen" "$([ "$MODE" = udp ] && echo loss% || echo retr)" "$xr" "$pps" "$hw" "$mc"
     echo "$(date +%H:%M:%S),$name,$dir,$rep,$gbps,$xr,$busy,$sirq,$mx,$gen,$pps,$hw,$mc" >> "$OUT"
-    sleep 5
    done
   done
 }
@@ -538,7 +591,8 @@ esac
   { echo "WG_SERIAL_CPU requires the iperf server" >&2; exit 2; }
 [ -z "${WGFP_COUNTER_LOG:-}" ] || [ "${WGFP:-0}" = 1 ] ||
   { echo "WGFP_COUNTER_LOG requires WGFP=1" >&2; exit 2; }
-case ${WG_NOTRACK:-0} in 0|1|2) ;; *) echo "WG_NOTRACK must be 0, 1 or 2" >&2; exit 2;; esac
+if [ "$cmd" = run ]; then wgfp_counter_preflight || exit 4; fi
+case ${WG_NOTRACK:-0} in 0|1|2|3) ;; *) echo "WG_NOTRACK must be 0, 1, 2 or 3" >&2; exit 2;; esac
 if [ -n "${WG_SERIAL_CPU:-}" ] && ! [[ $WG_SERIAL_CPU =~ ^[0-9]+$ ]]; then
   echo "WG_SERIAL_CPU must be a CPU number" >&2; exit 2
 fi
@@ -557,6 +611,9 @@ envrec(){
        echo "rps_eth3: $(cat /sys/class/net/eth3/queues/rx-0/rps_cpus 2>/dev/null) uptime: $(cut -d. -f1 /proc/uptime)s"' 2>/dev/null
 }
 ENVTXT=$(envrec); echo "$ENVTXT"
+if [ "$DUT_KIND" = ask2 ] && [ "${WGFP:-0}" = 1 ]; then
+  echo "WGFP: skipping FE ehash debugfs sampling during traffic (global fe_lock)"
+fi
 if echo "$ENVTXT" | grep -q -E "lockdep: PRESENT|PROVE_LOCKING=y|DEBUG_SPINLOCK=y"; then
   echo "REFUSING: DUT kernel has lock debugging enabled; numbers would be invalid (plans/archive/ask2-wireguard-plan.md 2.1)." >&2; exit 5
 fi

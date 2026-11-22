@@ -186,15 +186,28 @@ os.execvp('nsenter', ['nsenter', '-t', os.environ['NS_' + host.upper()], '-n'] +
             net("gen1", "ip", "route", "show", "exact", "10.99.200.0/24").stdout,
             net("gen1", "ip", "-6", "route", "show", "exact", "fd99:200::/64").stdout,
         )
-        for outer in ("4", "6"):
-            rig("setup", WG_SKIP_SERVERS="1", WG_NOTRACK="1", WGMTU="1300", OUTER=outer)
-            net("gen1", "ping", "-c", "1", "-W", "5", "-I", "10.99.1.112", "10.99.200.113")
-            net("gen1", "ping", "-6", "-c", "1", "-W", "5", "-I", "fd99:1::112", "fd99:200::113")
+        for port, outer in (("eth4", "4"), ("eth4", "6"), ("eth3", "4"), ("eth3", "6")):
+            rig("setup", WG_SKIP_SERVERS="1", WG_NOTRACK="3", WGMTU="1300", OUTER=outer, WG_PORT=port)
+            if port == "eth3":
+                plain, src4, dst4, src6, dst6 = "gen2", "10.99.2.113", "10.99.200.112", "fd99:2::113", "fd99:200::112"
+                peer4, dut4, peer6, dut6 = "10.99.1.112", "10.99.1.185", "fd99:1::112", "fd99:1::185"
+            else:
+                plain, src4, dst4, src6, dst6 = "gen1", "10.99.1.112", "10.99.200.113", "fd99:1::112", "fd99:200::113"
+                peer4, dut4, peer6, dut6 = "10.99.2.113", "10.99.2.185", "fd99:2::113", "fd99:2::185"
+            tables = net("dut", "nft", "list", "tables").stdout.splitlines()
+            owned = [line.split()[2] for line in tables if line.startswith("table inet wgn")]
+            assert len(owned) == 1
+            rules = net("dut", "nft", "list", "table", "inet", owned[0]).stdout
+            prefix, peer, dut = ("ip", peer4, dut4) if outer == "4" else ("ip6", peer6, dut6)
+            assert f"{prefix} saddr {peer} {prefix} daddr {dut} udp sport 51820 udp dport 51820 notrack" in rules
+            assert f"{prefix} saddr {dut} {prefix} daddr {peer} udp sport 51820 udp dport 51820 notrack" in rules
+            net(plain, "ping", "-c", "1", "-W", "5", "-I", src4, dst4)
+            net(plain, "ping", "-6", "-c", "1", "-W", "5", "-I", src6, dst6)
             occupied = rig("run", "wg-v4", check=False, WG_SKIP_SERVERS="1",
-                           WG_EXTERNAL_IPERF="1", OUTER=outer)
+                           WG_EXTERNAL_IPERF="1", OUTER=outer, WG_PORT=port)
             assert occupied.returncode and "already reserved" in occupied.stderr
             net("dut", "ip", "link", "show", "wg0")
-            rig("teardown", WG_SKIP_SERVERS="0", WGMTU="1420", OUTER=outer)
+            rig("teardown", WG_SKIP_SERVERS="0", WGMTU="1420", OUTER=outer, WG_PORT=port)
             assert not (work / "state.single-lease").exists()
             assert net("dut", "ip", "link", "show", "wg0", check=False).returncode
             net("dut", "nft", "list", "table", "inet", "foreign")
