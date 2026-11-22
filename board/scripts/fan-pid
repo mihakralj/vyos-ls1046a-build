@@ -38,7 +38,8 @@ from typing import Optional
 
 from vyos.fan_control import (DEFAULTS, PENDING_TIMEOUT, SENSOR_MAX_AGE, ZONE_NAMES,
                               clock_now, invalidate_applied, load_snapshot_record, pending_age,
-                              process_start_time, read_verification, write_applied)
+                              pending_timeout, process_start_time, read_verification,
+                              write_applied)
 
 
 # ---------- Thermal tuning -------------------------------------------------------
@@ -645,7 +646,7 @@ def play_startup_whistle(i2c_fd: int, zone_paths: dict[str, str], fans: list[dic
                     raise ValueError('fan sensor is at a critical temperature')
                 read_verification(values, generation)
                 age = pending_age()
-                if age is not None and age >= PENDING_TIMEOUT:
+                if age is not None and age >= pending_timeout():
                     raise ValueError('fan configuration reconciliation timed out')
                 active = {fan['duty_reg']: fan for fan in fans if fan.get('present') and fan.get('tach_ok')}
                 if EMC2305_FAN1_DUTY_REG not in active or any(
@@ -798,6 +799,8 @@ class Controller:
         self.ack_failed = False
         self.output_failed = not initial_export_ok
         self.logged_sensor_failures = {}
+        self.logged_pending_timeout = False
+        self.logged_chassis_missing = False
 
     def rescan_missing_zones(self) -> None:
         """Pick up zones whose sensor appeared after startup (late module bind)."""
@@ -1051,7 +1054,7 @@ class Controller:
         try:
             read_verification(self.active_settings, self.active_generation)
             age = pending_age()
-            if age is not None and age >= PENDING_TIMEOUT:
+            if age is not None and age >= pending_timeout():
                 raise ValueError('fan configuration reconciliation timed out')
             return True
         except (OSError, ValueError, UnicodeError) as error:
@@ -1074,12 +1077,16 @@ class Controller:
             self.invalidate_settings_ack()
         try:
             age = pending_age()
-            pending_failed = age is not None and age >= PENDING_TIMEOUT
+            pending_failed = age is not None and age >= pending_timeout()
         except (OSError, ValueError, UnicodeError) as error:
             syslog.syslog(syslog.LOG_ERR, f"fan-pid: invalid pending state: {error}")
             pending_failed = True
         if pending_failed:
-            syslog.syslog(syslog.LOG_ERR, "fan-pid: fan configuration reconciliation timed out")
+            if not self.logged_pending_timeout:
+                syslog.syslog(syslog.LOG_ERR, "fan-pid: fan configuration reconciliation timed out")
+        elif self.logged_pending_timeout:
+            syslog.syslog(syslog.LOG_INFO, "fan-pid: fan configuration reconciliation recovered")
+        self.logged_pending_timeout = pending_failed
         recovery_latched = self.ack_failed or self.output_failed
         config_failsafe = not settings_valid or not verified or pending_failed or recovery_latched
         self.refresh_tach_modes()
@@ -1090,7 +1097,11 @@ class Controller:
         chassis_present = bool(chassis and chassis.get('present') and chassis.get('tach_ok') and
                                not chassis['recovering'] and chassis['tach_mode'] == 1)
         if not chassis_present:
-            syslog.syslog(syslog.LOG_ERR, "fan-pid: chassis fan not detected; PWM forced to MAX")
+            if not self.logged_chassis_missing:
+                syslog.syslog(syslog.LOG_ERR, "fan-pid: chassis fan not detected; PWM forced to MAX")
+        elif self.logged_chassis_missing:
+            syslog.syslog(syslog.LOG_INFO, "fan-pid: chassis fan restored")
+        self.logged_chassis_missing = not chassis_present
         any_critical = config_failsafe or not chassis_present or known_recovery or recovery_write_failed
         forced_ok = True
         if any_critical:

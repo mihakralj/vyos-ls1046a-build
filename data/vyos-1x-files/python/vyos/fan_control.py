@@ -16,6 +16,7 @@ FLOOR_EXPORT = Path('/run/fan-pid/floors')
 FLOOR_EXPORT_MAX_AGE = 10.0
 MAX_FLOOR_EXPORT_SIZE = 16384
 PENDING_TIMEOUT = 30.0
+BOOT_PENDING_TIMEOUT = 180.0
 APPLIED_MAX_AGE = 15.0
 VERIFICATION_MAX_AGE = 30.0
 SENSOR_MAX_AGE = 10.0
@@ -443,6 +444,10 @@ def invalidate_applied(path=None):
     (APPLIED if path is None else path).unlink(missing_ok=True)
 
 
+def pending_timeout(state_path=None):
+    return PENDING_TIMEOUT if _exists(boot_marker(state_path)) else BOOT_PENDING_TIMEOUT
+
+
 def configuration_status(state_path=None, pending_path=None, applied_path=None):
     try:
         boot_failed = boot_failure_latched(state_path)
@@ -482,7 +487,7 @@ def configuration_status(state_path=None, pending_path=None, applied_path=None):
         state, message = 'error', f'Fan snapshot unavailable: {snapshot_error}'
     elif pending_error:
         state, message = 'error', f'Fan configuration pending state invalid: {pending_error}'
-    elif age is not None and age >= PENDING_TIMEOUT:
+    elif age is not None and age >= pending_timeout(state_path):
         state, message = 'error', 'Fan configuration reconciliation timed out; full-speed failsafe requested'
     elif verification_error:
         state = 'error' if boot_ready else 'unknown'

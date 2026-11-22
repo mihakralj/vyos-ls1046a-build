@@ -722,6 +722,25 @@ int main(void)
 		assert(wgfp_txb.end != 0 && wgfp_eg_inflight_sum(&wgfp_egresses[eg5]) == 0);
 		wgfp_txb.active = false;
 		wgfp_bman_rel.active = false;
+
+		/* 16. In-NAPI threaded=1 with tx_batch <= 1 (b->active == false)
+		 * must still use the shared poll deadline (&b->end) rather than
+		 * falling back to the short per-frame wait path. */
+		u64 poll_fail_before = (u64)atomic64_read(&wgfp_xmit_poll_wait_fail);
+		u64 frame_fail_before = (u64)atomic64_read(&wgfp_xmit_frame_wait_fail);
+		wgfp_bman_rel.active = true;
+		wgfp_txb.active = false;
+		wgfp_txb.threaded = true;
+		wgfp_txb.end = 0;
+		enq_fail_mode = 1;
+		assert(dpaa_wgfp_tx_alloc(eg5, 5, 200, &tx));
+		dpaa_wgfp_tx_submit(NULL, &tx, DPAA_WGFP_TX_HEADROOM, 200);
+		enq_fail_mode = 0;
+		assert(wgfp_txb.end != 0);
+		assert((u64)atomic64_read(&wgfp_xmit_poll_wait_fail) == poll_fail_before + 1);
+		assert((u64)atomic64_read(&wgfp_xmit_frame_wait_fail) == frame_fail_before);
+		assert(wgfp_eg_inflight_sum(&wgfp_egresses[eg5]) == 0);
+		wgfp_bman_rel.active = false;
 	}
 
 	assert(bh_depth == 0);

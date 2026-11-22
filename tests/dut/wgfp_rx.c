@@ -74,6 +74,10 @@ static void dpaa_wgfp_drop(struct dpaa_wgfp_frame *f)
 	memset(f->buf + f->off, 0xa5, f->len);
 }
 
+static void dpaa_wgfp_orp_settle(void)
+{
+}
+
 static unsigned short eth_type_trans(struct sk_buff *skb, struct net_device *d)
 {
 	(void)d;

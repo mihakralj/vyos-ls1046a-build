@@ -56,14 +56,14 @@ export SCRIPTS_DIR="$SCRIPT_DIR"
 export WORK_DIR="$REPO_ROOT/work"
 
 # ── Pin resolution ────────────────────────────────────────────────────
-# 1. Load fallback defaults from versions.lock
-[[ -f "$REPO_ROOT/versions.lock" ]] && . "$REPO_ROOT/versions.lock"
-# 2. Auto-track upstream vyos-1x: read kernel_version from
-#    vyos-build/data/defaults.toml when that checkout is present.
-#    sync-kernel-version.sh respects an existing KERNEL_VERSION env var.
+# 1. Auto-track upstream vyos-build first (falls back to versions.lock when
+#    vyos-build/ is missing). Must run BEFORE sourcing versions.lock so its
+#    export does not poison KERNEL_VERSION as an explicit caller env override.
 # shellcheck source=sync-kernel-version.sh
 . "$SCRIPT_DIR/sync-kernel-version.sh"
-echo "  kernel pin: $KERNEL_VERSION (series $KERNEL_SERIES, source: $_SOURCE)"
+# 2. Load remaining fallback defaults (e.g. ARCH) from versions.lock.
+[[ -f "$REPO_ROOT/versions.lock" ]] && . "$REPO_ROOT/versions.lock"
+echo "  kernel pin: ${KERNEL_VERSION}-${KERNEL_REVISION} (series $KERNEL_SERIES, source: $_SOURCE)"
 
 need git find python3 make
 
@@ -99,8 +99,9 @@ INJECT_DIR="$FILES_DIR/inject"
 [[ -d "$COMMON_DIR/patches" ]] || err "missing $COMMON_DIR/patches"
 
 # ── Kernel source ──────────────────────────────────────────────────────
-if [[ -n "$VERSION_ARG" || ! -f "$WORK_DIR/.kernel-version" ]]; then
-    "$SCRIPTS_DIR/fetch-kernel.sh" $VERSION_ARG
+TARGET_KVER="${VERSION_ARG:-$KERNEL_VERSION}"
+if [[ -n "$VERSION_ARG" || ! -f "$WORK_DIR/.kernel-version" || "$(cat "$WORK_DIR/.kernel-version")" != "$TARGET_KVER" ]]; then
+    "$SCRIPTS_DIR/fetch-kernel.sh" "$TARGET_KVER"
 fi
 KVER=$(cat "$WORK_DIR/.kernel-version")
 KSRC="$WORK_DIR/linux-$KVER"

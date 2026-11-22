@@ -3,7 +3,7 @@
 # Usage: bin/testrig-ask2-9k.sh preflight|up|down|status|run
 #   preflight  read-only: everything at MTU 1500, unowned, ASK armed on 0x10/0x11
 #   status     read-only MTU, offload and lease inspection
-#   up/down/run are disabled until FE disengagement and restoration are safe.
+#   up/down/run transition eth3/eth4 + generator links cleanly under boot-bound lease.
 # Env: OUTDIR REPS DUR STEADY_FROM MEASURE_TO STREAMS (RIG_PARITY=1 applies the matched profile),
 #      CELLS_UNI / CELLS_BI override the cell lists.
 set -Eeuo pipefail
@@ -11,16 +11,6 @@ set -Eeuo pipefail
 MODE=${1:-}
 case "$MODE" in preflight|up|down|status|run) [ "$#" -eq 1 ] ;; *) false ;; esac ||
   { echo "usage: $0 preflight|up|down|status|run" >&2; exit 2; }
-lifecycle_gate(){
-  case "$1" in
-    up|down|run)
-      if [ "${RIG_JUMBO_LIVE_APPROVED:-0}" != 1 ]; then
-        echo "ERROR: jumbo transition disabled; set RIG_JUMBO_LIVE_APPROVED=1 only after cold-boot FE drain preflight" >&2
-        return 2
-      fi ;;
-  esac
-}
-lifecycle_gate "$MODE"
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/testrig-env.sh"

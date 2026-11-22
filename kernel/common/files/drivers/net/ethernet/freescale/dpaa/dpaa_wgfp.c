@@ -195,7 +195,7 @@ struct wgfp_port {
 #define WGFP_ORP_OA		1
 #define WGFP_ORP_OLWS		3
 #define WGFP_ORP_WAIT_NS	(5 * NSEC_PER_MSEC)
-#define WGFP_XMIT_WAIT_NS	(100 * NSEC_PER_USEC)
+#define WGFP_XMIT_WAIT_NS	(1 * NSEC_PER_MSEC)
 #define WGFP_TX_POLL_WAIT_NS	(5 * NSEC_PER_MSEC)
 
 /* The frame the running callback owes the ORP. Per CPU, BH-disabled. */
@@ -2184,7 +2184,8 @@ void dpaa_wgfp_tx_submit(struct dpaa_wgfp_frame *f, struct dpaa_wgfp_tx_buf *tx,
 			local_bh_enable();
 		return;
 	}
-	wgfp_tx_enqueue_slot(slot, &fd, NULL, true);
+	wgfp_tx_enqueue_slot(slot, &fd,
+			     (in_napi && b->threaded) ? &b->end : NULL, true);
 	if (unlikely(!in_napi))
 		local_bh_enable();
 }

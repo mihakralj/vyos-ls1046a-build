@@ -18,6 +18,7 @@ def _between(source: str, start: str, end: str) -> str:
 
 def test_wgfp_tx_slot_lifecycle_confirm_ern_and_drain(tmp_path):
     src = SOURCE.read_text()
+    assert "#define WGFP_XMIT_WAIT_NS\t(1 * NSEC_PER_MSEC)" in src
     body = "\n".join([
         _between(src, "static inline u32 wgfp_dma_hash(", "\nstatic void wgfp_touch_frame("),
         _between(src, "static enum qman_cb_dqrr_result wgfp_conf_dqrr(", "\nstatic enum qman_cb_dqrr_result wgfp_dqrr_frame("),

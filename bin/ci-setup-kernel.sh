@@ -156,7 +156,7 @@ if [ -f vyos-build/data/defaults.toml ]; then
         vyos-build/data/defaults.toml | awk -F. '{print $1"."$2}')
 fi
 if [ -z "$KSERIES_FOR_PATCH" ] && [ -f versions.lock ]; then
-    KSERIES_FOR_PATCH=$(awk -F= '/KERNEL_SERIES/{gsub(/[" ]/,"",$2); print $2}' versions.lock)
+    KSERIES_FOR_PATCH=$(. versions.lock >/dev/null 2>&1; printf '%s' "$KERNEL_SERIES")
 fi
 
 # INA234 hwmon patch (formerly kernel/ask/patches/fixes/4002-*) was

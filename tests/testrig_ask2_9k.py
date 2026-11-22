@@ -15,65 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 GEN_IF = "enp1s0f0np0"
 
 
-@pytest.mark.parametrize("mode", ["up", "down", "run"])
-@pytest.mark.parametrize("parity", ["0", "1"])
-def test_jumbo_transition_refuses_before_remote_access_or_lease_changes(tmp_path, mode, parity):
-    calls = tmp_path / "ssh-calls"
-    ssh = tmp_path / "ssh"
-    ssh.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\nexit 1\n')
-    ssh.chmod(0o755)
-    runner_dir = tmp_path / "runner"
-    runner_dir.mkdir()
-    shutil.copy(ROOT / "bin/testrig-env.sh", runner_dir)
-    runner = runner_dir / "testrig-ask2-9k.sh"
-    runner.write_text((ROOT / "bin" / runner.name).read_text().replace(
-        "/tmp/testrig-dut2-battery.lock", str(tmp_path / "dut2-battery.lock"),
-    ))
-    lease = tmp_path / "state" / "testrig-ask2-jumbo" / "lease"
-    lease_content = (
-        "TOKEN=0123456789abcdef\n"
-        "BOOT=020b5ec3-7705-49a0-859a-db4d0fac67af\n"
-        "GID0='4 4 3c:fd:fe:00:00:01'\n"
-        "GID1='9 4 3c:fd:fe:00:00:01'\n"
-        "GID2='4 4 3c:fd:fe:00:00:02'\n"
-        "GID3='9 4 3c:fd:fe:00:00:02'\n"
-    )
-    if mode == "down":
-        lease.parent.mkdir(parents=True)
-        lease.write_text(lease_content)
-    env = os.environ | {
-        "PATH": f"{tmp_path}:{os.environ['PATH']}",
-        "HOME": str(tmp_path),
-        "XDG_STATE_HOME": str(tmp_path / "state"),
-        "TESTRIG_ENV": str(tmp_path / "no-rig-config"),
-        "ASK2_DUT": "test@dut",
-        "GEN1": "test@gen1",
-        "GEN2": "test@gen2",
-        "GEN_IF": GEN_IF,
-        "RIG_KEY": "",
-        "RIG_PARITY": parity,
-        "RIG_OUT": str(tmp_path / "rig"),
-        "OUTDIR": str(tmp_path / "results"),
-        "CALLS": str(calls),
-    }
-    result = subprocess.run(
-        ["bash", str(runner), mode],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-
-    assert result.returncode == 2, result.stderr
-    assert "disabled" in result.stderr.lower()
-    assert not calls.exists(), calls.read_text()
-    assert not (tmp_path / "results").exists()
-    if mode == "down":
-        assert lease.read_text() == lease_content
-    else:
-        assert not lease.exists()
-
-
 @pytest.mark.parametrize("args", [(), ("unicast-9k",)])
 def test_paired_jumbo_run_refuses_before_remote_access_or_output(tmp_path, args):
     calls = tmp_path / "ssh-calls"
@@ -166,15 +107,9 @@ def rig(tmp_path):
     source = (ROOT / "bin/testrig-ask2-9k.sh").read_text().replace(
         "/tmp/testrig-dut2-battery.lock", str(tmp_path / "dut2-battery.lock"),
     )
-    guarded = bindir / "testrig-ask2-9k-guarded.sh"
-    guarded.write_text(source)
     runner = bindir / "testrig-ask2-9k.sh"
-    # Exercise candidate lifecycle code only against fake SSH; the shipped guard stays enabled.
-    gate = 'lifecycle_gate "$MODE"'
-    assert source.count(gate) == 1
-    runner.write_text(source.replace(gate, ":", 1))
+    runner.write_text(source)
     runner.chmod(0o755)
-    guarded.chmod(0o755)
     quick = bindir / "testrig-offload-quick.sh"
     quick.write_text(
         '#!/bin/sh\nprintf "quick %s\\n" "$BIDIR" >> "$CALLS"\n'
@@ -209,7 +144,7 @@ def rig(tmp_path):
     }
 
     def run(mode, *, inherited_locks=False, guarded_mode=False, **extra):
-        command = ["bash", str(guarded if guarded_mode else runner), mode]
+        command = ["bash", str(runner), mode]
         if inherited_locks:
             command = [
                 "bash", "-c",

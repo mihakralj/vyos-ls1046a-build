@@ -2507,6 +2507,13 @@ static bool wgfp_rx_observed(struct wgfp_pst *pst, struct dpaa_wgfp_tuple *rt,
 	return false;
 }
 
+/* WGFP sinks require contiguous single-buffer RX FDs; jumbo ports (>3300 MTU)
+ * stay in software where dpaa_eth's sg_fd_to_skb() handles scatter/gather. */
+static bool wgfp_ingress_mtu_ok(const struct net_device *dev)
+{
+	return dev && READ_ONCE(dev->mtu) <= DPAA_WGFP_MAX_CONTIG_MTU;
+}
+
 /* Install, move or withdraw the peer's outer RX record. */
 static void wgfp_pst_rx_sync(struct wgfp_pst *pst)
 {
@@ -2519,8 +2526,9 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst)
 	    !READ_ONCE(pst->stopping) && wgfp_rx_observed(pst, &rt, &ifindex)) {
 		struct net_device *dev = dev_get_by_index(&init_net, ifindex);
 
-		/* outer family policy of the port the flow arrives on */
-		want = dev && dpaa_wgfp_family_ok(dev, rt.family);
+		/* outer family policy and contiguous-RX MTU bound of ingress port */
+		want = wgfp_ingress_mtu_ok(dev) &&
+		       dpaa_wgfp_family_ok(dev, rt.family);
 		if (dev)
 			dev_put(dev);
 		if (want)
@@ -2683,10 +2691,14 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 		return;
 	if (!wgfp_tx_family_allowed(t.family))
 		return;
-	/* Inner family policy: the ingress port's `offload ipv4|ipv6`. */
+	/* Inner family policy and contiguous-RX MTU bound of ingress port. */
 	rcu_read_lock();
-	in_ok = dpaa_wgfp_family_ok(dev_get_by_index_rcu(&init_net, skb->skb_iif),
-				    t.family);
+	{
+		struct net_device *indev = dev_get_by_index_rcu(&init_net, skb->skb_iif);
+
+		in_ok = wgfp_ingress_mtu_ok(indev) &&
+			dpaa_wgfp_family_ok(indev, t.family);
+	}
 	rcu_read_unlock();
 	if (!in_ok)
 		return;
@@ -3226,6 +3238,11 @@ static int wgfp_netdev_event(struct notifier_block *nb, unsigned long event,
 	struct wgfp_binds *bs;
 	unsigned int i;
 
+	if (event == NETDEV_CHANGEMTU) {
+		if (dev && !wgfp_ingress_mtu_ok(dev))
+			(void)wgfp_port_quiesce(NULL, dev);
+		return NOTIFY_DONE;
+	}
 	if (event != NETDEV_UNREGISTER)
 		return NOTIFY_DONE;
 	rcu_read_lock();
