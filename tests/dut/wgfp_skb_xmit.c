@@ -23,7 +23,10 @@ typedef int64_t atomic64_t;
 #define ETH_P_8021AD 0x88a8
 #define DMA_FROM_DEVICE 2
 #define WGFP_MAX_EGRESS 8
+#define WGFP_MAX_BPIDS 64
 #define DPAA_WGFP_TX_HEADROOM 64
+#define READ_ONCE(x) (x)
+static u8 wgfp_bpid_need_sync[WGFP_MAX_BPIDS];
 #define unlikely(x) (x)
 #define likely(x) (x)
 #define atomic64_inc(p) (++*(p))
@@ -244,6 +247,7 @@ int main(void)
 	u8 buffer[256];
 
 	reset();
+	memset(wgfp_bpid_need_sync, 1, sizeof(wgfp_bpid_need_sync));
 	prepare_frame(&frame, buffer);
 	wgfp_eg_dev[0] = &dev;
 	wgfp_neg = 1;
@@ -251,6 +255,17 @@ int main(void)
 	assert(releases == 1 && submissions == 1 && consumes == 1);
 	assert(release_before_submit && wgfp_xmit_ok == 1 && settles == 1);
 	assert(dma_syncs == 1);
+
+	/* Coherent BPID skips redundant dma_sync_single_for_device */
+	reset();
+	memset(wgfp_bpid_need_sync, 0, sizeof(wgfp_bpid_need_sync));
+	prepare_frame(&frame, buffer);
+	wgfp_eg_dev[0] = &dev;
+	wgfp_neg = 1;
+	dpaa_wgfp_xmit(&frame, 0, 0, 64);
+	assert(releases == 1 && submissions == 1 && consumes == 1);
+	assert(dma_syncs == 0);
+	memset(wgfp_bpid_need_sync, 1, sizeof(wgfp_bpid_need_sync));
 
 	reset();
 	prepare_frame(&frame, buffer);

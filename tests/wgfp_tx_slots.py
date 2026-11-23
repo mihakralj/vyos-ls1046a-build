@@ -19,6 +19,13 @@ def _between(source: str, start: str, end: str) -> str:
 def test_wgfp_tx_slot_lifecycle_confirm_ern_and_drain(tmp_path):
     src = SOURCE.read_text()
     assert "#define WGFP_XMIT_WAIT_NS\t(1 * NSEC_PER_MSEC)" in src
+    tx_alloc_body = _between(src, "bool dpaa_wgfp_tx_alloc(", "\nvoid dpaa_wgfp_tx_cancel(")
+    assert "smp_load_acquire(&wgfp_neg)" not in tx_alloc_body
+    assert "WGFP_MAX_EGRESS" in tx_alloc_body
+    cpu_poll_body = _between(src, "static int wgfp_cpu_poll(", "\n/* Create the per-CPU NAPIs")
+    assert "smp_wmb();" in cpu_poll_body
+    assert "tx_dma_need_sync" in src
+    assert "wgfp_bpid_need_sync" in src
     body = "\n".join([
         _between(src, "static inline u32 wgfp_dma_hash(", "\nstatic void wgfp_touch_frame("),
         _between(src, "static enum qman_cb_dqrr_result wgfp_conf_dqrr(", "\nstatic enum qman_cb_dqrr_result wgfp_dqrr_frame("),

@@ -87,19 +87,28 @@ void dpaa_wgfp_egress_deactivate(struct net_device *dev);
 #define WGFP_MAX_BPIDS		64
 
 static struct device *wgfp_bpid_dev[WGFP_MAX_BPIDS];
+static u8 wgfp_bpid_need_sync[WGFP_MAX_BPIDS];
 
-static inline struct device *wgfp_dma_dev_fast(u8 bpid)
+static inline struct device *wgfp_dma_dev_fast(u8 bpid, bool *need_sync)
 {
 	struct device *dev;
 
-	if (unlikely(bpid >= WGFP_MAX_BPIDS))
-		return dpaa_wgfp_dma_dev(bpid);
+	if (unlikely(bpid >= WGFP_MAX_BPIDS)) {
+		dev = dpaa_wgfp_dma_dev(bpid);
+		*need_sync = dev && dma_dev_need_sync(dev);
+		return dev;
+	}
 	dev = READ_ONCE(wgfp_bpid_dev[bpid]);
 	if (unlikely(!dev)) {
 		dev = dpaa_wgfp_dma_dev(bpid);
-		if (dev)
+		if (dev) {
+			WRITE_ONCE(wgfp_bpid_need_sync[bpid],
+				   dma_dev_need_sync(dev) ? 1 : 0);
+			smp_wmb();
 			WRITE_ONCE(wgfp_bpid_dev[bpid], dev);
+		}
 	}
+	*need_sync = dev && READ_ONCE(wgfp_bpid_need_sync[bpid]);
 	return dev;
 }
 
@@ -146,6 +155,7 @@ struct wgfp_egress_pc {
 struct wgfp_egress {
 	struct net_device *dev;		/* permanently bound netdev (never reassigned) */
 	struct device *tx_dma_dev;
+	bool tx_dma_need_sync;
 	int ifindex;
 	u32 tx_fqid;			/* FQ_TYPE_TX_WGFP */
 	unsigned int ncpus;		/* number of per-CPU pools populated */
@@ -401,8 +411,12 @@ static void wgfp_slot_return_done(struct wgfp_tx_slot *slot, bool bh_disabled)
 	if (bh_disabled && smp_processor_id() == slot->owner_cpu) {
 		if (likely(!quarantined))
 			pc->free_stack[pc->free_top++] = slot->local_idx;
-		/* Release pairs with smp_load_acquire() in wgfp_eg_inflight_sum(). */
-		smp_store_release(&pc->local_done, pc->local_done + 1);
+		/* Inside wgfp_cpu_poll(), defer the release barrier to a single
+		 * smp_wmb() at poll exit instead of per-packet STLR. */
+		if (likely(this_cpu_read(wgfp_bman_rel.active)))
+			WRITE_ONCE(pc->local_done, pc->local_done + 1);
+		else
+			smp_store_release(&pc->local_done, pc->local_done + 1);
 		return;
 	}
 	if (likely(!quarantined)) {
@@ -488,8 +502,10 @@ static void wgfp_frame_release_fast(struct dpaa_wgfp_frame *f)
 	const struct qm_fd *fd = f->fd;
 	struct wgfp_bman_rel *rel;
 
-	dma_sync_single_for_device(f->dev, f->addr, f->buf_size,
-				   DMA_FROM_DEVICE);
+	if (unlikely(fd->bpid >= WGFP_MAX_BPIDS ||
+		     READ_ONCE(wgfp_bpid_need_sync[fd->bpid])))
+		dma_sync_single_for_device(f->dev, f->addr, f->buf_size,
+					   DMA_FROM_DEVICE);
 	rel = this_cpu_ptr(&wgfp_bman_rel);
 	if (likely(rel->active)) {
 		if (rel->n && (rel->bpid != fd->bpid || rel->n == 8))
@@ -655,6 +671,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 	const struct qm_fd *fd = &dq->fd;
 	const struct dpaa_wgfp_ops *ops;
 	struct device *dev;
+	bool need_sync;
 	dma_addr_t addr;
 	u32 off, len;
 	u8 *p;
@@ -680,7 +697,7 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 	}
 	off = qm_fd_get_offset(fd);
 	len = qm_fd_get_length(fd);
-	dev = wgfp_dma_dev_fast(fd->bpid);
+	dev = wgfp_dma_dev_fast(fd->bpid, &need_sync);
 	if (unlikely(!dev)) {
 		s->errs++;
 		return qman_cb_dqrr_consume;
@@ -714,7 +731,8 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 	}
 
 	p = (u8 *)phys_to_virt(addr) + off;
-	dma_sync_single_for_cpu(dev, addr + off, len, DMA_FROM_DEVICE);
+	if (unlikely(need_sync))
+		dma_sync_single_for_cpu(dev, addr + off, len, DMA_FROM_DEVICE);
 	wgfp_prefetch_frame(p, len);
 
 	rcu_read_lock();
@@ -740,7 +758,9 @@ static enum qman_cb_dqrr_result wgfp_dqrr_frame(struct qman_portal *portal,
 	rcu_read_unlock();
 
 	wgfp_touch_frame(s, p, len);
-	dma_sync_single_for_device(dev, addr + off, len, DMA_FROM_DEVICE);
+	if (unlikely(need_sync))
+		dma_sync_single_for_device(dev, addr + off, len,
+					   DMA_FROM_DEVICE);
 
 	wgfp_sink_count(s, len);
 release:
@@ -886,6 +906,9 @@ static int wgfp_cpu_poll(struct napi_struct *napi, int budget)
 	}
 	rel->active = false;
 	wgfp_bman_rel_flush(rel);
+	/* Pairs with smp_load_acquire() in wgfp_eg_inflight_sum() for batched
+	 * local_done updates done during this poll. */
+	smp_wmb();
 	if (total < dq_limit) {
 		int done = min(total, budget - 1);
 
@@ -1728,6 +1751,7 @@ int dpaa_wgfp_egress(struct net_device *dev)
 	}
 	eg->dev = dev;
 	eg->tx_dma_dev = tx_dma_dev;
+	eg->tx_dma_need_sync = tx_dma_dev && dma_dev_need_sync(tx_dma_dev);
 	eg->ifindex = dev->ifindex;
 	eg->tx_fqid = fqid;
 	wgfp_eg_publish_slots(eg);
@@ -1828,8 +1852,10 @@ static int wgfp_netdev_event(struct notifier_block *nb, unsigned long event,
 	if (event == NETDEV_UNREGISTER) {
 		unsigned int i;
 
-		for (i = 0; i < WGFP_MAX_BPIDS; i++)
+		for (i = 0; i < WGFP_MAX_BPIDS; i++) {
 			WRITE_ONCE(wgfp_bpid_dev[i], NULL);
+			WRITE_ONCE(wgfp_bpid_need_sync[i], 0);
+		}
 	}
 	return NOTIFY_OK;
 }
@@ -2027,7 +2053,7 @@ bool dpaa_wgfp_tx_alloc(int egress, int expected_ifindex, u32 max_len,
 	if (unlikely(!in_napi))
 		local_bh_disable();
 	rcu_read_lock();
-	if (unlikely(egress < 0 || egress >= smp_load_acquire(&wgfp_neg))) {
+	if (unlikely((unsigned int)egress >= WGFP_MAX_EGRESS)) {
 		atomic64_inc(&wgfp_xmit_invalid_egress);
 		goto fail;
 	}
@@ -2155,8 +2181,9 @@ void dpaa_wgfp_tx_submit(struct dpaa_wgfp_frame *f, struct dpaa_wgfp_tx_buf *tx,
 	tx->priv = NULL;
 	eg = slot->eg;
 
-	dma_sync_single_for_device(eg->tx_dma_dev, slot->dma + off, len,
-				   DMA_TO_DEVICE);
+	if (unlikely(eg->tx_dma_need_sync))
+		dma_sync_single_for_device(eg->tx_dma_dev, slot->dma + off, len,
+					   DMA_TO_DEVICE);
 
 	qm_fd_clear_fd(&fd);
 	fd.bpid = WGFP_BPID_INV;

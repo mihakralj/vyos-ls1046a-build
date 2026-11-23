@@ -107,8 +107,8 @@ def test_p3_ipv6_frag_default_killswitch_mutex_and_wgfp_policy_revoke():
         assert "mutex_lock(&ask_killswitch_mutex);" in fn
         assert "mutex_unlock(&ask_killswitch_mutex);" in fn
 
-    # A1 decision: default ipv6_hw_frag = false (RFC 8200 safe), opt-in =1
-    assert "static bool ask_ipv6_hw_frag = false;" in fo
+    # Vendor NXP ASK parity: default ipv6_hw_frag = true (opt-out =0 for RFC 8200)
+    assert "static bool ask_ipv6_hw_frag = true;" in fo
 
     # Patch 155 SW revocation before ask_flow_lifecycle_lock in ask_flow_v6_frag_flush_sync
     v6_flush = _between(fo, "static int ask_flow_v6_frag_flush_sync(void)\n{", "\n/* T-M6-SP4:")

@@ -145,7 +145,7 @@ bool ask_vlan_push_only_enabled(void)
 	return READ_ONCE(ask_vlan_push_only);
 }
 
-static bool ask_ipv6_hw_frag = false;
+static bool ask_ipv6_hw_frag = true;
 static bool ask_ipv6_hw_frag_disable_incomplete;
 static int ask_flow_v6_frag_flush_sync(void);
 
@@ -188,10 +188,10 @@ static const struct kernel_param_ops ask_ipv6_hw_frag_ops = {
 module_param_cb(ipv6_hw_frag, &ask_ipv6_hw_frag_ops, &ask_ipv6_hw_frag, 0644);
 MODULE_PARM_DESC(ipv6_hw_frag,
 		 "Offload IPv6 flows whose egress MTU is below the ingress port MTU "
-		 "with the microcode fragmenter (default 0, RFC 8200 safe: keeps such "
-		 "flows in software so the kernel sends Packet Too Big; opt-in 1 "
-		 "enables vendor hardware fragmentation, and switching 1->0 revokes "
-		 "both SW flowtable entries and live HW records)");
+		 "with the microcode fragmenter (default 1 for vendor NXP ASK parity; "
+		 "clearing to 0 keeps such flows in software so the kernel sends "
+		 "Packet Too Big per RFC 8200, revoking both SW flowtable entries "
+		 "and live HW records)");
 
 /*
  * Offload only flows that have lived offload_delay_ms. Short connections then

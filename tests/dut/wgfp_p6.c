@@ -48,6 +48,7 @@ typedef uint64_t u64;
 #define dpaa_wgfp_stat_inc(p) (++*(p))
 #define DEV_STATS_INC(d, f) ((d)->f++)
 #define WGFP_RX_HEADROOM 128
+#define CHACHA_BLOCK_SIZE 64
 #define DPAA_WGFP_TX_HEADROOM 64
 #define DPAA_WGFP_TX_BUF_SIZE (4096 - DPAA_WGFP_TX_HEADROOM)
 #define likely(x) (x)
@@ -269,8 +270,13 @@ static bool chacha20poly1305_decrypt(u8 *dst, const u8 *src, size_t len,
 	return true;
 }
 static bool wgfp_open_dst(u8 *dst, const u8 *src, size_t clen, u64 nonce,
-			  const u8 *key)
+			  const u8 *key, bool scratch_b0)
 {
+	if (scratch_b0) {
+		/* Verify scratch_b0 does not collide with mock_tx_slot [0..63] metadata
+		 * and zeroize the 64-byte scratch area just like the real NEON path. */
+		memset(dst - 64, 0, 64);
+	}
 	return chacha20poly1305_decrypt(dst, src, clen, NULL, 0, nonce, key);
 }
 static bool wg_fastpath_rx_validate(struct noise_keypair *kp, u64 nonce)

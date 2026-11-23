@@ -106,6 +106,13 @@ static inline int atomic_cmpxchg(atomic_t *a, int o, int n)
 #define atomic_cmpxchg_relaxed(a, o, n) atomic_cmpxchg((a), (o), (n))
 #define WGFP_MAX_BPIDS 64
 static struct device *wgfp_bpid_dev[WGFP_MAX_BPIDS];
+static u8 wgfp_bpid_need_sync[WGFP_MAX_BPIDS];
+static bool mock_dma_need_sync;
+static bool dma_dev_need_sync(const struct device *dev)
+{
+	(void)dev;
+	return mock_dma_need_sync;
+}
 static inline int64_t atomic64_read(const atomic64_t *a) { return a->counter; }
 #define atomic64_read_acquire(a) atomic64_read(a)
 static inline void atomic64_set(atomic64_t *a, int64_t v) { a->counter = v; }
@@ -236,6 +243,7 @@ struct wgfp_egress_pc {
 struct wgfp_egress {
 	struct net_device *dev;
 	struct device *tx_dma_dev;
+	bool tx_dma_need_sync;
 	int ifindex;
 	u32 tx_fqid;
 	unsigned int ncpus;
