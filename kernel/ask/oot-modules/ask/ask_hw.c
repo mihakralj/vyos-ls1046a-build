@@ -615,16 +615,22 @@ static bool ask_hw_cached_valid;
  * frame-mode QMan CGR (priv->offload_cgr, F-316) instead of per-FQ byte
  * tail-drop, so individual flows can burst beyond 256 KiB without premature
  * tail-drop while aggregate occupancy stays bounded below half the RX buffer
- * pool. Each routed flow takes the least-used FQ of the per-port set at
- * insert (flows are never migrated, so churn can leave two on one FQ);
- * egress_fqs=0 maps new flows to the single legacy FQ (A/B: existing flows
- * keep their FQ), and egress_fq_ics sets each set FQ's intra-WQ DRR credit
- * when the set is prewarmed.
+ * pool. At standard MTU (<= egress_fq_min_mtu, default 1500), new flows use
+ * the single legacy FQ to avoid WQ6 16-FQ DRR interleaving (which halves
+ * receiver GRO aggregation and costs ~0.8-1.2 Gbit/s on 1500 B bidir). Above
+ * egress_fq_min_mtu (jumbo), each routed flow takes the least-used FQ of the
+ * per-port set at insert (preventing jumbo data from head-of-line blocking
+ * reverse ACKs) and releases it at remove. egress_fqs=0 forces the legacy FQ
+ * at all MTUs; egress_fq_min_mtu=0 forces the per-flow set at all MTUs.
  */
 static unsigned int ask_egress_fqs = ASK_HW_FLOW_FQS;
 module_param_named(egress_fqs, ask_egress_fqs, uint, 0644);
 MODULE_PARM_DESC(egress_fqs,
 		 "Per-flow no-confirm TX FQs used per egress port for new flows (0 = legacy single FQ, max 16)");
+static unsigned int ask_egress_fq_min_mtu = ETH_DATA_LEN;
+module_param_named(egress_fq_min_mtu, ask_egress_fq_min_mtu, uint, 0644);
+MODULE_PARM_DESC(egress_fq_min_mtu,
+		 "Minimum egress port MTU above which per-flow TX FQs are used (0 = always, default 1500)");
 static unsigned int ask_egress_fq_ics = 0x4000;
 module_param_named(egress_fq_ics, ask_egress_fq_ics, uint, 0444);
 MODULE_PARM_DESC(egress_fq_ics,
@@ -2692,17 +2698,20 @@ static void ask_hw_prewarm_flow_fqs(u8 hw_port_id, int slot)
 
 /*
  * Pick @slot's least-used per-flow FQ (lowest index on a tie) and count the
- * flow on it; @legacy when the set is empty or egress_fqs=0. h->lock held.
+ * flow on it; @legacy when the set is empty, egress_fqs=0, or egress port MTU
+ * is at or below egress_fq_min_mtu. h->lock held.
  */
 static u32 ask_hw_flow_fq_get(struct ask_hw_pcd *h, int slot, u32 legacy)
 {
+	unsigned int min_mtu = READ_ONCE(ask_egress_fq_min_mtu);
+	struct net_device *dev = h->noconf_tx[slot].dev;
 	unsigned int n = min_t(unsigned int, READ_ONCE(ask_egress_fqs),
 			       smp_load_acquire(&h->noconf_tx[slot].nflow));
 	u32 *users = h->noconf_tx[slot].users;
 	unsigned int i, best = 0;
 
 	lockdep_assert_held(&h->lock);
-	if (!n) {
+	if (!n || (min_mtu && (!dev || READ_ONCE(dev->mtu) <= min_mtu))) {
 		h->noconf_tx[slot].legacy_users++;
 		return legacy;
 	}

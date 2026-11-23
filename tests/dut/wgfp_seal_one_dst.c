@@ -383,8 +383,8 @@ int main(void)
 			}
 		}
 	}
-	/* Verify wgfp_open_one_dst() with scratch_b0=false and scratch_b0=true
-	 * (valid decrypt + forged-tag rejection + read-only src invariance) */
+	/* Verify wgfp_open_one_dst() (valid decrypt, forged-tag dst invariance,
+	 * no scratch writes before dst, and read-only src invariance) */
 	for (size_t li = 0; li < ARRAY_SIZE(lens); li++) {
 		u32 plain = lens[li];
 		u64 nonce = 0x7766554433221100ULL + plain;
@@ -396,50 +396,38 @@ int main(void)
 
 		for (int nm = 0; nm < 2; nm++) {
 			unsigned int neon_min = nm ? UINT_MAX : 0;
+			int prev_sec = neon_sections;
+			bool ok;
 
-			for (int sb = 0; sb < 2; sb++) {
-				int prev_sec = neon_sections;
-				bool ok;
+			memset(out_buf, 0xa5, sizeof(out_buf));
+			memset(out, 0x5a, plain);
+			ok = wgfp_open_one_dst(out, ref, plain, nonce, key,
+					       neon_min);
+			assert(ok);
+			assert(neon_depth == 0);
+			assert(neon_sections == prev_sec + (nm ? 0 : 1));
+			assert(memcmp(out, pt, plain) == 0);
+			assert(memcmp(ref, src_copy, plain + 16) == 0);
+			assert(memcmp(out_buf, guard_a5, 16) == 0);
+			assert(memcmp(out + plain, guard_a5, 16) == 0);
+			for (int k = 0; k < CHACHA_BLOCK_SIZE; k++)
+				assert(out_buf[16 + k] == 0xa5);
 
-				memset(out_buf, 0xa5, sizeof(out_buf));
-				memset(out, 0x5a, plain);
-				ok = wgfp_open_one_dst(out, ref, plain, nonce, key,
-						       neon_min, sb != 0);
-				assert(ok);
-				assert(neon_depth == 0);
-				assert(neon_sections == prev_sec + (nm ? 0 : 1));
-				assert(memcmp(out, pt, plain) == 0);
-				assert(memcmp(ref, src_copy, plain + 16) == 0);
-				assert(memcmp(out_buf, guard_a5, 16) == 0);
-				assert(memcmp(out + plain, guard_a5, 16) == 0);
-				if (!sb || nm || !wgfp_open_foldable(plain)) {
-					for (int k = 0; k < CHACHA_BLOCK_SIZE; k++)
-						assert(out_buf[16 + k] == 0xa5);
-				} else {
-					assert(memcmp(out - CHACHA_BLOCK_SIZE, zero64,
-						      CHACHA_BLOCK_SIZE) == 0);
-				}
-
-				/* Forged tag: must fail, never mutate src, zeroize dst head if scratch_b0 */
-				ref[plain] ^= 0x01;
-				memset(out_buf, 0xa5, sizeof(out_buf));
-				memset(out, 0x5a, plain);
-				ok = wgfp_open_one_dst(out, ref, plain, nonce, key,
-						       neon_min, sb != 0);
-				assert(!ok);
-				assert(neon_depth == 0);
-				assert(memcmp(out_buf, guard_a5, 16) == 0);
-				assert(memcmp(out + plain, guard_a5, 16) == 0);
-				if (!sb || nm || !wgfp_open_foldable(plain)) {
-					for (u32 k = 0; k < plain; k++)
-						assert(out[k] == 0x5a);
-				} else {
-					assert(memcmp(out - CHACHA_BLOCK_SIZE, zero64,
-						      CHACHA_BLOCK_SIZE) == 0);
-					assert(out[0] == 0);
-				}
-				ref[plain] ^= 0x01;
-			}
+			/* Forged tag: must fail and leave dst + src untouched */
+			ref[plain] ^= 0x01;
+			memset(out_buf, 0xa5, sizeof(out_buf));
+			memset(out, 0x5a, plain);
+			ok = wgfp_open_one_dst(out, ref, plain, nonce, key,
+					       neon_min);
+			assert(!ok);
+			assert(neon_depth == 0);
+			assert(memcmp(out_buf, guard_a5, 16) == 0);
+			assert(memcmp(out + plain, guard_a5, 16) == 0);
+			for (int k = 0; k < CHACHA_BLOCK_SIZE; k++)
+				assert(out_buf[16 + k] == 0xa5);
+			for (u32 k = 0; k < plain; k++)
+				assert(out[k] == 0x5a);
+			ref[plain] ^= 0x01;
 		}
 	}
 	puts("wgfp_seal_one_dst: ok");

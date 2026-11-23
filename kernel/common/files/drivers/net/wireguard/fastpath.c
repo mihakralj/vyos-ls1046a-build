@@ -380,15 +380,12 @@ static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 }
 
 /* @n plaintext bytes from @src into @dst (may equal @src), tag at src + n;
- * @src is never written when @dst != @src. Block 0 rides with the open fold's
- * head when the length allows it, else a one-block NEON call. When @scratch_b0
- * is true (caller guarantees @dst != @src and 64 writable scratch bytes right
- * before @dst), the folded head decrypts directly into @dst without the stack
- * copy-back or 320-byte stack wipe; on auth failure the decrypted head is
- * zeroized. When @scratch_b0 is false, @dst is untouched on auth failure. */
+ * @dst is untouched when the tag does not verify, and @src is never written
+ * when @dst != @src. Block 0 rides with the open fold's head when the length
+ * allows it, else a one-block NEON call. */
 static bool wgfp_open_one_dst(u8 *dst, const u8 *src, size_t n, u64 nonce,
 			      const u8 key[CHACHA20POLY1305_KEY_SIZE],
-			      unsigned int neon_min, bool scratch_b0)
+			      unsigned int neon_min)
 {
 	bool neon = n > neon_min && crypto_simd_usable();
 	u8 buf[CHACHA_BLOCK_SIZE + WGFP_OPEN_HEAD];
@@ -404,51 +401,27 @@ static bool wgfp_open_one_dst(u8 *dst, const u8 *src, size_t n, u64 nonce,
 		ok = !crypto_memneq(tag, src + n, POLY1305_DIGEST_SIZE);
 		if (ok)
 			wgfp_chacha_gen(&st, dst, src, n);
-		chacha_zeroize_state(&st);
-		memzero_explicit(buf, CHACHA_BLOCK_SIZE);
-		return ok;
-	}
-
-	if (likely(scratch_b0) && wgfp_open_foldable(n)) {
-		u8 *b0 = dst - CHACHA_BLOCK_SIZE;
-
-		head = min_t(size_t, n, ALIGN(n % (5 * CHACHA_BLOCK_SIZE),
-					      CHACHA_BLOCK_SIZE));
-		memset(b0, 0, CHACHA_BLOCK_SIZE);
-		memcpy(dst, src, head);
-		kernel_neon_begin();
-		wgfp_chacha_neon(&st, b0, b0, CHACHA_BLOCK_SIZE + head);
-		wgfp_mac(b0, src, n, true, tag);
-		ok = !crypto_memneq(tag, src + n, POLY1305_DIGEST_SIZE);
-		if (likely(ok) && n > head)
-			wgfp_chacha_neon(&st, dst + head, src + head, n - head);
-		kernel_neon_end();
-		chacha_zeroize_state(&st);
-		memzero_explicit(b0, CHACHA_BLOCK_SIZE);
-		if (unlikely(!ok))
-			memzero_explicit(dst, head);
-		return ok;
-	}
-
-	memset(buf, 0, CHACHA_BLOCK_SIZE);
-	kernel_neon_begin();
-	if (wgfp_open_foldable(n)) {
-		head = min_t(size_t, n, ALIGN(n % (5 * CHACHA_BLOCK_SIZE),
-					      CHACHA_BLOCK_SIZE));
-		memcpy(buf + CHACHA_BLOCK_SIZE, src, head);
-		wgfp_chacha_neon(&st, buf, buf, CHACHA_BLOCK_SIZE + head);
 	} else {
-		chacha_block_xor_neon(&st, buf, buf, 20);
-		st.x[12]++;
+		memset(buf, 0, CHACHA_BLOCK_SIZE);
+		kernel_neon_begin();
+		if (wgfp_open_foldable(n)) {
+			head = min_t(size_t, n, ALIGN(n % (5 * CHACHA_BLOCK_SIZE),
+						      CHACHA_BLOCK_SIZE));
+			memcpy(buf + CHACHA_BLOCK_SIZE, src, head);
+			wgfp_chacha_neon(&st, buf, buf, CHACHA_BLOCK_SIZE + head);
+		} else {
+			chacha_block_xor_neon(&st, buf, buf, 20);
+			st.x[12]++;
+		}
+		wgfp_mac(buf, src, n, true, tag);
+		ok = !crypto_memneq(tag, src + n, POLY1305_DIGEST_SIZE);
+		if (ok) {
+			if (n > head)
+				wgfp_chacha_neon(&st, dst + head, src + head, n - head);
+			memcpy(dst, buf + CHACHA_BLOCK_SIZE, head);
+		}
+		kernel_neon_end();
 	}
-	wgfp_mac(buf, src, n, true, tag);
-	ok = !crypto_memneq(tag, src + n, POLY1305_DIGEST_SIZE);
-	if (ok) {
-		if (n > head)
-			wgfp_chacha_neon(&st, dst + head, src + head, n - head);
-		memcpy(dst, buf + CHACHA_BLOCK_SIZE, head);
-	}
-	kernel_neon_end();
 	chacha_zeroize_state(&st);
 	memzero_explicit(buf, CHACHA_BLOCK_SIZE + head);
 	return ok;
@@ -458,7 +431,7 @@ static bool wgfp_open_one(u8 *p, size_t n, u64 nonce,
 			  const u8 key[CHACHA20POLY1305_KEY_SIZE],
 			  unsigned int neon_min)
 {
-	return wgfp_open_one_dst(p, p, n, nonce, key, neon_min, false);
+	return wgfp_open_one_dst(p, p, n, nonce, key, neon_min);
 }
 
 /* Both directions against the library once: seal with and without room in
@@ -533,17 +506,12 @@ static int wgfp_one_ok(void)
 			for (j = 0; j < len && ok; j++)
 				if (m[j] != (u8)(j * 11 + len))
 					ok = 0;
-			/* In-place and out-of-place open (with and without scratch_b0) */
+			/* In-place and out-of-place open */
 			memcpy(p, b, len + POLY1305_DIGEST_SIZE);
 			ok = ok && wgfp_open_one(p, len, nonce, key, neon_min) &&
 			     !memcmp(p, m, len);
-			memset(a, 0xa5, CHACHA_BLOCK_SIZE);
 			memset(p, 0x3c, len);
-			ok = ok && wgfp_open_one_dst(p, b, len, nonce, key, neon_min, false) &&
-			     !memcmp(p, m, len) && !memchr_inv(a, 0xa5, CHACHA_BLOCK_SIZE);
-			memset(a, 0xa5, CHACHA_BLOCK_SIZE);
-			memset(p, 0x3c, len);
-			ok = ok && wgfp_open_one_dst(p, b, len, nonce, key, neon_min, true) &&
+			ok = ok && wgfp_open_one_dst(p, b, len, nonce, key, neon_min) &&
 			     !memcmp(p, m, len);
 			memcpy(p, b, len + POLY1305_DIGEST_SIZE);
 			p[len] ^= 1;
@@ -810,8 +778,7 @@ static int wgfp_open_selftest(void)
 /* Out-of-place chacha20poly1305_decrypt() from read-only @src into @dst;
  * @clen includes the 16-byte tag. */
 static bool wgfp_open_dst(u8 *dst, const u8 *src, size_t clen, u64 nonce,
-			  const u8 key[CHACHA20POLY1305_KEY_SIZE],
-			  bool scratch_b0)
+			  const u8 key[CHACHA20POLY1305_KEY_SIZE])
 {
 	int fold = READ_ONCE(wgfp_open_fold);
 
@@ -820,8 +787,7 @@ static bool wgfp_open_dst(u8 *dst, const u8 *src, size_t clen, u64 nonce,
 #ifdef WGFP_ONE_NEON
 	if (likely(fold == 2) && clen > POLY1305_DIGEST_SIZE)
 		return wgfp_open_one_dst(dst, src, clen - POLY1305_DIGEST_SIZE,
-					 nonce, key, READ_ONCE(wgfp_neon_min),
-					 scratch_b0);
+					 nonce, key, READ_ONCE(wgfp_neon_min));
 #endif
 	if (fold > 0 && clen > POLY1305_DIGEST_SIZE &&
 	    wgfp_open_foldable(clen - POLY1305_DIGEST_SIZE))
@@ -1932,16 +1898,15 @@ static bool wgfp_rx_forward(struct sk_buff *skb,
 	}
 	if (tx && likely(r->l2.egress == hint_eg &&
 			 r->l2.ifindex == tx->ifindex)) {
-		u32 eth_off = (u32)(pt - (u8 *)tx->buf) - ETH_HLEN;
-
 		if (t.family == AF_INET)
 			ip_decrease_ttl((struct iphdr *)pt);
 		else
 			((struct ipv6hdr *)pt)->hop_limit--;
-		memcpy(pt - ETH_HLEN, r->l2.hdr, ETH_HLEN);
+		memcpy((u8 *)tx->buf + DPAA_WGFP_TX_HEADROOM, r->l2.hdr, ETH_HLEN);
 		wgfp_rx_stats(pst, msg_len);
 		dpaa_wgfp_stat_inc(&wgfp_p6_fwd);
-		dpaa_wgfp_tx_submit(NULL, tx, eth_off, ETH_HLEN + len);
+		dpaa_wgfp_tx_submit(NULL, tx, DPAA_WGFP_TX_HEADROOM,
+				    ETH_HLEN + len);
 		return true;
 	}
 	if (ETH_HLEN + len <= DPAA_WGFP_TX_BUF_SIZE &&
@@ -2054,21 +2019,18 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	clen = ulen - sizeof(*udp) - sizeof(*msg);	/* ciphertext + tag */
 	plen = clen - POLY1305_DIGEST_SIZE;
 	if (READ_ONCE(wgfp_rx_fast) >= 2 && !(ds & INET_ECN_ECT_1) &&
-	    CHACHA_BLOCK_SIZE + plen <= DPAA_WGFP_TX_BUF_SIZE) {
+	    ETH_HLEN + plen <= DPAA_WGFP_TX_BUF_SIZE) {
 		hint_eg = READ_ONCE(pst->last_rx_egress);
 		hint_ifindex = READ_ONCE(pst->last_rx_ifindex);
 		if (hint_eg >= 0) {
 			have_tx = dpaa_wgfp_tx_alloc(hint_eg, hint_ifindex,
-						     CHACHA_BLOCK_SIZE + plen,
-						     &tx);
+						     ETH_HLEN + plen, &tx);
 			if (unlikely(!have_tx))
 				WRITE_ONCE(pst->last_rx_egress, -1);
 		}
 	}
 	if (have_tx) {
-		/* Leave 64 B scratch_b0 clear of tx.buf[0..63] metadata; ETH_HLEN
-		 * sits at pt - ETH_HLEN (>= DPAA_WGFP_TX_HEADROOM). */
-		pt = (u8 *)tx.buf + DPAA_WGFP_TX_HEADROOM + CHACHA_BLOCK_SIZE;
+		pt = (u8 *)tx.buf + DPAA_WGFP_TX_HEADROOM + ETH_HLEN;
 	} else {
 		skb = netdev_alloc_skb(pst->wgdev, WGFP_RX_HEADROOM + plen);
 		if (unlikely(!skb)) {
@@ -2081,7 +2043,7 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 		pt = skb_put(skb, plen);
 	}
 	/* Decrypt out-of-place: f->buf is read-only DMA_FROM_DEVICE memory. */
-	if (!wgfp_open_dst(pt, ct, clen, nonce, kp->receiving.key, have_tx)) {
+	if (!wgfp_open_dst(pt, ct, clen, nonce, kp->receiving.key)) {
 		atomic64_inc(&wgfp_p6_auth);
 		if (have_tx)
 			dpaa_wgfp_tx_cancel(&tx);
