@@ -648,6 +648,8 @@ struct ask_hw_port {
 	bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
 	enum fman_pcd_fe_profile engaged_profile; /* valid while offload_engaged */
 	u32             punt_mask;      /* F-266 FMAN_PCD_PUNT_* armed */
+	u8              g4_udp_class;   /* F-323 G4 UDP class row (1..3), 0=none */
+	u8              g4_esp_class;   /* F-323 G4 ESP class row (1..3), 0=none */
 	bool            fe_retained;    /* F-289 FE disengage failed; FMan kept state */
 	bool            teardown_in_progress;
 	bool            module_pinned;
@@ -952,6 +954,152 @@ MODULE_PARM_DESC(tcp_ctl_punt,
 module_param_cb(ttl_punt, &ask_punt_param_ops, &ask_ttl_punt, 0644);
 MODULE_PARM_DESC(ttl_punt,
 		 "Send IPv4 TTL <= 1 and IPv6 hop limit <= 1 on ROUTED-engaged ports to the kernel for ICMP time exceeded (default 1; applies to engaged ports on write)");
+
+/*
+ * F-323 (G4 multi-table dispatch): opt-in validation hook (default 0 so
+ * default boot and dataplane are 100% unchanged). When enabled before routed
+ * port engage, attaches row 1 (HXS 11 UDP, 49-byte dual-lane GEC key with full
+ * VLAN1 TCI + PPPoE SID isolation, proto byte omitted since HXS 11 guarantees
+ * UDP) and row 2 (HXS 12 IPsec ESP/AH, 45-byte fixed dual-lane GEC + SPI key)
+ * alongside primary row 0 (50-byte routed table).
+ */
+static bool ask_g4_udp_class;
+module_param_named(g4_udp_class, ask_g4_udp_class, bool, 0644);
+MODULE_PARM_DESC(g4_udp_class,
+		 "G4 multi-table dispatch: attach secondary UDP (HXS 11, 49B) and IPsec ESP (HXS 12, 45B) class tables on routed port engage (default 0)");
+
+static u8 ask_hw_port_udp_class[0x28];
+
+u8 ask_hw_get_udp_class(u8 hw_port_id)
+{
+	if (hw_port_id >= ARRAY_SIZE(ask_hw_port_udp_class))
+		return 0;
+	return READ_ONCE(ask_hw_port_udp_class[hw_port_id]);
+}
+
+/* Caller holds h->lock. Optional; failures leave the port engaged on row 0. */
+static void ask_hw_g4_attach_port(struct ask_hw_pcd *h, struct ask_hw_port *p)
+{
+	/* 49B G4 UDP key: family(1)+v4(8)+v6(32)+ports(4)+vlan1(2)+pppoe(2).
+	 * Proto byte is omitted (HXS 11 guarantees UDP) so both key size (49 vs
+	 * 50) and offsets differ from row 0 while preserving full VLAN/PPPoE
+	 * tenant isolation. */
+	static const u32 g4_udp_gec[8] = {
+		0x80F07B00U,	/* [0]     family (L3 byte 0 & 0xF0) */
+		0x87FF0B0CU,	/* [1..8]  IPv4 src+dst @ +12 */
+		0x8FFF1B08U,	/* [9..24] IPv6 src @ +8 */
+		0x8FFF1B18U,	/* [25..40] IPv6 dst @ +24 */
+		0x83FF7E00U,	/* [41..44] UDP sport+dport */
+		0x81FF0500U,	/* [45..46] outer VLAN1 TCI (0 if untagged) */
+		0x81FF0802U,	/* [47..48] PPPoE session ID (0 if none) */
+		0,
+	};
+	/* 45B fixed-width dual-lane ESP/AH key: SPI(4 via EKFC) + family(1) +
+	 * v4(8) + v6(32) = 45B identically on both IPv4 and IPv6 ESP/AH. */
+	static const u32 g4_esp_gec[8] = {
+		0x80F07B00U,	/* family (L3 byte 0 & 0xF0) */
+		0x87FF0B0CU,	/* IPv4 src+dst @ +12 */
+		0x8FFF1B08U,	/* IPv6 src @ +8 */
+		0x8FFF1B18U,	/* IPv6 dst @ +24 */
+		0, 0, 0, 0,
+	};
+	struct fman_pcd_fe_class_cfg cfg;
+	u8 idx = 0;
+	int rc;
+
+	if (!READ_ONCE(ask_g4_udp_class) || !h->fman ||
+	    p->engaged_profile != FMAN_PCD_FE_PROFILE_ROUTED)
+		return;
+
+	if (!p->g4_udp_class) {
+		memset(&cfg, 0, sizeof(cfg));
+		cfg.hxs_slot = 11;	/* UDP HXS */
+		cfg.key_size = 49;
+		cfg.hash_mask = 0x3ffU;
+		cfg.hash_shift = 0;
+		cfg.custom_gec = true;
+		cfg.ekfc = 0;
+		memcpy(cfg.gec, g4_udp_gec, sizeof(cfg.gec));
+		cfg.code_words = 0;	/* built-in 4-word direct-dispatch */
+		rc = fman_pcd_fe_class_attach(h->fman, p->port_id, &cfg, &idx);
+		if (rc) {
+			ask_pr_warn("hw: G4 UDP class attach port 0x%02x failed: %d\n",
+				    p->port_id, rc);
+		} else {
+			p->g4_udp_class = idx;
+			if (p->port_id < ARRAY_SIZE(ask_hw_port_udp_class))
+				WRITE_ONCE(ask_hw_port_udp_class[p->port_id], idx);
+			ask_pr_info("hw: G4 UDP class row %u armed on port 0x%02x (HXS 11, 49B)\n",
+				    idx, p->port_id);
+		}
+	}
+
+	if (!p->g4_esp_class) {
+		memset(&cfg, 0, sizeof(cfg));
+		cfg.hxs_slot = 12;	/* IPsec ESP/AH HXS */
+		cfg.key_size = 45;
+		cfg.hash_mask = 0x3ffU;
+		cfg.hash_shift = 0;
+		cfg.custom_gec = true;
+		cfg.ekfc = 0x00000200U;	/* KG_SCH_KN_IPSEC_SPI (fixed 4B) */
+		memcpy(cfg.gec, g4_esp_gec, sizeof(cfg.gec));
+		cfg.code_words = 0;	/* built-in 4-word direct-dispatch */
+		idx = 0;
+		rc = fman_pcd_fe_class_attach(h->fman, p->port_id, &cfg, &idx);
+		if (rc) {
+			ask_pr_warn("hw: G4 ESP class attach port 0x%02x failed: %d\n",
+				    p->port_id, rc);
+		} else {
+			p->g4_esp_class = idx;
+			ask_pr_info("hw: G4 ESP class row %u armed on port 0x%02x (HXS 12, 45B)\n",
+				    idx, p->port_id);
+		}
+	}
+}
+
+/* Read-only /sys/module/ask/parameters/g4_stats exposing per-class kgse_spc. */
+static int ask_g4_stats_get(char *buf, const struct kernel_param *kp)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_inst;
+	unsigned int i;
+	int len = 0;
+
+	if (!h || !h->fman)
+		return scnprintf(buf, PAGE_SIZE, "none\n");
+
+	mutex_lock(&h->lock);
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+		struct ask_hw_port *p = &h->port[i];
+		u8 usid = 0, esid = 0;
+		u32 uspc = 0, espc = 0;
+
+		if (!p->in_use || (!p->g4_udp_class && !p->g4_esp_class))
+			continue;
+		if (p->g4_udp_class)
+			(void)fman_pcd_fe_class_stats(h->fman, p->port_id,
+						      p->g4_udp_class,
+						      &usid, &uspc);
+		if (p->g4_esp_class)
+			(void)fman_pcd_fe_class_stats(h->fman, p->port_id,
+						      p->g4_esp_class,
+						      &esid, &espc);
+		len += scnprintf(buf + len, PAGE_SIZE - len,
+				 "port=0x%02x udp_cls=%u udp_sid=%u udp_spc=%u esp_cls=%u esp_sid=%u esp_spc=%u\n",
+				 p->port_id, p->g4_udp_class, usid, uspc,
+				 p->g4_esp_class, esid, espc);
+	}
+	mutex_unlock(&h->lock);
+	if (!len)
+		return scnprintf(buf, PAGE_SIZE, "none\n");
+	return len;
+}
+
+static const struct kernel_param_ops ask_g4_stats_ops = {
+	.get = ask_g4_stats_get,
+};
+module_param_cb(g4_stats, &ask_g4_stats_ops, NULL, 0444);
+MODULE_PARM_DESC(g4_stats,
+		 "Read-only per-port G4 secondary class KeyGen scheme IDs and kgse_spc packet counters");
 
 /* F-113: kmem_cache for struct ask_hw_flow_cookie — O(1) alloc/free
  * under heavy flow churn (50k+ active flows).  Replaces per-entry
@@ -1718,6 +1866,9 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 		clear_bit(hw_port_id, ask_hw_port_l2);
 	else
 		set_bit(hw_port_id, ask_hw_port_l2);
+	/* F-323 (G4): attach optional opt-in secondary classes BEFORE opening
+	 * family admission so concurrent REPLACE never routes UDP to row 0. */
+	ask_hw_g4_attach_port(h, p);
 	ask_hw_set_family_locked(hw_port_id, family);
 	/* F-266: optional; a failure leaves the port engaged without it. */
 	ask_hw_punt_apply(h, p, ask_hw_punt_wanted(p));
@@ -1990,6 +2141,8 @@ static int ask_hw_fe_prepare_disengage(void *data)
 
 	transition->prepared = true;
 	ask_hw_set_family_locked(transition->port_id, 0);
+	if (transition->port_id < ARRAY_SIZE(ask_hw_port_udp_class))
+		WRITE_ONCE(ask_hw_port_udp_class[transition->port_id], 0);
 	if (transition->remove_dependents) {
 		rc = ask_hw_punt_apply(transition->hw, transition->port, 0);
 		if (rc)
@@ -2073,6 +2226,10 @@ int ask_hw_offload_disengage(u8 hw_port_id)
 	 */
 
 	p->offload_engaged = false;
+	if (!rc) {
+		p->g4_udp_class = 0;
+		p->g4_esp_class = 0;
+	}
 	p->teardown_in_progress = !rc;
 	/* Once the prepared detach began, L2 admission must stay closed even if
 	 * its final readback or teardown failed. */
@@ -2274,8 +2431,11 @@ int ask_hw_fe_reengage(u8 hw_port_id)
 		mutex_unlock(&h->lock);
 		return rc;
 	}
-	if (!rc)
+	if (!rc) {
+		p->g4_udp_class = 0;
+		p->g4_esp_class = 0;
 		rc = fman_pcd_fe_engage(h->fman, hw_port_id, 0);
+	}
 	if (rc) {
 		p->offload_engaged = false;
 		p->fe_retained = true;
@@ -2285,6 +2445,7 @@ int ask_hw_fe_reengage(u8 hw_port_id)
 	} else {
 		WRITE_ONCE(ask_hw_enq_fe_off,
 			   fman_pcd_fe_enq_get_offset(h->fman));
+		ask_hw_g4_attach_port(h, p);
 		ask_hw_set_family_locked(hw_port_id, family);
 		ask_pr_info("hw: FE re-engaged port 0x%02x after VLAN CC teardown (RCCB restored)\n",
 			    hw_port_id);

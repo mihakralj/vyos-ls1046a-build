@@ -3159,6 +3159,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # F-322: WGFP-v2 confirmed TX FQ on offload_cgr, batched BMan release, and bpid=0xff guards.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_322.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-f322-fixup.py" "$(pwd)" 2>&1
+    # F-323: G4 multi-table dispatch via soft-parser $nia + secondary KG schemes + CCOBASE rows 1..3.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_323.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f323-fixup.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_prepared_disarm,fman_arm_table 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-keygen-window.py" "$(pwd)" 2>&1
+    echo "### fman_pcd/fman_keygen: F-323 G4 multi-table dispatch verified"
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-fq-lifetime 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-offload-fq.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-containment.py" "$(pwd)" --require-offload-cgr 2>&1

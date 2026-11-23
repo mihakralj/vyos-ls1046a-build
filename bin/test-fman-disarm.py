@@ -110,6 +110,10 @@ def main():
     # fp->table_v4 and shared (!per_port) tables, not other ports' tables.
     if "F-321" in pcd:
         compile_flags.append("-DFMAN_F321=1")
+    # F-323 (G4 multi-table dispatch): disarm_preflight also checks this port's
+    # active secondary class tables and detaches them before kg_port_disarm_fe.
+    if "F-323" in pcd:
+        compile_flags.append("-DFMAN_F323=1")
     with tempfile.TemporaryDirectory(prefix="fman-disarm-") as tmp:
         tmp = Path(tmp)
         (tmp / "disarm_body.h").write_text(disarm)

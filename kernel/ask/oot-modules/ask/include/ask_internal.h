@@ -145,6 +145,7 @@ int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 fe_token,
 			   u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
 u8   ask_hw_port_family_mask(u8 hw_port_id);
+u8   ask_hw_get_udp_class(u8 hw_port_id);
 int  ask_bridge_port_quiesce(u8 hw_port_id);
 int  ask_bridge_dev_quiesce(u8 hw_port_id, int ifindex);
 int  ask_flow_port_withdraw(u8 hw_port_id, int ifindex);
@@ -592,6 +593,7 @@ u16 vlan_id;
  * _v6() -- see ASK_FE_KEY_SIZE comment.
  */
 u8  port_id;
+u8  table_idx;      /* G4 multi-table dispatch: 0 = primary, 1..3 = class */
 u8  src_ip[16];     /* v4 packs into first 4, last 12 zero */
 u8  dst_ip[16];
 

@@ -2831,6 +2831,28 @@ EXPORT_SYMBOL_GPL(ask_fe_build_key_v6);
  */
 /* F-259: one routed key size across the kernel and ask.ko (spec 10.3). */
 static_assert(ASK_FE_KEY_SIZE_DUAL == FMAN_PCD_FE_ROUTED_KEY_SIZE);
+/* F-323 (G4): 49-byte secondary UDP class key (family+v4+v6+ports+vlan+pppoe). */
+#define ASK_FE_KEY_SIZE_G4_UDP 49
+static_assert(ASK_FE_KEY_SIZE_G4_UDP <= ASK_FE_KEY_SIZE_DUAL);
+
+static void ask_fe_build_key_g4_udp(const struct ask_flow_key *key,
+				    u8 k[ASK_FE_KEY_SIZE_G4_UDP])
+{
+	memset(k, 0, ASK_FE_KEY_SIZE_G4_UDP);
+	if (key->l3_proto == ASK_FLOW_L3_IPV6) {
+		k[0] = ASK_FE_FAMILY_V6;
+		memcpy(&k[9],  key->src_ip, 16);
+		memcpy(&k[25], key->dst_ip, 16);
+	} else {
+		k[0] = ASK_FE_FAMILY_V4;
+		memcpy(&k[1], key->src_ip, 4);
+		memcpy(&k[5], key->dst_ip, 4);
+	}
+	memcpy(&k[41], &key->sport, sizeof(key->sport));
+	memcpy(&k[43], &key->dport, sizeof(key->dport));
+	put_unaligned_be16(key->vlan_ingress_vid & VLAN_VID_MASK, &k[45]);
+	put_unaligned_be16(key->pppoe_sid, &k[47]);
+}
 /* T-M6-SP4: ask.ko's L2-edit flag is handed to the emitter unchanged. */
 static_assert(ASK_VLANF_PPPOE_STRIP == FMAN_PCD_VLANF_PPPOE_STRIP);
 static_assert(ASK_VLANF_PPPOE_INSERT == FMAN_PCD_VLANF_PPPOE_INSERT);
@@ -3147,10 +3169,16 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	 * absent lane keep v4 and v6 records disjoint in the one per-port table
 	 * (table_idx 0), so no second scheme / parser LCV split. */
 	ask_fe_build_key_dual(key, key_buf);
-	memcpy(action.key, key_buf, ASK_FE_KEY_SIZE_DUAL);
-	action.key_size = ASK_FE_KEY_SIZE_DUAL;
+	if (key->table_idx) {
+		table_idx = key->table_idx;
+		ask_fe_build_key_g4_udp(key, action.key);
+		action.key_size = ASK_FE_KEY_SIZE_G4_UDP;
+	} else {
+		table_idx = 0;
+		memcpy(action.key, key_buf, ASK_FE_KEY_SIZE_DUAL);
+		action.key_size = ASK_FE_KEY_SIZE_DUAL;
+	}
 	action.owner_token = fe_token;
-	table_idx = 0;
 	action.enq_off   = enq_off;
 	/* F-204 / T-M6-1 Phase 2a: explicit ehash selector. This is SEPARATE
 	 * from key->port_id, which remains the ingress FMan port for F-195's
@@ -3275,6 +3303,17 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		ask_hw_flow_publish_end(guard);
 		return -ENODEV;
 	}
+	/* F-323: re-validate G4 class binding in both directions under h->lock
+	 * (closes engage/disengage/pending/neigh-rebuild races). */
+	if (key->l4_proto == IPPROTO_UDP) {
+		if (key->table_idx != ask_hw_get_udp_class(key->port_id)) {
+			ask_hw_flow_publish_end(guard);
+			return -EAGAIN;
+		}
+	} else if (key->table_idx) {
+		ask_hw_flow_publish_end(guard);
+		return -EINVAL;
+	}
 	ask_pr_dbg("F-195 flow-add call fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
 		   fm, &action, key->port_id, table_idx, action.key_size,
 		   sizeof(action),
@@ -3312,14 +3351,19 @@ static int ask_fe_flow_remove(const struct ask_flow_key *key, u64 fe_token)
 	 * families now share the one 46-byte key/table (the family byte +
 	 * zeroed absent lane keep them distinct).
 	 */
-	ask_fe_build_key_dual(key, k);
-	klen = ASK_FE_KEY_SIZE_DUAL;
-	/* Phase 1 (per-port tables): pass the ingress hw port so the delete
-	 * selects THIS port's routed-IPv4 table instance (F-220/F-221), matching
-	 * the insert side which passed key->port_id. v6 delete still selects the
-	 * global table by key length; the port arg is harmless there. */
-	return fman_pcd_fe_flow_del_identified(fm, key->port_id, k, klen,
-					       FMAN_PCD_FE_OWNER_ASK, fe_token);
+	if (key->table_idx) {
+		ask_fe_build_key_g4_udp(key, k);
+		klen = ASK_FE_KEY_SIZE_G4_UDP;
+	} else {
+		ask_fe_build_key_dual(key, k);
+		klen = ASK_FE_KEY_SIZE_DUAL;
+	}
+	/* Phase 1 (per-port tables) + F-323 (G4 class dispatch): pass ingress
+	 * hw port and key->table_idx (0 = primary 50B, 1..3 = G4 class). */
+	return fman_pcd_fe_class_flow_del_identified(fm, key->port_id,
+						     key->table_idx, k, klen,
+						     FMAN_PCD_FE_OWNER_ASK,
+						     fe_token);
 }
 
 
@@ -5503,6 +5547,12 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 						dev_put(true_iif_dev);
 					return prc;
 				}
+				/* F-323 (G4): sample active UDP class AFTER port-bind
+				 * (which may lazily engage the port and attach G4).
+				 * The 49B G4 UDP key includes VLAN1 TCI + PPPoE SID so
+				 * all routed UDP flows (plain/NAT/VLAN/PPPoE) route here. */
+				if (key.l4_proto == IPPROTO_UDP)
+					key.table_idx = ask_hw_get_udp_class(pid);
 			} else if (prc != -ENODEV && prc != -ERANGE) {
 				ask_pr_dbg("flow_offload: REPLACE port-id resolve(%s) failed: %d\n",
 					   netdev_name(bind_dev), prc);
@@ -5908,12 +5958,23 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 		if (!fm)
 			return false;
 
-		ask_fe_build_key_dual(&key, kbuf);
-		if (fman_pcd_fe_flow_get_stats_identified(fm, port_id, kbuf,
-							  ASK_FE_KEY_SIZE_DUAL,
-							  FMAN_PCD_FE_OWNER_ASK,
-							  fe_token, &hw_pkts,
-							  &hw_bytes, NULL) != 0)
+		u8 klen;
+
+		if (key.table_idx) {
+			ask_fe_build_key_g4_udp(&key, kbuf);
+			klen = ASK_FE_KEY_SIZE_G4_UDP;
+		} else {
+			ask_fe_build_key_dual(&key, kbuf);
+			klen = ASK_FE_KEY_SIZE_DUAL;
+		}
+		if (fman_pcd_fe_class_flow_get_stats_identified(fm, port_id,
+								key.table_idx,
+								kbuf, klen,
+								FMAN_PCD_FE_OWNER_ASK,
+								fe_token,
+								&hw_pkts,
+								&hw_bytes,
+								NULL) != 0)
 			return false;
 	}
 
