@@ -164,6 +164,35 @@ def test_valid_non_ppp_journal_entries_remain_recoverable(tmp_path, entry):
     assert not lease.exists()
 
 
+def test_wan_own_link_delete_handles_multiple_altnames(tmp_path):
+    """ip -o link show appends a trailing backslash to non-final altname entries."""
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    calls = tmp_path / "ip.calls"
+    ip_sh = fakebin / "ip"
+    ip_sh.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        'if [ "$1" = "-o" ] && [ "$2" = "link" ] && [ "$3" = "show" ]; then\n'
+        '  printf "13: wgw0: <POINTOPOINT,NOARP,UP> mtu 1420\\\\'
+        '    link/none \\\\'
+        '    altname ask2wan-0123456789abcdef-wg\\\\'
+        '    altname wgo-0123456789abcdef0123456789abcdef-wg\\n"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    ip_sh.chmod(0o755)
+    env = dict(os.environ, PATH=f"{fakebin}:{os.environ['PATH']}")
+    res = subprocess.run(
+        ["sh", str(OWN),
+         "link-delete", "wgw0", "ask2wan-0123456789abcdef-wg"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "link del ask2wan-0123456789abcdef-wg" in calls.read_text()
+
+
 def test_unreachable_dut_does_not_authorize_dependent_cleanup(tmp_path):
     lease = tmp_path / "leases/lease-0123456789abcdef"
     lease.mkdir(parents=True)

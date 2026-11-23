@@ -283,7 +283,7 @@ P=/sys/module/wireguard/parameters/wgfp_peer_lease
 [ -e "$P" ] || exit 0
 cur=$(cat "$P")
 case "$cur" in
-  unowned) exit 0 ;;
+  unowned) ;;
   "owned=$tok dev=off")
     printf 'release %s\n' "$tok" > "$P" ;;
   "owned=$tok "*)
@@ -291,6 +291,7 @@ case "$cur" in
     printf 'release %s\n' "$tok" > "$P" ;;
   *) echo "ERROR: wgfp_peer_lease owned by another actor: $cur" >&2; exit 1 ;;
 esac
+ip link property del dev "wgo-$tok-wg" altname "wgo-$tok-wg" 2>/dev/null || true
 EOS
       ;;
     rule6) own "$h" rule6-delete "$@" ;;

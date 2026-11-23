@@ -3118,21 +3118,63 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst)
 
 /* ---- learning ---- */
 
+#if IS_REACHABLE(CONFIG_NF_CONNTRACK)
+/* Look up @ct and packet direction from the post-NAT wire tuple @post when
+ * skb->_nfct is NULL (e.g. packets forwarded by nf_flow_offload).  For any
+ * confirmed conntrack entry (NAT or non-NAT, ORIG or REPLY), invert(@post)
+ * equals ct->tuplehash[!dir].tuple, so !NF_CT_DIRECTION(h) is the packet's
+ * own direction and ct->tuplehash[dir].tuple is its pre-NAT wire tuple.
+ * Caller must nf_ct_put() the returned ct. */
+static struct nf_conn *wgfp_ct_find_post(struct net *net,
+					 const struct dpaa_wgfp_tuple *post,
+					 enum ip_conntrack_dir *dir_out)
+{
+	struct nf_conntrack_tuple inv = {};
+	struct nf_conntrack_tuple_hash *h;
+
+	inv.src.l3num = post->family;
+	if (post->family == AF_INET6) {
+		inv.src.u3.in6 = post->daddr6;
+		inv.dst.u3.in6 = post->saddr6;
+	} else {
+		inv.src.u3.ip = post->daddr;
+		inv.dst.u3.ip = post->saddr;
+	}
+	inv.src.u.all = post->dport;
+	inv.dst.u.all = post->sport;
+	inv.dst.protonum = post->proto;
+	inv.dst.dir = IP_CT_DIR_ORIGINAL;
+	h = nf_conntrack_find_get(net, &nf_ct_zone_dflt, &inv);
+	if (!h)
+		return NULL;
+	*dir_out = !NF_CT_DIRECTION(h);
+	return nf_ct_tuplehash_to_ctrack(h);
+}
+#endif
+
 /* Extract pre-NAT wire tuple from @ct for @skb (for FIN/RST withdrawal even
  * if the conntrack state is already closing). */
-static void wgfp_ct_orig_tuple(struct sk_buff *skb,
+static void wgfp_ct_orig_tuple(struct net *net, struct sk_buff *skb,
 			       const struct dpaa_wgfp_tuple *post,
 			       struct dpaa_wgfp_tuple *orig_out)
 {
 	*orig_out = *post;
 #if IS_REACHABLE(CONFIG_NF_CONNTRACK)
-	if (skb) {
+	{
 		enum ip_conntrack_info ctinfo;
-		struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
+		enum ip_conntrack_dir dir = IP_CT_DIR_ORIGINAL;
+		struct nf_conn *ct = skb ? nf_ct_get(skb, &ctinfo) : NULL;
+		bool put = false;
 
+		if (ct) {
+			dir = CTINFO2DIR(ctinfo);
+		} else {
+			ct = wgfp_ct_find_post(net, post, &dir);
+			put = ct != NULL;
+		}
 		if (ct && (ct->status & IPS_NAT_MASK)) {
 			const struct nf_conntrack_tuple *ct_orig =
-				&ct->tuplehash[CTINFO2DIR(ctinfo)].tuple;
+				&ct->tuplehash[dir].tuple;
 
 			if (ct_orig->src.l3num == post->family &&
 			    ct_orig->dst.protonum == post->proto) {
@@ -3147,6 +3189,8 @@ static void wgfp_ct_orig_tuple(struct sk_buff *skb,
 				orig_out->dport = ct_orig->dst.u.all;
 			}
 		}
+		if (put)
+			nf_ct_put(ct);
 	}
 #endif
 }
@@ -3155,8 +3199,8 @@ static void wgfp_ct_orig_tuple(struct sk_buff *skb,
  * Check for an established conntrack entry without master or helper.  For
  * NAT44/NAT66 flows, populate @orig_out with the pre-NAT wire tuple and
  * @nat_out with the rewrite delta (@orig_out -> @post).  Packets forwarded by
- * the software flowtable may have no attached entry, so fall back to a
- * tuple-only non-NAT lookup.
+ * the software flowtable carry no attached skb->_nfct, so fall back to an
+ * inverse-post-tuple lookup that recovers both NAT and non-NAT entries.
  */
 static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 			     const struct dpaa_wgfp_tuple *post,
@@ -3165,103 +3209,93 @@ static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 {
 #if IS_REACHABLE(CONFIG_NF_CONNTRACK)
 	enum ip_conntrack_info ctinfo;
+	enum ip_conntrack_dir dir = IP_CT_DIR_ORIGINAL;
 	struct nf_conn *ct = skb ? nf_ct_get(skb, &ctinfo) : NULL;
-	struct nf_conntrack_tuple tuple = {};
-	struct nf_conntrack_tuple_hash *h;
-	bool ok;
+	bool put = false, ok = false;
 
 	*orig_out = *post;
 	memset(nat_out, 0, sizeof(*nat_out));
 
 	if (ct) {
-		if ((ctinfo != IP_CT_ESTABLISHED &&
-		     ctinfo != IP_CT_ESTABLISHED_REPLY) ||
-		    !nf_ct_zone_equal_any(ct, &nf_ct_zone_dflt) ||
-		    nf_ct_is_dying(ct) || nf_ct_is_expired(ct) ||
-		    (ct->status & IPS_SEQ_ADJUST) ||
-		    ct->master || nfct_help(ct))
+		if (ctinfo != IP_CT_ESTABLISHED &&
+		    ctinfo != IP_CT_ESTABLISHED_REPLY)
 			return false;
-		if (post->proto == IPPROTO_TCP) {
-			if (READ_ONCE(ct->proto.tcp.state) != TCP_CONNTRACK_ESTABLISHED)
-				return false;
-			/* WGFP bypasses conntrack on packets 33+, so disable strict
-			 * TCP window tracking just as nf_flow_offload_add() does;
-			 * otherwise 1s P6 renewal and punted FIN/RST fail
-			 * tcp_in_window() and lose reverse-NAT / ct lookup. */
-			if (!(READ_ONCE(ct->proto.tcp.seen[0].flags) &
-			      IP_CT_TCP_FLAG_BE_LIBERAL) ||
-			    !(READ_ONCE(ct->proto.tcp.seen[1].flags) &
-			      IP_CT_TCP_FLAG_BE_LIBERAL)) {
-				spin_lock_bh(&ct->lock);
-				ct->proto.tcp.seen[0].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
-				ct->proto.tcp.seen[1].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
-				spin_unlock_bh(&ct->lock);
-			}
-		}
-		if (!(ct->status & IPS_NAT_MASK))
-			return true;
-		{
-			const struct nf_conntrack_tuple *ct_orig =
-				&ct->tuplehash[CTINFO2DIR(ctinfo)].tuple;
-
-			if (ct_orig->src.l3num != post->family ||
-			    ct_orig->dst.protonum != post->proto)
-				return false;
-			if (post->family == AF_INET6) {
-				orig_out->saddr6 = ct_orig->src.u3.in6;
-				orig_out->daddr6 = ct_orig->dst.u3.in6;
-				if (memcmp(&orig_out->saddr6, &post->saddr6, 16)) {
-					nat_out->flags |= WGFP_NAT_SRC_IP;
-					nat_out->saddr6 = post->saddr6;
-				}
-				if (memcmp(&orig_out->daddr6, &post->daddr6, 16)) {
-					nat_out->flags |= WGFP_NAT_DST_IP;
-					nat_out->daddr6 = post->daddr6;
-				}
-			} else {
-				orig_out->saddr = ct_orig->src.u3.ip;
-				orig_out->daddr = ct_orig->dst.u3.ip;
-				if (orig_out->saddr != post->saddr) {
-					nat_out->flags |= WGFP_NAT_SRC_IP;
-					nat_out->saddr = post->saddr;
-				}
-				if (orig_out->daddr != post->daddr) {
-					nat_out->flags |= WGFP_NAT_DST_IP;
-					nat_out->daddr = post->daddr;
-				}
-			}
-			orig_out->sport = ct_orig->src.u.all;
-			orig_out->dport = ct_orig->dst.u.all;
-			if (orig_out->sport != post->sport) {
-				nat_out->flags |= WGFP_NAT_SRC_PORT;
-				nat_out->sport = post->sport;
-			}
-			if (orig_out->dport != post->dport) {
-				nat_out->flags |= WGFP_NAT_DST_PORT;
-				nat_out->dport = post->dport;
-			}
-		}
-		return true;
-	}
-	tuple.src.l3num = post->family;
-	if (post->family == AF_INET6) {
-		tuple.src.u3.in6 = post->saddr6;
-		tuple.dst.u3.in6 = post->daddr6;
+		dir = CTINFO2DIR(ctinfo);
 	} else {
-		tuple.src.u3.ip = post->saddr;
-		tuple.dst.u3.ip = post->daddr;
+		ct = wgfp_ct_find_post(net, post, &dir);
+		if (!ct)
+			return false;
+		put = true;
+		if (!test_bit(IPS_SEEN_REPLY_BIT, &ct->status))
+			goto out_put;
 	}
-	tuple.src.u.all = post->sport;
-	tuple.dst.u.all = post->dport;
-	tuple.dst.protonum = post->proto;
-	tuple.dst.dir = IP_CT_DIR_ORIGINAL;
-	h = nf_conntrack_find_get(net, &nf_ct_zone_dflt, &tuple);
-	if (!h)
-		return false;
-	ct = nf_ct_tuplehash_to_ctrack(h);
-	ok = test_bit(IPS_SEEN_REPLY_BIT, &ct->status) &&
-	     !(ct->status & IPS_NAT_MASK) && !ct->master && !nfct_help(ct);
-	nf_ct_put(ct);
+	if (!nf_ct_zone_equal_any(ct, &nf_ct_zone_dflt) ||
+	    nf_ct_is_dying(ct) || nf_ct_is_expired(ct) ||
+	    (ct->status & IPS_SEQ_ADJUST) ||
+	    ct->master || nfct_help(ct))
+		goto out_put;
+	if (post->proto == IPPROTO_TCP) {
+		if (READ_ONCE(ct->proto.tcp.state) != TCP_CONNTRACK_ESTABLISHED)
+			goto out_put;
+		/* WGFP bypasses conntrack on packets 33+, so disable strict
+		 * TCP window tracking just as nf_flow_offload_add() does;
+		 * otherwise 1s P6 renewal and punted FIN/RST fail
+		 * tcp_in_window() and lose reverse-NAT / ct lookup. */
+		if (!(READ_ONCE(ct->proto.tcp.seen[0].flags) &
+		      IP_CT_TCP_FLAG_BE_LIBERAL) ||
+		    !(READ_ONCE(ct->proto.tcp.seen[1].flags) &
+		      IP_CT_TCP_FLAG_BE_LIBERAL)) {
+			spin_lock_bh(&ct->lock);
+			ct->proto.tcp.seen[0].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
+			ct->proto.tcp.seen[1].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
+			spin_unlock_bh(&ct->lock);
+		}
+	}
+	if (ct->status & IPS_NAT_MASK) {
+		const struct nf_conntrack_tuple *ct_orig =
+			&ct->tuplehash[dir].tuple;
+
+		if (ct_orig->src.l3num != post->family ||
+		    ct_orig->dst.protonum != post->proto)
+			goto out_put;
+		if (post->family == AF_INET6) {
+			orig_out->saddr6 = ct_orig->src.u3.in6;
+			orig_out->daddr6 = ct_orig->dst.u3.in6;
+			if (memcmp(&orig_out->saddr6, &post->saddr6, 16)) {
+				nat_out->flags |= WGFP_NAT_SRC_IP;
+				nat_out->saddr6 = post->saddr6;
+			}
+			if (memcmp(&orig_out->daddr6, &post->daddr6, 16)) {
+				nat_out->flags |= WGFP_NAT_DST_IP;
+				nat_out->daddr6 = post->daddr6;
+			}
+		} else {
+			orig_out->saddr = ct_orig->src.u3.ip;
+			orig_out->daddr = ct_orig->dst.u3.ip;
+			if (orig_out->saddr != post->saddr) {
+				nat_out->flags |= WGFP_NAT_SRC_IP;
+				nat_out->saddr = post->saddr;
+			}
+			if (orig_out->daddr != post->daddr) {
+				nat_out->flags |= WGFP_NAT_DST_IP;
+				nat_out->daddr = post->daddr;
+			}
+		}
+		orig_out->sport = ct_orig->src.u.all;
+		orig_out->dport = ct_orig->dst.u.all;
+		if (orig_out->sport != post->sport) {
+			nat_out->flags |= WGFP_NAT_SRC_PORT;
+			nat_out->sport = post->sport;
+		}
+		if (orig_out->dport != post->dport) {
+			nat_out->flags |= WGFP_NAT_DST_PORT;
+			nat_out->dport = post->dport;
+		}
+	}
+	ok = true;
+out_put:
+	if (put)
+		nf_ct_put(ct);
 	return ok;
 #else
 	*orig_out = *post;
@@ -3369,7 +3403,7 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 		fin = th->fin || th->rst;
 	}
 	if (fin) {
-		wgfp_ct_orig_tuple(skb, &post, &t);
+		wgfp_ct_orig_tuple(dev_net(skb->dev), skb, &post, &t);
 	} else {
 		admitted = wgfp_ct_admitted(dev_net(skb->dev), skb, &post, &t, &nat);
 		if (!admitted)

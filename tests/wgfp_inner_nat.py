@@ -9,11 +9,31 @@ pytestmark = pytest.mark.host
 ROOT = Path(__file__).resolve().parents[1]
 FASTPATH = ROOT / "kernel/common/files/drivers/net/wireguard/fastpath.c"
 HARNESS = ROOT / "tests/dut/wgfp_inner_nat.c"
+CT_HARNESS = ROOT / "tests/dut/wgfp_ct_admit.c"
 
 
 def _between(src: str, start: str, end: str) -> str:
     idx = src.index(start)
     return src[idx:src.index(end, idx)]
+
+
+def test_stage_b_ct_admitted_flowtable_fallback(tmp_path):
+    fp = FASTPATH.read_text()
+
+    ct_code = _between(fp, "/* ---- learning ---- */", "\n/* Under wgfp_flows_lock")
+    (tmp_path / "wgfp_ct_admit_body.h").write_text(ct_code)
+
+    binary = tmp_path / "wgfp_ct_admit"
+    subprocess.run(
+        [
+            "cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+            "-Wno-unused-parameter", "-Wno-unused-function",
+            "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+            "-I", str(tmp_path), str(CT_HARNESS), "-o", str(binary),
+        ],
+        check=True,
+    )
+    subprocess.run([str(binary)], check=True)
 
 
 def test_stage_b_inline_nat_checksums_and_bounds(tmp_path):

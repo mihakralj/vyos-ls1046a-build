@@ -14,7 +14,7 @@ die(){ echo "ERROR: $*" >&2; exit "${rc:-1}"; }
 valid(){ printf '%s\n' "$2" | grep -Eq "$1" || rc=2 die "invalid argument '$2'"; }
 family(){ case $1 in *:*) echo -6;; *) echo -4;; esac; }
 link_exists(){ ip -o link show | awk -v n="$1" '{c=$2; sub(/:$/,"",c); sub(/@.*/,"",c); if (c==n) f=1} END{exit !f}'; }
-link_owned(){ ip -o link show | awk -v o="$1" '{for(i=1;i<NF;i++) if($i=="altname" && $(i+1)==o) f=1} END{exit !f}'; }
+link_owned(){ ip -o link show | awk -v o="$1" '{for(i=1;i<NF;i++) if($i=="altname"){v=$(i+1); sub(/\\$/,"",v); if(v==o) f=1}} END{exit !f}'; }
 
 [ "$#" -ge 1 ] || rc=2 die "usage: $0 <operation> ..."
 op=$1; shift
