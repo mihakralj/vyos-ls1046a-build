@@ -30,10 +30,13 @@
 #include <linux/fsl/dpaa_wgfp.h>
 #include <linux/hashtable.h>
 #include <linux/hex.h>
+#include <linux/if_arp.h>
 #include <linux/if_ether.h>
+#include <linux/if_pppox.h>
 #include <linux/if_vlan.h>
 #include <linux/inet.h>
 #include <linux/jhash.h>
+#include <linux/ppp_defs.h>
 #include <linux/tcp.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -100,6 +103,169 @@ static bool wgfp_open_foldable(size_t n)
 	size_t r = n % (5 * CHACHA_BLOCK_SIZE);
 
 	return n > CHACHA_BLOCK_SIZE && r && r <= WGFP_OPEN_HEAD;
+}
+
+#define WGFP_NAT_SRC_IP		(1U << 0)
+#define WGFP_NAT_DST_IP		(1U << 1)
+#define WGFP_NAT_SRC_PORT	(1U << 2)
+#define WGFP_NAT_DST_PORT	(1U << 3)
+
+struct wgfp_nat {
+	u8 flags;		/* WGFP_NAT_*; 0 = no translation */
+	u8 _pad[3];
+	union { __be32 saddr; struct in6_addr saddr6; };
+	union { __be32 daddr; struct in6_addr daddr6; };
+	__be16 sport;
+	__be16 dport;
+};
+
+static inline void wgfp_csum_replace_u16(u8 *csum_p, const void *from_p,
+					 const void *to_p, bool mangle_zero)
+{
+	u16 sum, from, to;
+	u32 s;
+
+	memcpy(&sum, csum_p, 2);
+	memcpy(&from, from_p, 2);
+	memcpy(&to, to_p, 2);
+	s = (u32)(~sum & 0xffff) + (u32)(~from & 0xffff) + (u32)to;
+	s = (s & 0xffff) + (s >> 16);
+	s = (s & 0xffff) + (s >> 16);
+	sum = (u16)(~s & 0xffff);
+	if (mangle_zero && !sum)
+		sum = 0xffff;
+	memcpy(csum_p, &sum, 2);
+}
+
+static inline void wgfp_csum_replace_u32(u8 *csum_p, const void *from_p,
+					 const void *to_p, bool mangle_zero)
+{
+	u16 sum;
+	u32 from, to, s;
+
+	memcpy(&sum, csum_p, 2);
+	memcpy(&from, from_p, 4);
+	memcpy(&to, to_p, 4);
+	s = (u32)(~sum & 0xffff);
+	s += ((~from) >> 16) & 0xffff;
+	s += (~from) & 0xffff;
+	s += (to >> 16) & 0xffff;
+	s += to & 0xffff;
+	s = (s & 0xffff) + (s >> 16);
+	s = (s & 0xffff) + (s >> 16);
+	sum = (u16)(~s & 0xffff);
+	if (mangle_zero && !sum)
+		sum = 0xffff;
+	memcpy(csum_p, &sum, 2);
+}
+
+static inline void wgfp_csum_replace_u128(u8 *csum_p, const void *from_p,
+					  const void *to_p, bool mangle_zero)
+{
+	const u8 *f = from_p, *t = to_p;
+	u16 sum;
+	u32 s;
+	int i;
+
+	memcpy(&sum, csum_p, 2);
+	s = (u32)(~sum & 0xffff);
+	for (i = 0; i < 16; i += 4) {
+		u32 fw, tw;
+
+		memcpy(&fw, f + i, 4);
+		memcpy(&tw, t + i, 4);
+		s += ((~fw) >> 16) & 0xffff;
+		s += (~fw) & 0xffff;
+		s += (tw >> 16) & 0xffff;
+		s += tw & 0xffff;
+	}
+	while (s >> 16)
+		s = (s & 0xffff) + (s >> 16);
+	sum = (u16)(~s & 0xffff);
+	if (mangle_zero && !sum)
+		sum = 0xffff;
+	memcpy(csum_p, &sum, 2);
+}
+
+static inline bool wgfp_nat_len_ok(u32 ip_len, u8 family, u8 proto,
+				   const struct wgfp_nat *nat)
+{
+	u32 hl, l4_min;
+
+	if (!nat || !nat->flags)
+		return true;
+	hl = family == AF_INET ? sizeof(struct iphdr) : sizeof(struct ipv6hdr);
+	if (proto == IPPROTO_TCP)
+		l4_min = 20;	/* sizeof(struct tcphdr) */
+	else if (proto == IPPROTO_UDP)
+		l4_min = 8;	/* sizeof(struct udphdr) */
+	else
+		return false;
+	return ip_len >= hl + l4_min;
+}
+
+/* Apply NAT44/NAT66 rewrite in-place to a writable inner IP packet at @l3
+ * (caller has already verified wgfp_nat_len_ok()). */
+static void wgfp_apply_nat(u8 *l3, u32 ip_len, u8 family, u8 proto,
+			   const struct wgfp_nat *nat)
+{
+	bool is_udp = proto == IPPROTO_UDP;
+	u32 hl = family == AF_INET ? sizeof(struct iphdr) : sizeof(struct ipv6hdr);
+	u8 *l4 = l3 + hl;
+	u8 *l4_csum = l4 + (is_udp ? 6 : 16);
+	bool update_l4 = true;
+
+	if (!nat || !nat->flags || !wgfp_nat_len_ok(ip_len, family, proto, nat))
+		return;
+	if (is_udp) {
+		u16 cur;
+
+		memcpy(&cur, l4_csum, 2);
+		if (!cur)
+			update_l4 = false;	/* RFC 768 / RFC 6935: UDP 0 = no checksum */
+	}
+	if (family == AF_INET) {
+		u8 *ip_csum = l3 + 10;	/* offsetof(struct iphdr, check) */
+		u8 *saddr_p = l3 + 12;	/* offsetof(struct iphdr, saddr) */
+		u8 *daddr_p = l3 + 16;	/* offsetof(struct iphdr, daddr) */
+
+		if (nat->flags & WGFP_NAT_SRC_IP) {
+			wgfp_csum_replace_u32(ip_csum, saddr_p, &nat->saddr, false);
+			if (update_l4)
+				wgfp_csum_replace_u32(l4_csum, saddr_p, &nat->saddr, is_udp);
+			memcpy(saddr_p, &nat->saddr, 4);
+		}
+		if (nat->flags & WGFP_NAT_DST_IP) {
+			wgfp_csum_replace_u32(ip_csum, daddr_p, &nat->daddr, false);
+			if (update_l4)
+				wgfp_csum_replace_u32(l4_csum, daddr_p, &nat->daddr, is_udp);
+			memcpy(daddr_p, &nat->daddr, 4);
+		}
+	} else {
+		u8 *saddr6_p = l3 + 8;	/* offsetof(struct ipv6hdr, saddr) */
+		u8 *daddr6_p = l3 + 24;	/* offsetof(struct ipv6hdr, daddr) */
+
+		if (nat->flags & WGFP_NAT_SRC_IP) {
+			if (update_l4)
+				wgfp_csum_replace_u128(l4_csum, saddr6_p, &nat->saddr6, is_udp);
+			memcpy(saddr6_p, &nat->saddr6, 16);
+		}
+		if (nat->flags & WGFP_NAT_DST_IP) {
+			if (update_l4)
+				wgfp_csum_replace_u128(l4_csum, daddr6_p, &nat->daddr6, is_udp);
+			memcpy(daddr6_p, &nat->daddr6, 16);
+		}
+	}
+	if (nat->flags & WGFP_NAT_SRC_PORT) {
+		if (update_l4)
+			wgfp_csum_replace_u16(l4_csum, l4, &nat->sport, is_udp);
+		memcpy(l4, &nat->sport, 2);
+	}
+	if (nat->flags & WGFP_NAT_DST_PORT) {
+		if (update_l4)
+			wgfp_csum_replace_u16(l4_csum, l4 + 2, &nat->dport, is_udp);
+		memcpy(l4 + 2, &nat->dport, 2);
+	}
 }
 
 /*
@@ -230,10 +396,11 @@ static void wgfp_mac(const u8 key[POLY1305_KEY_SIZE], const u8 *m,
  * NEON section.  When @scratch_b0 is true, caller guarantees 64 writable
  * scratch bytes immediately before @dst (which will be overwritten by the outer
  * header), eliminating the 256-byte stack copy-back and 320-byte stack wipe. */
-static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
-			      u8 family, bool scratch_b0, u64 nonce,
-			      const u8 key[CHACHA20POLY1305_KEY_SIZE],
-			      unsigned int neon_min)
+static void wgfp_seal_one_dst_nat(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
+				  u8 family, bool scratch_b0, u64 nonce,
+				  const u8 key[CHACHA20POLY1305_KEY_SIZE],
+				  unsigned int neon_min,
+				  const struct wgfp_nat *nat)
 {
 	bool neon = plain > neon_min && crypto_simd_usable();
 	u8 head_buf[5 * CHACHA_BLOCK_SIZE];
@@ -252,10 +419,21 @@ static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 		if (head > copy_head)
 			memset(head_buf + CHACHA_BLOCK_SIZE + copy_head, 0,
 			       head - copy_head);
-		if (family == AF_INET && copy_head >= sizeof(struct iphdr))
+		if (family == AF_INET && copy_head >= sizeof(struct iphdr)) {
 			ip_decrease_ttl((struct iphdr *)(head_buf + CHACHA_BLOCK_SIZE));
-		else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr))
+			if (unlikely(nat && nat->flags))
+				wgfp_apply_nat(head_buf + CHACHA_BLOCK_SIZE,
+					       copy_head, AF_INET,
+					       ((const struct iphdr *)(head_buf + CHACHA_BLOCK_SIZE))->protocol,
+					       nat);
+		} else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr)) {
 			((struct ipv6hdr *)(head_buf + CHACHA_BLOCK_SIZE))->hop_limit--;
+			if (unlikely(nat && nat->flags))
+				wgfp_apply_nat(head_buf + CHACHA_BLOCK_SIZE,
+					       copy_head, AF_INET6,
+					       ((const struct ipv6hdr *)(head_buf + CHACHA_BLOCK_SIZE))->nexthdr,
+					       nat);
+		}
 
 		chacha_block_generic(&st, head_buf, 20);
 		wgfp_chacha_gen(&st, dst, head_buf + CHACHA_BLOCK_SIZE, head);
@@ -309,10 +487,19 @@ static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 			memcpy(dst, src, copy_head);
 			if (head > copy_head)
 				memset(dst + copy_head, 0, head - copy_head);
-			if (family == AF_INET && copy_head >= sizeof(struct iphdr))
+			if (family == AF_INET && copy_head >= sizeof(struct iphdr)) {
 				ip_decrease_ttl((struct iphdr *)dst);
-			else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr))
+				if (unlikely(nat && nat->flags))
+					wgfp_apply_nat(dst, copy_head, AF_INET,
+						       ((const struct iphdr *)dst)->protocol,
+						       nat);
+			} else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr)) {
 				((struct ipv6hdr *)dst)->hop_limit--;
+				if (unlikely(nat && nat->flags))
+					wgfp_apply_nat(dst, copy_head, AF_INET6,
+						       ((const struct ipv6hdr *)dst)->nexthdr,
+						       nat);
+			}
 
 			kernel_neon_begin();
 			wgfp_chacha_neon(&st, b0, b0, CHACHA_BLOCK_SIZE + head);
@@ -324,10 +511,21 @@ static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 			if (head > copy_head)
 				memset(head_buf + CHACHA_BLOCK_SIZE + copy_head, 0,
 				       head - copy_head);
-			if (family == AF_INET && copy_head >= sizeof(struct iphdr))
+			if (family == AF_INET && copy_head >= sizeof(struct iphdr)) {
 				ip_decrease_ttl((struct iphdr *)(head_buf + CHACHA_BLOCK_SIZE));
-			else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr))
+				if (unlikely(nat && nat->flags))
+					wgfp_apply_nat(head_buf + CHACHA_BLOCK_SIZE,
+						       copy_head, AF_INET,
+						       ((const struct iphdr *)(head_buf + CHACHA_BLOCK_SIZE))->protocol,
+						       nat);
+			} else if (family == AF_INET6 && copy_head >= sizeof(struct ipv6hdr)) {
 				((struct ipv6hdr *)(head_buf + CHACHA_BLOCK_SIZE))->hop_limit--;
+				if (unlikely(nat && nat->flags))
+					wgfp_apply_nat(head_buf + CHACHA_BLOCK_SIZE,
+						       copy_head, AF_INET6,
+						       ((const struct ipv6hdr *)(head_buf + CHACHA_BLOCK_SIZE))->nexthdr,
+						       nat);
+			}
 
 			kernel_neon_begin();
 			wgfp_chacha_neon(&st, head_buf, head_buf,
@@ -377,6 +575,15 @@ static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 		if (unlikely(tail_wipe))
 			memzero_explicit(head_buf + CHACHA_BLOCK_SIZE, tail_wipe);
 	}
+}
+
+static void wgfp_seal_one_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
+			      u8 family, bool scratch_b0, u64 nonce,
+			      const u8 key[CHACHA20POLY1305_KEY_SIZE],
+			      unsigned int neon_min)
+{
+	wgfp_seal_one_dst_nat(dst, src, ip_len, plain, family, scratch_b0,
+			      nonce, key, neon_min, NULL);
 }
 
 /* @n plaintext bytes from @src into @dst (may equal @src), tag at src + n;
@@ -625,10 +832,11 @@ static int wgfp_seal_selftest(void)
 }
 
 /* Out-of-place seal from read-only @src (@ip_len bytes) into @dst (@plain + 16
- * bytes), with optional inner IPv4 TTL or IPv6 hop_limit decrement. */
+ * bytes), with optional inner IPv4 TTL or IPv6 hop_limit decrement and NAT. */
 static void wgfp_seal_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 			  u8 family, u32 room, u64 nonce,
-			  const u8 key[CHACHA20POLY1305_KEY_SIZE])
+			  const u8 key[CHACHA20POLY1305_KEY_SIZE],
+			  const struct wgfp_nat *nat)
 {
 	int fold = READ_ONCE(wgfp_seal_fold);
 
@@ -636,17 +844,26 @@ static void wgfp_seal_dst(u8 *dst, const u8 *src, u32 ip_len, u32 plain,
 		fold = wgfp_seal_selftest();
 #ifdef WGFP_ONE_NEON
 	if (likely(fold == 2)) {
-		wgfp_seal_one_dst(dst, src, ip_len, plain, family,
-				  room >= CHACHA_BLOCK_SIZE, nonce, key,
-				  READ_ONCE(wgfp_neon_min));
+		wgfp_seal_one_dst_nat(dst, src, ip_len, plain, family,
+				      room >= CHACHA_BLOCK_SIZE, nonce, key,
+				      READ_ONCE(wgfp_neon_min), nat);
 		return;
 	}
 #endif
 	memcpy(dst, src, ip_len);
-	if (family == AF_INET && ip_len >= sizeof(struct iphdr))
+	if (family == AF_INET && ip_len >= sizeof(struct iphdr)) {
 		ip_decrease_ttl((struct iphdr *)dst);
-	else if (family == AF_INET6 && ip_len >= sizeof(struct ipv6hdr))
+		if (unlikely(nat && nat->flags))
+			wgfp_apply_nat(dst, ip_len, AF_INET,
+				       ((const struct iphdr *)dst)->protocol,
+				       nat);
+	} else if (family == AF_INET6 && ip_len >= sizeof(struct ipv6hdr)) {
 		((struct ipv6hdr *)dst)->hop_limit--;
+		if (unlikely(nat && nat->flags))
+			wgfp_apply_nat(dst, ip_len, AF_INET6,
+				       ((const struct ipv6hdr *)dst)->nexthdr,
+				       nat);
+	}
 	if (plain > ip_len)
 		memset(dst + ip_len, 0, plain - ip_len);
 	if (fold > 0 && likely(room >= CHACHA_BLOCK_SIZE))
@@ -847,7 +1064,7 @@ static int wgfp_lab_frame(void *priv, struct dpaa_wgfp_frame *f)
 
 		ctr = (u64)atomic64_inc_return(&l->counter) - 1;
 		wgfp_seal_dst(dst, inner, ip_len, plain, 0, CHACHA_BLOCK_SIZE,
-			      ctr, l->key);
+			      ctr, l->key, NULL);
 
 		memcpy(hdr, l->tmpl, sizeof(l->tmpl));
 
@@ -1023,13 +1240,20 @@ MODULE_PARM_DESC(wgfp_lab, "DPAA fast path lab seal (P2a): see fastpath.c; \"off
 #define WGFP_OWNER_ALIAS_MAX	63
 #define WGFP_OWNER_ALIASES_SIZE	(WGFP_MAX_BIND * (WGFP_OWNER_ALIAS_MAX + 1))
 
+#define WGFP_PPPOE_HLEN		8	/* 6-byte PPPoE header + 2-byte PPP protocol */
+#define WGFP_MAX_L2_HLEN	(ETH_HLEN + VLAN_HLEN + WGFP_PPPOE_HLEN)
+
 struct wgfp_tmpl {
 	struct rcu_head rcu;
-	int egress;		/* dpaa_wgfp_egress() handle */
-	int ifindex;		/* that port */
+	int egress;		/* dpaa_wgfp_egress() handle (physical DPAA port) */
+	int ifindex;		/* physical DPAA port ifindex */
+	int route_ifindex;	/* logical route device ifindex (port, vif or ppp) */
+	u32 mtu;		/* outer route MTU */
 	u8 family;		/* outer: AF_INET or AF_INET6 */
-	u8 hlen;		/* Ethernet + IP + UDP */
-	u8 hdr[ETH_HLEN + sizeof(struct ipv6hdr) + sizeof(struct udphdr)];
+	u8 l2_hlen;		/* Ethernet (+ optional 802.1Q + optional PPPoE/PPP) */
+	u8 pppoe_off;		/* offset of PPPoE header in hdr[], 0 if none */
+	u8 hlen;		/* l2_hlen + IP + UDP */
+	u8 hdr[WGFP_MAX_L2_HLEN + sizeof(struct ipv6hdr) + sizeof(struct udphdr)];
 };
 
 struct wgfp_binds {
@@ -1135,7 +1359,9 @@ module_param(wgfp_rx, bool, 0600);
 MODULE_PARM_DESC(wgfp_rx, "P3 receive offload for tuples observed on the stack");
 static void wgfp_pst_rx_sync(struct wgfp_pst *pst);
 static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
-			     const struct dpaa_wgfp_tuple *t, bool *absent);
+			     const struct dpaa_wgfp_tuple *t,
+			     struct dpaa_wgfp_tuple *orig_out,
+			     struct wgfp_nat *nat_out);
 
 static char wgfp_peer_cfg[WGFP_MAX_BIND * (IFNAMSIZ + 1) + 8] = "off";
 static char wgfp_owner_aliases[WGFP_OWNER_ALIASES_SIZE];
@@ -1144,8 +1370,140 @@ static atomic64_t wgfp_declined, wgfp_rekeys, wgfp_punted;
 static DEFINE_PER_CPU(atomic64_t, wgfp_rx_frames);
 static DEFINE_PER_CPU(atomic64_t, wgfp_rx_stack);
 
-/* Resolve @dst's neighbour on @dev into @t's Ethernet header; false (and an
- * ARP/ND probe) while it is not valid. */
+struct wgfp_l2_path {
+	int phys_ifindex;
+	u8 peer_mac[ETH_ALEN];
+	u8 src_mac[ETH_ALEN];
+	u16 vlan_vid;
+	u16 pppoe_sid;
+	bool has_vlan;
+	bool has_pppoe;
+};
+
+/* Resolve a logical outer egress/ingress device (physical DPAA port, single
+ * 802.1Q VLAN vif, PPPoE session, or PPPoE-over-802.1Q) to its physical
+ * Ethernet device ifindex and L2 encapsulation parameters.  Caller holds RCU. */
+static bool wgfp_resolve_l2_path(struct net_device *dev,
+				 struct wgfp_l2_path *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (!dev || !netif_running(dev))
+		return false;
+	if (dev->type == ARPHRD_PPP) {
+		struct net_device_path_stack stack;
+		u8 zero[ETH_ALEN] = {};
+		bool seen_pppoe = false, seen_vlan = false, seen_eth = false;
+		int i;
+
+		if (dev_fill_forward_path(dev, zero, &stack) < 0)
+			return false;
+		for (i = 0; i < stack.num_paths; i++) {
+			const struct net_device_path *path = &stack.path[i];
+
+			if (!path->dev)
+				return false;
+			if (is_zero_ether_addr(out->src_mac))
+				ether_addr_copy(out->src_mac, path->dev->dev_addr);
+			switch (path->type) {
+			case DEV_PATH_PPPOE:
+				if (i != 0 || seen_pppoe || path->dev != dev ||
+				    path->encap.proto != htons(ETH_P_PPP_SES) ||
+				    !path->encap.id ||
+				    !is_valid_ether_addr(path->encap.h_dest))
+					return false;
+				ether_addr_copy(out->peer_mac, path->encap.h_dest);
+				out->pppoe_sid = path->encap.id;
+				out->has_pppoe = true;
+				seen_pppoe = true;
+				break;
+			case DEV_PATH_VLAN:
+				if (!seen_pppoe || seen_vlan ||
+				    path->encap.proto != htons(ETH_P_8021Q) ||
+				    !path->encap.id ||
+				    path->encap.id > VLAN_VID_MASK ||
+				    !netif_running(path->dev) ||
+				    !net_eq(dev_net(path->dev), dev_net(dev)))
+					return false;
+				out->vlan_vid = path->encap.id;
+				out->has_vlan = true;
+				seen_vlan = true;
+				break;
+			case DEV_PATH_ETHERNET:
+				if (seen_eth || i != stack.num_paths - 1 ||
+				    path->dev->type != ARPHRD_ETHER ||
+				    !netif_running(path->dev) ||
+				    !net_eq(dev_net(path->dev), dev_net(dev)))
+					return false;
+				out->phys_ifindex = path->dev->ifindex;
+				seen_eth = true;
+				break;
+			default:
+				return false;
+			}
+		}
+		return seen_pppoe && seen_eth && out->phys_ifindex > 0 &&
+		       is_valid_ether_addr(out->src_mac);
+	}
+	if (is_vlan_dev(dev)) {
+		struct net_device *real;
+		u16 vid;
+
+		if (vlan_dev_vlan_proto(dev) != htons(ETH_P_8021Q))
+			return false;
+		vid = vlan_dev_vlan_id(dev);
+		if (!vid || vid > VLAN_VID_MASK)
+			return false;
+		real = vlan_dev_real_dev(dev);
+		if (!real || is_vlan_dev(real) || real->type != ARPHRD_ETHER ||
+		    !netif_running(real) ||
+		    !net_eq(dev_net(real), dev_net(dev)))
+			return false;
+		out->phys_ifindex = real->ifindex;
+		ether_addr_copy(out->src_mac, dev->dev_addr);
+		out->vlan_vid = vid;
+		out->has_vlan = true;
+		return true;
+	}
+	if (dev->type != ARPHRD_ETHER)
+		return false;
+	out->phys_ifindex = dev->ifindex;
+	ether_addr_copy(out->src_mac, dev->dev_addr);
+	return true;
+}
+
+static void wgfp_tmpl_build_l2(struct wgfp_tmpl *t,
+			       const struct wgfp_l2_path *p,
+			       const u8 *dst_mac, __be16 l3_proto)
+{
+	u8 *pos = t->hdr;
+
+	ether_addr_copy(pos, dst_mac);
+	ether_addr_copy(pos + ETH_ALEN, p->src_mac);
+	pos += 2 * ETH_ALEN;
+	if (p->has_vlan) {
+		put_unaligned_be16(ETH_P_8021Q, pos);
+		put_unaligned_be16(p->vlan_vid & VLAN_VID_MASK, pos + 2);
+		pos += VLAN_HLEN;
+	}
+	if (p->has_pppoe) {
+		put_unaligned_be16(ETH_P_PPP_SES, pos);
+		pos += 2;
+		t->pppoe_off = pos - t->hdr;
+		pos[0] = 0x11;	/* PPPoE version 1, type 1 */
+		pos[1] = 0x00;	/* code = session data */
+		put_unaligned_be16(p->pppoe_sid, pos + 2);
+		put_unaligned_be16(0, pos + 4);	/* filled per packet */
+		put_unaligned_be16(l3_proto == htons(ETH_P_IPV6) ?
+				   PPP_IPV6 : PPP_IP, pos + 6);
+		pos += WGFP_PPPOE_HLEN;
+	} else {
+		memcpy(pos, &l3_proto, sizeof(l3_proto));
+		pos += 2;
+		t->pppoe_off = 0;
+	}
+	t->l2_hlen = pos - t->hdr;
+}
+
 static bool wgfp_tmpl_l2(struct wgfp_tmpl *t, struct net_device *dev,
 			 struct neigh_table *tbl, const void *nh, __be16 proto)
 {
@@ -1171,6 +1529,43 @@ static bool wgfp_tmpl_l2(struct wgfp_tmpl *t, struct net_device *dev,
 	ether_addr_copy(eth->h_source, dev->dev_addr);
 	eth->h_proto = proto;
 	t->ifindex = dev->ifindex;
+	t->l2_hlen = ETH_HLEN;
+	t->pppoe_off = 0;
+	return true;
+}
+
+static bool wgfp_tmpl_l2_path(struct wgfp_tmpl *t, struct net_device *dev,
+			      const struct wgfp_l2_path *p,
+			      struct neigh_table *tbl, const void *nh,
+			      __be16 proto)
+{
+	u8 dst_mac[ETH_ALEN];
+
+	if (p->has_pppoe) {
+		ether_addr_copy(dst_mac, p->peer_mac);
+	} else {
+		struct neighbour *n;
+
+		n = tbl == &arp_tbl ? __ipv4_neigh_lookup(dev, *(const u32 *)nh) :
+		    __ipv6_neigh_lookup(dev, nh);
+		if (!n || !(n->nud_state & NUD_VALID)) {
+			if (!n) {
+				n = __neigh_create(tbl, nh, dev, true);
+				if (IS_ERR(n))
+					return false;
+				neigh_event_send(n, NULL);
+			}
+			neigh_release(n);
+			return false;
+		}
+		read_lock_bh(&n->lock);
+		ether_addr_copy(dst_mac, n->ha);
+		read_unlock_bh(&n->lock);
+		neigh_release(n);
+	}
+	wgfp_tmpl_build_l2(t, p, dst_mac, proto);
+	t->ifindex = p->phys_ifindex;
+	t->route_ifindex = dev->ifindex;
 	return true;
 }
 
@@ -1184,30 +1579,43 @@ static struct wgfp_tmpl *wgfp_tmpl4(struct wgfp_pst *pst, const struct endpoint 
 		.flowi4_mark = wg->fwmark,
 		.flowi4_proto = IPPROTO_UDP,
 	};
-	struct wgfp_tmpl *t;
+	struct wgfp_l2_path path;
+	struct net_device *phys_dev = NULL;
+	struct wgfp_tmpl *t = NULL;
 	struct rtable *rt;
 	struct iphdr *ip;
 	struct udphdr *udp;
+	bool resolved;
 	__be32 nh;
 
 	rt = ip_route_output_key(dev_net(pst->wgdev), &fl);
 	if (IS_ERR(rt))
 		return NULL;
+	rcu_read_lock();
+	resolved = wgfp_resolve_l2_path(rt->dst.dev, &path);
+	rcu_read_unlock();
+	if (!resolved)
+		goto out;
+	phys_dev = dev_get_by_index(dev_net(pst->wgdev), path.phys_ifindex);
+	if (!phys_dev)
+		goto out;
 	t = kzalloc(sizeof(*t), GFP_KERNEL);
 	if (!t)
-		goto out;
-	t->egress = dpaa_wgfp_egress(rt->dst.dev);	/* < 0: not a DPAA port */
+		goto out_put;
+	t->egress = dpaa_wgfp_egress(phys_dev);	/* < 0: not a DPAA port */
 	nh = rt_nexthop(rt, fl.daddr);
-	/* outer family policy: the port under the tunnel */
-	if (t->egress < 0 || !dpaa_wgfp_family_ok(rt->dst.dev, AF_INET) ||
-	    !wgfp_tmpl_l2(t, rt->dst.dev, &arp_tbl, &nh, htons(ETH_P_IP))) {
+	/* outer family policy: the physical port under the tunnel */
+	if (t->egress < 0 || !dpaa_wgfp_family_ok(phys_dev, AF_INET) ||
+	    !wgfp_tmpl_l2_path(t, rt->dst.dev, &path, &arp_tbl, &nh,
+			       htons(ETH_P_IP))) {
 		kfree(t);
 		t = NULL;
-		goto out;
+		goto out_put;
 	}
 	t->family = AF_INET;
-	t->hlen = ETH_HLEN + sizeof(*ip) + sizeof(*udp);
-	ip = (struct iphdr *)(t->hdr + ETH_HLEN);
+	t->mtu = dst_mtu(&rt->dst);
+	t->hlen = t->l2_hlen + sizeof(*ip) + sizeof(*udp);
+	ip = (struct iphdr *)(t->hdr + t->l2_hlen);
 	ip->version = 4;
 	ip->ihl = 5;
 	ip->frag_off = htons(IP_DF);
@@ -1218,6 +1626,8 @@ static struct wgfp_tmpl *wgfp_tmpl4(struct wgfp_pst *pst, const struct endpoint 
 	udp = (struct udphdr *)(ip + 1);
 	udp->source = htons(wg->incoming_port);
 	udp->dest = fl.fl4_dport;
+out_put:
+	dev_put(phys_dev);
 out:
 	ip_rt_put(rt);
 	return t;
@@ -1239,11 +1649,14 @@ static struct wgfp_tmpl *wgfp_tmpl6(struct wgfp_pst *pst, const struct endpoint 
 		.flowi6_oif = ep->addr6.sin6_scope_id,
 		.flowi6_proto = IPPROTO_UDP,
 	};
+	struct wgfp_l2_path path;
+	struct net_device *phys_dev = NULL;
 	const struct in6_addr *nh;
 	struct wgfp_tmpl *t = NULL;
 	struct dst_entry *dst;
 	struct ipv6hdr *ip6;
 	struct udphdr *udp;
+	bool resolved;
 
 	dst = ip6_route_output(net, NULL, &fl);
 	if (dst->error)
@@ -1251,20 +1664,30 @@ static struct wgfp_tmpl *wgfp_tmpl6(struct wgfp_pst *pst, const struct endpoint 
 	if (ipv6_addr_any(&fl.saddr) &&
 	    ipv6_dev_get_saddr(net, dst->dev, &fl.daddr, 0, &fl.saddr))
 		goto out;
+	rcu_read_lock();
+	resolved = wgfp_resolve_l2_path(dst->dev, &path);
+	rcu_read_unlock();
+	if (!resolved)
+		goto out;
+	phys_dev = dev_get_by_index(net, path.phys_ifindex);
+	if (!phys_dev)
+		goto out;
 	t = kzalloc(sizeof(*t), GFP_KERNEL);
 	if (!t)
-		goto out;
-	t->egress = dpaa_wgfp_egress(dst->dev);
+		goto out_put;
+	t->egress = dpaa_wgfp_egress(phys_dev);
 	nh = rt6_nexthop(dst_rt6_info(dst), &fl.daddr);
-	if (t->egress < 0 || !dpaa_wgfp_family_ok(dst->dev, AF_INET6) ||
-	    !wgfp_tmpl_l2(t, dst->dev, &nd_tbl, nh, htons(ETH_P_IPV6))) {
+	if (t->egress < 0 || !dpaa_wgfp_family_ok(phys_dev, AF_INET6) ||
+	    !wgfp_tmpl_l2_path(t, dst->dev, &path, &nd_tbl, nh,
+			       htons(ETH_P_IPV6))) {
 		kfree(t);
 		t = NULL;
-		goto out;
+		goto out_put;
 	}
 	t->family = AF_INET6;
-	t->hlen = ETH_HLEN + sizeof(*ip6) + sizeof(*udp);
-	ip6 = (struct ipv6hdr *)(t->hdr + ETH_HLEN);
+	t->mtu = dst_mtu(dst);
+	t->hlen = t->l2_hlen + sizeof(*ip6) + sizeof(*udp);
+	ip6 = (struct ipv6hdr *)(t->hdr + t->l2_hlen);
 	ip6->version = 6;
 	ip6->nexthdr = IPPROTO_UDP;
 	ip6->hop_limit = ip6_dst_hoplimit(dst);
@@ -1273,6 +1696,8 @@ static struct wgfp_tmpl *wgfp_tmpl6(struct wgfp_pst *pst, const struct endpoint 
 	udp = (struct udphdr *)(ip6 + 1);
 	udp->source = fl.fl6_sport;
 	udp->dest = fl.fl6_dport;
+out_put:
+	dev_put(phys_dev);
 out:
 	dst_release(dst);
 	return t;
@@ -1329,9 +1754,11 @@ struct wgfp_flow {
 	struct hlist_node node;
 	struct rcu_head rcu;
 	struct dpaa_wgfp_tuple t;
+	struct wgfp_nat nat;
 	struct wgfp_pst *pst;
 	int ifindex;
 	u32 hash;
+	u8 dst_mac[ETH_ALEN];	/* P3/P6 expected outer DMAC (port or VLAN MAC) */
 	u8 state;
 	bool del;
 	bool gone;		/* unhashed, waiting for its grace period */
@@ -1410,6 +1837,64 @@ static bool wgfp_parse(const u8 *l3, __be16 eth_proto, u32 avail, u32 total,
 	}
 	t->sport = ports[0];
 	t->dport = ports[1];
+	return true;
+}
+
+static bool wgfp_parse_l2(const u8 *data, u32 len, u32 *l3_off,
+			  u32 *l3_avail, __be16 *l3_proto, __be16 *vlan_vid,
+			  __be16 *pppoe_sid)
+{
+	__be16 proto;
+	u32 off = ETH_HLEN;
+	u32 avail;
+
+	if (len < ETH_HLEN)
+		return false;
+	*vlan_vid = 0;
+	*pppoe_sid = 0;
+	proto = ((const struct ethhdr *)data)->h_proto;
+	if (proto == htons(ETH_P_8021Q)) {
+		__be16 tci;
+
+		if (len < off + VLAN_HLEN)
+			return false;
+		tci = get_unaligned((const __be16 *)(data + off));
+		*vlan_vid = tci & htons(VLAN_VID_MASK);
+		if (!*vlan_vid)
+			return false;
+		proto = get_unaligned((const __be16 *)(data + off + 2));
+		off += VLAN_HLEN;
+	}
+	if (proto == htons(ETH_P_PPP_SES)) {
+		__be16 sid, ppp_proto;
+		u16 plen;
+
+		if (len < off + WGFP_PPPOE_HLEN)
+			return false;
+		if (data[off] != 0x11 || data[off + 1] != 0x00)
+			return false;
+		sid = get_unaligned((const __be16 *)(data + off + 2));
+		plen = ntohs(get_unaligned((const __be16 *)(data + off + 4)));
+		ppp_proto = get_unaligned((const __be16 *)(data + off + 6));
+		if (!sid || plen < 2 || off + 6 + plen > len)
+			return false;
+		if (ppp_proto == htons(PPP_IP))
+			proto = htons(ETH_P_IP);
+		else if (ppp_proto == htons(PPP_IPV6))
+			proto = htons(ETH_P_IPV6);
+		else
+			return false;
+		*pppoe_sid = sid;
+		off += WGFP_PPPOE_HLEN;
+		avail = plen - 2;
+	} else {
+		avail = len - off;
+	}
+	if (proto != htons(ETH_P_IP) && proto != htons(ETH_P_IPV6))
+		return false;
+	*l3_off = off;
+	*l3_avail = avail;
+	*l3_proto = proto;
 	return true;
 }
 
@@ -1539,7 +2024,8 @@ static atomic64_t wgfp_p6_punt, wgfp_p6_replay, wgfp_p6_auth, wgfp_p6_err,
 struct wgfp_rflow {
 	struct hlist_node node;		/* wgfp_rflows, writers under wgfp_flows_lock */
 	struct rcu_head rcu;
-	struct dpaa_wgfp_tuple t;	/* inner flow */
+	struct dpaa_wgfp_tuple t;	/* pre-NAT inner flow (as decrypted by WG) */
+	struct wgfp_nat nat;		/* inner NAT rewrite to apply before TX */
 	int wg_ifindex;			/* the wg device it arrives on */
 	u64 peer_id;			/* wg_peer.internal_id owning the source */
 	u32 mtu;			/* egress route MTU */
@@ -1601,7 +2087,8 @@ static unsigned int wgfp_rflow_hook(void *priv, struct sk_buff *skb,
 {
 	struct wgfp_binds *bs = rcu_dereference(wgfp_bs);
 	struct net_device *out = state->out, *wgdev = NULL;
-	struct dpaa_wgfp_tuple t = {};
+	struct dpaa_wgfp_tuple t = {}, orig = {};
+	struct wgfp_nat nat = {};
 	struct dst_entry *dst = skb_dst(skb);
 	struct wgfp_rflow *r, *old;
 	struct wg_peer *peer;
@@ -1637,8 +2124,13 @@ static unsigned int wgfp_rflow_hook(void *priv, struct sk_buff *skb,
 	    (min_t(u32, sizeof(hb), total) < hl + 14 ||
 	     (l3[hl + 13] & (TCPHDR_FIN | TCPHDR_RST | TCPHDR_SYN))))
 		return NF_ACCEPT;
-	hash = wgfp_tuple_hash(&t);
-	r = wgfp_rflow_lookup(&t, wgdev->ifindex, hash);
+	if (!wgfp_ct_admitted(state->net, skb, &t, &orig, &nat))
+		return NF_ACCEPT;
+	/* Keep AllowedIPs src check exact on skb: decline egress-side SNAT */
+	if (nat.flags & WGFP_NAT_SRC_IP)
+		return NF_ACCEPT;
+	hash = wgfp_tuple_hash(&orig);
+	r = wgfp_rflow_lookup(&orig, wgdev->ifindex, hash);
 	if (r && time_before(jiffies, READ_ONCE(r->expires)))
 		return NF_ACCEPT;
 	/* ponytail: a VLAN egress takes the stack hand-off; direct transmit
@@ -1654,8 +2146,6 @@ static unsigned int wgfp_rflow_hook(void *priv, struct sk_buff *skb,
 		}
 		return NF_ACCEPT;
 	}
-	if (!wgfp_ct_admitted(state->net, skb, &t, NULL))
-		return NF_ACCEPT;
 	/* the inner source must belong to a peer of this device */
 	peer = wg_allowedips_lookup_src(&((struct wg_device *)netdev_priv(wgdev))->peer_allowedips,
 					skb);
@@ -1683,7 +2173,8 @@ static unsigned int wgfp_rflow_hook(void *priv, struct sk_buff *skb,
 		kfree(r);
 		return NF_ACCEPT;
 	}
-	r->t = t;
+	r->t = orig;
+	r->nat = nat;
 	r->wg_ifindex = wgdev->ifindex;
 	r->mtu = dst_mtu(dst);
 	r->expires = jiffies + WGFP_RFLOW_LIFE;
@@ -1695,7 +2186,7 @@ static unsigned int wgfp_rflow_hook(void *priv, struct sk_buff *skb,
 	if (unlikely(atomic_read(&wgfp_quiesce_active))) {
 		kfree(r);
 		r = NULL;
-	} else if ((old = wgfp_rflow_lookup(&t, wgdev->ifindex, hash))) {
+	} else if ((old = wgfp_rflow_lookup(&orig, wgdev->ifindex, hash))) {
 		hlist_replace_rcu(&old->node, &r->node);
 		kfree_rcu(old, rcu);
 	} else if (wgfp_nrflows < WGFP_RFLOW_MAX) {
@@ -1786,7 +2277,8 @@ bool wg_fastpath_rx_tail(struct wg_peer *peer, struct sk_buff *skb)
 	rcu_read_lock();
 	r = wgfp_rflow_lookup(&t, peer->device->dev->ifindex, wgfp_tuple_hash(&t));
 	if (!r || time_after(jiffies, READ_ONCE(r->expires)) ||
-	    r->peer_id != peer->internal_id || skb->len > r->mtu)
+	    r->peer_id != peer->internal_id || skb->len > r->mtu ||
+	    r->nat.flags)
 		goto out;
 	eg = dev_get_by_index_rcu(&init_net, r->l2.ifindex);
 	if (!eg || !(eg->flags & IFF_UP) ||
@@ -1877,7 +2369,8 @@ static bool wgfp_rx_forward(struct sk_buff *skb,
 		return false;
 	r = wgfp_rflow_lookup(&t, pst->wgdev->ifindex, wgfp_tuple_hash(&t));
 	if (!r || time_after(jiffies, READ_ONCE(r->expires)) ||
-	    r->peer_id != pst->peer->internal_id || len > r->mtu)
+	    r->peer_id != pst->peer->internal_id || len > r->mtu ||
+	    !wgfp_nat_len_ok(len, t.family, t.proto, &r->nat))
 		return false;
 	if (t.family == AF_INET) {
 		const struct iphdr *iph = (const struct iphdr *)pt;
@@ -1902,6 +2395,8 @@ static bool wgfp_rx_forward(struct sk_buff *skb,
 			ip_decrease_ttl((struct iphdr *)pt);
 		else
 			((struct ipv6hdr *)pt)->hop_limit--;
+		if (unlikely(r->nat.flags))
+			wgfp_apply_nat(pt, len, t.family, t.proto, &r->nat);
 		memcpy((u8 *)tx->buf + DPAA_WGFP_TX_HEADROOM, r->l2.hdr, ETH_HLEN);
 		wgfp_rx_stats(pst, msg_len);
 		dpaa_wgfp_stat_inc(&wgfp_p6_fwd);
@@ -1921,6 +2416,8 @@ static bool wgfp_rx_forward(struct sk_buff *skb,
 			ip_decrease_ttl((struct iphdr *)dst);
 		else
 			((struct ipv6hdr *)dst)->hop_limit--;
+		if (unlikely(r->nat.flags))
+			wgfp_apply_nat(dst, len, t.family, t.proto, &r->nat);
 		if (tx)
 			dpaa_wgfp_tx_cancel(tx);
 		else
@@ -1937,6 +2434,8 @@ static bool wgfp_rx_forward(struct sk_buff *skb,
 		ip_decrease_ttl((struct iphdr *)pt);
 	else
 		((struct ipv6hdr *)pt)->hop_limit--;
+	if (unlikely(r->nat.flags))
+		wgfp_apply_nat(pt, len, t.family, t.proto, &r->nat);
 	skb_trim(skb, len);
 	hdr = skb_push(skb, ETH_HLEN);
 	memcpy(hdr, r->l2.hdr, ETH_HLEN);
@@ -1964,40 +2463,47 @@ static int wgfp_rx_fast_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl,
 	const struct udphdr *udp;
 	struct dpaa_wgfp_tx_buf tx = {};
 	struct sk_buff *skb = NULL;
-	u32 hl, ilen, ulen, clen, plen, len;
+	u32 l3_off, l3_avail, hl, ilen, ulen, clen, plen, len;
 	int hint_eg = -1, hint_ifindex = 0;
 	bool have_tx = false;
-	const u8 *ct;
+	__be16 l3_proto, vid, sid;
+	const u8 *ct, *l3, *exp_mac;
 	u8 ds, *pt;
 	unsigned long t;
 	u64 nonce;
 
+	exp_mac = is_zero_ether_addr(fl->dst_mac) ? dev->dev_addr : fl->dst_mac;
 	if (f->len < ETH_HLEN || !(pst->wgdev->flags & IFF_UP) ||
-	    !ether_addr_equal(eth->h_dest, dev->dev_addr))
+	    !ether_addr_equal(eth->h_dest, exp_mac))
 		return 0;
+	if (!wgfp_parse_l2((const u8 *)eth, f->len, &l3_off, &l3_avail,
+			   &l3_proto, &vid, &sid) ||
+	    vid != fl->t.vlan_vid || sid != fl->t.pppoe_sid)
+		return 0;
+	l3 = (const u8 *)eth + l3_off;
 	if (fl->t.family == AF_INET) {
-		const struct iphdr *iph = (const struct iphdr *)(eth + 1);
+		const struct iphdr *iph = (const struct iphdr *)l3;
 
-		if (eth->h_proto != htons(ETH_P_IP) ||
-		    f->len < ETH_HLEN + sizeof(*iph) || iph->ihl != 5 ||
+		if (l3_proto != htons(ETH_P_IP) ||
+		    l3_avail < sizeof(*iph) || iph->ihl != 5 ||
 		    ip_is_fragment(iph) || ip_fast_csum((const u8 *)iph, 5))
 			return 0;
 		hl = sizeof(*iph);
 		ilen = ntohs(iph->tot_len);
 		ds = iph->tos;
 	} else {
-		const struct ipv6hdr *ip6 = (const struct ipv6hdr *)(eth + 1);
+		const struct ipv6hdr *ip6 = (const struct ipv6hdr *)l3;
 
-		if (eth->h_proto != htons(ETH_P_IPV6) ||
-		    f->len < ETH_HLEN + sizeof(*ip6) || ip6->nexthdr != IPPROTO_UDP)
+		if (l3_proto != htons(ETH_P_IPV6) ||
+		    l3_avail < sizeof(*ip6) || ip6->nexthdr != IPPROTO_UDP)
 			return 0;
 		hl = sizeof(*ip6);
 		ilen = hl + ntohs(ip6->payload_len);
 		ds = ipv6_get_dsfield(ip6);
 	}
-	if (ilen < hl + sizeof(*udp) || ETH_HLEN + ilen > f->len)
+	if (ilen < hl + sizeof(*udp) || ilen > l3_avail)
 		return 0;
-	udp = (const struct udphdr *)((const u8 *)(eth + 1) + hl);
+	udp = (const struct udphdr *)(l3 + hl);
 	ulen = ntohs(udp->len);
 	/* keepalives (no plaintext) and runts stay on the P3 path */
 	if (ulen > ilen - hl || ulen <= sizeof(*udp) + MESSAGE_MINIMUM_LENGTH ||
@@ -2146,11 +2652,11 @@ static bool wgfp_endpoint_matches(const struct wg_peer *peer,
 		return false;
 	if (t->family == AF_INET)
 		return READ_ONCE(peer->endpoint.addr4.sin_addr.s_addr) ==
-		       ((const struct iphdr *)(t->hdr + ETH_HLEN))->daddr &&
+		       ((const struct iphdr *)(t->hdr + t->l2_hlen))->daddr &&
 		       READ_ONCE(peer->endpoint.addr4.sin_port) == udp->dest;
 	return READ_ONCE(peer->endpoint.addr6.sin6_port) == udp->dest &&
 	       !memcmp(&peer->endpoint.addr6.sin6_addr,
-		       &((const struct ipv6hdr *)(t->hdr + ETH_HLEN))->daddr, 16);
+		       &((const struct ipv6hdr *)(t->hdr + t->l2_hlen))->daddr, 16);
 }
 
 /*
@@ -2184,6 +2690,13 @@ static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
 	dpaa_wgfp_drop(f);
 	dpaa_wgfp_orp_settle();
 	skb->protocol = eth_type_trans(skb, dev);
+	/* Outer VLAN or PPPoE non-P6 frames (handshakes, keepalives, ECN)
+	 * return to the full stack so vlan/pppoe receive handles them. */
+	if (fl->t.vlan_vid || fl->t.pppoe_sid) {
+		dpaa_wgfp_stat_inc(&wgfp_rx_stack);
+		netif_receive_skb(skb);
+		return 1;
+	}
 	iph = (const struct iphdr *)skb->data;
 	ip6 = (const struct ipv6hdr *)skb->data;
 	/* the tuple matched, so the IP header and the UDP ports are there */
@@ -2232,7 +2745,7 @@ static int wgfp_rx_frame(struct dpaa_wgfp_frame *f, struct wgfp_flow *fl)
 static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 {
 	u8 *data = f->buf + f->off;
-	u8 *inner = data + ETH_HLEN;
+	u8 *inner;
 	struct dpaa_wgfp_tuple tup = {};
 	struct noise_keypair *kp;
 	const struct wgfp_tmpl *t;
@@ -2243,16 +2756,19 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	struct wg_peer *peer;
 	struct udphdr *udp;
 	struct iphdr *oip;
-	u32 ip_len, plain, tot, mtu, added;
+	__be16 l3_proto;
+	u32 l3_off, l3_avail, ip_len, plain, tot, outer_ip_len, mtu, added;
 	bool withdraw = false;
 	u64 ctr;
 	u8 *hdr;
 
 	/* Only TCP/UDP of a learned flow reaches a sink; anything else (a
 	 * stale or hand-made record) is dropped. */
-	if (f->len < ETH_HLEN ||
-	    !wgfp_parse(inner, ((struct ethhdr *)data)->h_proto,
-			f->len - ETH_HLEN, f->len - ETH_HLEN, &tup, &ip_len))
+	if (!wgfp_parse_l2(data, f->len, &l3_off, &l3_avail, &l3_proto,
+			   &tup.vlan_vid, &tup.pppoe_sid))
+		return 0;
+	inner = data + l3_off;
+	if (!wgfp_parse(inner, l3_proto, l3_avail, l3_avail, &tup, &ip_len))
 		return 0;
 	iph = (const struct iphdr *)inner;
 	fl = wgfp_flow_lookup(&tup, f->ingress_ifindex);
@@ -2276,13 +2792,21 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 	if ((tup.family == AF_INET ? iph->ttl :
 	     ((const struct ipv6hdr *)inner)->hop_limit) <= 1)
 		goto decline;
+	if (unlikely(!wgfp_nat_len_ok(ip_len, tup.family, tup.proto, &fl->nat)))
+		goto decline;
 
 	t = rcu_dereference(pst->tmpl);
 	if (unlikely(!t))
 		goto decline;
-	/* outer IP + UDP + WireGuard header in front of the inner packet */
+	/* outer L2 (+ VLAN/PPPoE) + IP + UDP + WireGuard header */
 	added = t->hlen + sizeof(struct message_data);
 	plain = min_t(u32, mtu, ALIGN(ip_len, MESSAGE_PADDING_MULTIPLE));
+	tot = sizeof(struct udphdr) + sizeof(struct message_data) + plain +
+	      POLY1305_DIGEST_SIZE;		/* the UDP datagram */
+	outer_ip_len = (t->family == AF_INET ? sizeof(*oip) :
+			sizeof(struct ipv6hdr)) + tot;
+	if (unlikely(t->mtu && outer_ip_len > t->mtu))
+		goto decline;
 	{
 		/* Keep scratch_b0 = dst - 64 strictly >= DPAA_WGFP_TX_HEADROOM
 		 * (64) so IPv4 outer (added=58) never touches [0..63] metadata
@@ -2329,20 +2853,21 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 		dst = hdr + added;
 		/* Out-of-place 1-pass seal from read-only DMA_FROM_DEVICE f->buf. */
 		wgfp_seal_dst(dst, inner, ip_len, plain, tup.family,
-			      CHACHA_BLOCK_SIZE, ctr, kp->sending.key);
+			      CHACHA_BLOCK_SIZE, ctr, kp->sending.key, &fl->nat);
 
 		memcpy(hdr, t->hdr, t->hlen);
-		tot = sizeof(struct udphdr) + sizeof(struct message_data) + plain +
-		      POLY1305_DIGEST_SIZE;		/* the UDP datagram */
+		if (t->pppoe_off)
+			put_unaligned_be16(2 + outer_ip_len,
+					   hdr + t->pppoe_off + 4);
 		if (t->family == AF_INET) {
-			oip = (struct iphdr *)(hdr + ETH_HLEN);
-			oip->tot_len = htons(sizeof(*oip) + tot);
+			oip = (struct iphdr *)(hdr + t->l2_hlen);
+			oip->tot_len = htons(outer_ip_len);
 			oip->check = 0;
 			oip->check = ip_fast_csum((const u8 *)oip, oip->ihl);
 			udp = (struct udphdr *)(oip + 1);
 		} else {
-			((struct ipv6hdr *)(hdr + ETH_HLEN))->payload_len = htons(tot);
-			udp = (struct udphdr *)(hdr + ETH_HLEN + sizeof(struct ipv6hdr));
+			((struct ipv6hdr *)(hdr + t->l2_hlen))->payload_len = htons(tot);
+			udp = (struct udphdr *)(hdr + t->l2_hlen + sizeof(struct ipv6hdr));
 		}
 		udp->len = htons(tot);
 		wg = (struct message_data *)(udp + 1);
@@ -2350,7 +2875,7 @@ static int wgfp_peer_frame(void *priv, struct dpaa_wgfp_frame *f)
 		wg->key_idx = kp->remote_index;
 		wg->counter = cpu_to_le64(ctr);
 		if (t->family == AF_INET6) {
-			const struct ipv6hdr *ip6 = (const struct ipv6hdr *)(hdr + ETH_HLEN);
+			const struct ipv6hdr *ip6 = (const struct ipv6hdr *)(hdr + t->l2_hlen);
 
 			udp->check = csum_ipv6_magic(&ip6->saddr, &ip6->daddr, tot,
 						     IPPROTO_UDP, csum_partial(udp, tot, 0));
@@ -2519,6 +3044,7 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst)
 {
 	struct dpaa_wgfp_tuple rt = {};
 	struct wgfp_flow *fl;
+	u8 dst_mac[ETH_ALEN] = {};
 	bool want = false;
 	int ifindex = 0;
 
@@ -2526,18 +3052,40 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst)
 	    !READ_ONCE(pst->stopping) && wgfp_rx_observed(pst, &rt, &ifindex)) {
 		struct net_device *dev = dev_get_by_index(&init_net, ifindex);
 
-		/* outer family policy and contiguous-RX MTU bound of ingress port */
-		want = wgfp_ingress_mtu_ok(dev) &&
-		       dpaa_wgfp_family_ok(dev, rt.family);
-		if (dev)
+		if (dev) {
+			struct wgfp_l2_path path;
+			struct net_device *phys_dev = NULL;
+			bool resolved;
+
+			rcu_read_lock();
+			resolved = wgfp_resolve_l2_path(dev, &path);
+			rcu_read_unlock();
 			dev_put(dev);
+			if (resolved)
+				phys_dev = dev_get_by_index(&init_net,
+							    path.phys_ifindex);
+			if (phys_dev) {
+				if (wgfp_ingress_mtu_ok(phys_dev) &&
+				    dpaa_wgfp_family_ok(phys_dev, rt.family)) {
+					ifindex = phys_dev->ifindex;
+					rt.vlan_vid = path.has_vlan ?
+						htons(path.vlan_vid & VLAN_VID_MASK) : 0;
+					rt.pppoe_sid = path.has_pppoe ?
+						htons(path.pppoe_sid) : 0;
+					ether_addr_copy(dst_mac, path.src_mac);
+					want = true;
+				}
+				dev_put(phys_dev);
+			}
+		}
 		if (want)
 			pr_info_once("wireguard: P3 receive offload admits only tuples observed on the stack\n");
 	}
 	spin_lock_bh(&wgfp_flows_lock);
 	fl = pst->rxfl;
 	if (fl && (!want || fl->ifindex != ifindex ||
-		   !wgfp_tuple_eq(&fl->t, &rt))) {
+		   !wgfp_tuple_eq(&fl->t, &rt) ||
+		   !ether_addr_equal(fl->dst_mac, dst_mac))) {
 		if (!fl->del) {
 			fl->del = true;
 			queue_work(system_wq, &wgfp_flow_work);
@@ -2554,6 +3102,7 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst)
 			fl->pst = pst;
 			fl->rx = true;
 			fl->ifindex = ifindex;
+			ether_addr_copy(fl->dst_mac, dst_mac);
 			fl->hash = wgfp_tuple_hash(&rt);
 			fl->state = WGFP_PENDING;
 			fl->since = jiffies;
@@ -2569,13 +3118,50 @@ static void wgfp_pst_rx_sync(struct wgfp_pst *pst)
 
 /* ---- learning ---- */
 
+/* Extract pre-NAT wire tuple from @ct for @skb (for FIN/RST withdrawal even
+ * if the conntrack state is already closing). */
+static void wgfp_ct_orig_tuple(struct sk_buff *skb,
+			       const struct dpaa_wgfp_tuple *post,
+			       struct dpaa_wgfp_tuple *orig_out)
+{
+	*orig_out = *post;
+#if IS_REACHABLE(CONFIG_NF_CONNTRACK)
+	if (skb) {
+		enum ip_conntrack_info ctinfo;
+		struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
+
+		if (ct && (ct->status & IPS_NAT_MASK)) {
+			const struct nf_conntrack_tuple *ct_orig =
+				&ct->tuplehash[CTINFO2DIR(ctinfo)].tuple;
+
+			if (ct_orig->src.l3num == post->family &&
+			    ct_orig->dst.protonum == post->proto) {
+				if (post->family == AF_INET6) {
+					orig_out->saddr6 = ct_orig->src.u3.in6;
+					orig_out->daddr6 = ct_orig->dst.u3.in6;
+				} else {
+					orig_out->saddr = ct_orig->src.u3.ip;
+					orig_out->daddr = ct_orig->dst.u3.ip;
+				}
+				orig_out->sport = ct_orig->src.u.all;
+				orig_out->dport = ct_orig->dst.u.all;
+			}
+		}
+	}
+#endif
+}
+
 /*
- * Check for an established conntrack entry without NAT, master or helper.
- * Packets forwarded by the software flowtable may have no attached entry, so
- * look it up by tuple. A tuple-only lookup does not prove INPUT accepted it.
+ * Check for an established conntrack entry without master or helper.  For
+ * NAT44/NAT66 flows, populate @orig_out with the pre-NAT wire tuple and
+ * @nat_out with the rewrite delta (@orig_out -> @post).  Packets forwarded by
+ * the software flowtable may have no attached entry, so fall back to a
+ * tuple-only non-NAT lookup.
  */
 static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
-			     const struct dpaa_wgfp_tuple *t, bool *absent)
+			     const struct dpaa_wgfp_tuple *post,
+			     struct dpaa_wgfp_tuple *orig_out,
+			     struct wgfp_nat *nat_out)
 {
 #if IS_REACHABLE(CONFIG_NF_CONNTRACK)
 	enum ip_conntrack_info ctinfo;
@@ -2584,34 +3170,102 @@ static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 	struct nf_conntrack_tuple_hash *h;
 	bool ok;
 
-	if (ct)
-		return (ctinfo == IP_CT_ESTABLISHED ||
-			ctinfo == IP_CT_ESTABLISHED_REPLY) &&
-		       !(ct->status & IPS_NAT_MASK) && !ct->master && !nfct_help(ct);
-	tuple.src.l3num = t->family;
-	if (t->family == AF_INET6) {
-		tuple.src.u3.in6 = t->saddr6;
-		tuple.dst.u3.in6 = t->daddr6;
-	} else {
-		tuple.src.u3.ip = t->saddr;
-		tuple.dst.u3.ip = t->daddr;
+	*orig_out = *post;
+	memset(nat_out, 0, sizeof(*nat_out));
+
+	if (ct) {
+		if ((ctinfo != IP_CT_ESTABLISHED &&
+		     ctinfo != IP_CT_ESTABLISHED_REPLY) ||
+		    !nf_ct_zone_equal_any(ct, &nf_ct_zone_dflt) ||
+		    nf_ct_is_dying(ct) || nf_ct_is_expired(ct) ||
+		    (ct->status & IPS_SEQ_ADJUST) ||
+		    ct->master || nfct_help(ct))
+			return false;
+		if (post->proto == IPPROTO_TCP) {
+			if (READ_ONCE(ct->proto.tcp.state) != TCP_CONNTRACK_ESTABLISHED)
+				return false;
+			/* WGFP bypasses conntrack on packets 33+, so disable strict
+			 * TCP window tracking just as nf_flow_offload_add() does;
+			 * otherwise 1s P6 renewal and punted FIN/RST fail
+			 * tcp_in_window() and lose reverse-NAT / ct lookup. */
+			if (!(READ_ONCE(ct->proto.tcp.seen[0].flags) &
+			      IP_CT_TCP_FLAG_BE_LIBERAL) ||
+			    !(READ_ONCE(ct->proto.tcp.seen[1].flags) &
+			      IP_CT_TCP_FLAG_BE_LIBERAL)) {
+				spin_lock_bh(&ct->lock);
+				ct->proto.tcp.seen[0].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
+				ct->proto.tcp.seen[1].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
+				spin_unlock_bh(&ct->lock);
+			}
+		}
+		if (!(ct->status & IPS_NAT_MASK))
+			return true;
+		{
+			const struct nf_conntrack_tuple *ct_orig =
+				&ct->tuplehash[CTINFO2DIR(ctinfo)].tuple;
+
+			if (ct_orig->src.l3num != post->family ||
+			    ct_orig->dst.protonum != post->proto)
+				return false;
+			if (post->family == AF_INET6) {
+				orig_out->saddr6 = ct_orig->src.u3.in6;
+				orig_out->daddr6 = ct_orig->dst.u3.in6;
+				if (memcmp(&orig_out->saddr6, &post->saddr6, 16)) {
+					nat_out->flags |= WGFP_NAT_SRC_IP;
+					nat_out->saddr6 = post->saddr6;
+				}
+				if (memcmp(&orig_out->daddr6, &post->daddr6, 16)) {
+					nat_out->flags |= WGFP_NAT_DST_IP;
+					nat_out->daddr6 = post->daddr6;
+				}
+			} else {
+				orig_out->saddr = ct_orig->src.u3.ip;
+				orig_out->daddr = ct_orig->dst.u3.ip;
+				if (orig_out->saddr != post->saddr) {
+					nat_out->flags |= WGFP_NAT_SRC_IP;
+					nat_out->saddr = post->saddr;
+				}
+				if (orig_out->daddr != post->daddr) {
+					nat_out->flags |= WGFP_NAT_DST_IP;
+					nat_out->daddr = post->daddr;
+				}
+			}
+			orig_out->sport = ct_orig->src.u.all;
+			orig_out->dport = ct_orig->dst.u.all;
+			if (orig_out->sport != post->sport) {
+				nat_out->flags |= WGFP_NAT_SRC_PORT;
+				nat_out->sport = post->sport;
+			}
+			if (orig_out->dport != post->dport) {
+				nat_out->flags |= WGFP_NAT_DST_PORT;
+				nat_out->dport = post->dport;
+			}
+		}
+		return true;
 	}
-	tuple.src.u.all = t->sport;
-	tuple.dst.u.all = t->dport;
-	tuple.dst.protonum = t->proto;
+	tuple.src.l3num = post->family;
+	if (post->family == AF_INET6) {
+		tuple.src.u3.in6 = post->saddr6;
+		tuple.dst.u3.in6 = post->daddr6;
+	} else {
+		tuple.src.u3.ip = post->saddr;
+		tuple.dst.u3.ip = post->daddr;
+	}
+	tuple.src.u.all = post->sport;
+	tuple.dst.u.all = post->dport;
+	tuple.dst.protonum = post->proto;
 	tuple.dst.dir = IP_CT_DIR_ORIGINAL;
 	h = nf_conntrack_find_get(net, &nf_ct_zone_dflt, &tuple);
-	if (!h) {
-		if (absent)
-			*absent = true;
+	if (!h)
 		return false;
-	}
 	ct = nf_ct_tuplehash_to_ctrack(h);
 	ok = test_bit(IPS_SEEN_REPLY_BIT, &ct->status) &&
 	     !(ct->status & IPS_NAT_MASK) && !ct->master && !nfct_help(ct);
 	nf_ct_put(ct);
 	return ok;
 #else
+	*orig_out = *post;
+	memset(nat_out, 0, sizeof(*nat_out));
 	return false;	/* no conntrack: no proof the flow was admitted */
 #endif
 }
@@ -2664,13 +3318,14 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 {
 	struct wgfp_binds *bs = rcu_dereference_bh(wgfp_bs);
 	struct net_device *wgdev = NULL;
-	struct dpaa_wgfp_tuple t = {};
+	struct dpaa_wgfp_tuple post = {}, t = {};
+	struct wgfp_nat nat = {};
 	struct wgfp_pst *pst;
 	struct wgfp_flow *fl;
 	u8 hb[sizeof(struct ipv6hdr) + 4];
 	unsigned int thoff, nhoff, i;
 	const u8 *l3;
-	bool fin = false, in_ok;
+	bool fin = false, in_ok, admitted = false;
 	u32 hash, len, total;
 
 	if (!bs || READ_ONCE(bs->stopping) || !skb->skb_iif ||
@@ -2687,9 +3342,9 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 	total = skb->len - nhoff;
 	l3 = skb_header_pointer(skb, nhoff, min_t(u32, sizeof(hb), total), hb);
 	if (!l3 || !wgfp_parse(l3, skb->protocol, min_t(u32, sizeof(hb), total),
-			       total, &t, &len))
+			       total, &post, &len))
 		return;
-	if (!wgfp_tx_family_allowed(t.family))
+	if (!wgfp_tx_family_allowed(post.family))
 		return;
 	/* Inner family policy and contiguous-RX MTU bound of ingress port. */
 	rcu_read_lock();
@@ -2697,14 +3352,14 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 		struct net_device *indev = dev_get_by_index_rcu(&init_net, skb->skb_iif);
 
 		in_ok = wgfp_ingress_mtu_ok(indev) &&
-			dpaa_wgfp_family_ok(indev, t.family);
+			dpaa_wgfp_family_ok(indev, post.family);
 	}
 	rcu_read_unlock();
 	if (!in_ok)
 		return;
-	thoff = nhoff + (t.family == AF_INET ?
+	thoff = nhoff + (post.family == AF_INET ?
 		sizeof(struct iphdr) : sizeof(struct ipv6hdr));
-	if (t.proto == IPPROTO_TCP) {
+	if (post.proto == IPPROTO_TCP) {
 		struct tcphdr _th;
 		const struct tcphdr *th = skb_header_pointer(skb, thoff,
 							     sizeof(_th), &_th);
@@ -2712,6 +3367,13 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 		if (!th || th->syn)
 			return;
 		fin = th->fin || th->rst;
+	}
+	if (fin) {
+		wgfp_ct_orig_tuple(skb, &post, &t);
+	} else {
+		admitted = wgfp_ct_admitted(dev_net(skb->dev), skb, &post, &t, &nat);
+		if (!admitted)
+			return;
 	}
 	hash = wgfp_tuple_hash(&t);
 
@@ -2722,9 +3384,21 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 		goto out;
 	fl = wgfp_flow_find(&t, skb->skb_iif, hash);
 	if (fl) {
-		if (fin && !fl->del) {
-			fl->del = true;
-			queue_work(system_wq, &wgfp_flow_work);
+		if (fin) {
+			if (!fl->del) {
+				fl->del = true;
+				queue_work(system_wq, &wgfp_flow_work);
+			}
+		} else if (fl->pst->peer != peer ||
+			   memcmp(&fl->nat, &nat, sizeof(nat))) {
+			if (fl->state == WGFP_LEARNING && fl->pst->peer == peer) {
+				fl->nat = nat;
+				fl->pkts = 1;
+				fl->since = jiffies;
+			} else if (!fl->del) {
+				fl->del = true;
+				queue_work(system_wq, &wgfp_flow_work);
+			}
 		} else if (fl->state == WGFP_LEARNING && ++fl->pkts >= WGFP_ADMIT) {
 			fl->pkts = 0;
 			fl->state = WGFP_PENDING;
@@ -2732,10 +3406,8 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 		}
 		goto out;
 	}
-	if (fin || wgfp_nflows >= WGFP_FLOW_MAX ||
+	if (fin || !admitted || wgfp_nflows >= WGFP_FLOW_MAX ||
 	    wgfp_flow_find_tuple(&t, skb->skb_iif, hash))
-		goto out;
-	if (!wgfp_ct_admitted(dev_net(skb->dev), skb, &t, NULL))
 		goto out;
 	pst = wgfp_pst_get_locked(peer, wgdev);
 	if (!pst)
@@ -2744,6 +3416,7 @@ void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)
 	if (!fl)
 		goto out;	/* an empty pst is freed by the next aging pass */
 	fl->t = t;
+	fl->nat = nat;
 	fl->pst = pst;
 	fl->ifindex = skb->skb_iif;
 	fl->hash = hash;
@@ -3008,20 +3681,63 @@ static void wgfp_psts_reap(bool all)
 	} while (n == WGFP_BATCH);
 }
 
+#if IS_REACHABLE(CONFIG_NF_CONNTRACK)
+static bool wgfp_ct_nat_matches(const struct nf_conn *ct,
+				const struct nf_conntrack_tuple_hash *h,
+				const struct dpaa_wgfp_tuple *orig,
+				const struct wgfp_nat *nat)
+{
+	const struct nf_conntrack_tuple *opp =
+		&ct->tuplehash[!NF_CT_DIRECTION(h)].tuple;
+	__be16 post_sport = (nat->flags & WGFP_NAT_SRC_PORT) ?
+			    nat->sport : orig->sport;
+	__be16 post_dport = (nat->flags & WGFP_NAT_DST_PORT) ?
+			    nat->dport : orig->dport;
+
+	if (opp->src.l3num != orig->family || opp->dst.protonum != orig->proto ||
+	    opp->dst.u.all != post_sport || opp->src.u.all != post_dport)
+		return false;
+	if (orig->family == AF_INET6) {
+		const struct in6_addr *ps = (nat->flags & WGFP_NAT_SRC_IP) ?
+					    &nat->saddr6 : &orig->saddr6;
+		const struct in6_addr *pd = (nat->flags & WGFP_NAT_DST_IP) ?
+					    &nat->daddr6 : &orig->daddr6;
+
+		return !memcmp(&opp->dst.u3.in6, ps, 16) &&
+		       !memcmp(&opp->src.u3.in6, pd, 16);
+	}
+	return opp->dst.u3.ip == ((nat->flags & WGFP_NAT_SRC_IP) ?
+				  nat->saddr : orig->saddr) &&
+	       opp->src.u3.ip == ((nat->flags & WGFP_NAT_DST_IP) ?
+				  nat->daddr : orig->daddr);
+}
+#endif
+
 /* Withdraw records whose silicon counter stopped moving or whose inner
  * destination no longer maps to their peer (AllowedIPs changed); forget
  * failures and flows that never reached WGFP_ADMIT; free peers without flows.
  * The teardown cancels this work before it frees anything else. */
 static void wgfp_age_fn(struct work_struct *w)
 {
-	struct { struct wgfp_flow *fl; struct dpaa_wgfp_tuple t; int ifindex;
-		 u32 hash; struct wgfp_pst *pst; } job[WGFP_BATCH];
+	struct wgfp_age_job {
+		struct wgfp_flow *fl;
+		struct dpaa_wgfp_tuple t;
+		struct wgfp_nat nat;
+		u64 prev_pkts;
+		int ifindex;
+		u32 hash;
+		struct wgfp_pst *pst;
+	} *job;
 	static unsigned int cursor;
 	unsigned int n = 0, i, bkt, seen = 0;
 	struct wgfp_flow *fl;
 	struct hlist_node *tmp;
 	struct sk_buff *probe;
 	bool kick = false;
+
+	job = kcalloc(WGFP_BATCH, sizeof(*job), GFP_KERNEL);
+	if (!job)
+		goto reschedule;
 
 	/* wg_allowedips_lookup_dst() takes an skb; one IP header suffices. */
 	probe = alloc_skb(sizeof(struct ipv6hdr), GFP_KERNEL);
@@ -3047,6 +3763,8 @@ static void wgfp_age_fn(struct work_struct *w)
 			continue;
 		job[n].fl = fl;
 		job[n].t = fl->t;
+		job[n].nat = fl->nat;
+		job[n].prev_pkts = fl->pkts;
 		job[n].ifindex = fl->ifindex;
 		job[n].hash = fl->hash;
 		job[n].pst = fl->pst;	/* only this work frees psts */
@@ -3058,7 +3776,7 @@ static void wgfp_age_fn(struct work_struct *w)
 	for (i = 0; i < n; i++) {
 		struct net_device *dev = dev_get_by_index(&init_net, job[i].ifindex);
 		struct wgfp_pst *pst = job[i].pst;
-		bool foreign = false, family = false;
+		bool foreign = false, family = false, ct_dead = false;
 		u64 pkts = 0;
 		int err = -ENODEV;
 
@@ -3068,15 +3786,63 @@ static void wgfp_age_fn(struct work_struct *w)
 			family = dpaa_wgfp_family_ok(dev, job[i].t.family);
 			dev_put(dev);
 		}
+#if IS_REACHABLE(CONFIG_NF_CONNTRACK)
+		if (job[i].nat.flags && !err) {
+			struct nf_conntrack_tuple tuple = {};
+			struct nf_conntrack_tuple_hash *h;
+
+			tuple.src.l3num = job[i].t.family;
+			if (job[i].t.family == AF_INET6) {
+				tuple.src.u3.in6 = job[i].t.saddr6;
+				tuple.dst.u3.in6 = job[i].t.daddr6;
+			} else {
+				tuple.src.u3.ip = job[i].t.saddr;
+				tuple.dst.u3.ip = job[i].t.daddr;
+			}
+			tuple.src.u.all = job[i].t.sport;
+			tuple.dst.u.all = job[i].t.dport;
+			tuple.dst.protonum = job[i].t.proto;
+			tuple.dst.dir = IP_CT_DIR_ORIGINAL;
+			h = nf_conntrack_find_get(&init_net, &nf_ct_zone_dflt, &tuple);
+			if (!h) {
+				ct_dead = true;
+			} else {
+				struct nf_conn *ct = nf_ct_tuplehash_to_ctrack(h);
+
+				if (nf_ct_is_dying(ct) || nf_ct_is_expired(ct) ||
+				    !(ct->status & IPS_NAT_MASK) ||
+				    (ct->status & IPS_SEQ_ADJUST) ||
+				    (job[i].t.proto == IPPROTO_TCP &&
+				     READ_ONCE(ct->proto.tcp.state) !=
+				     TCP_CONNTRACK_ESTABLISHED) ||
+				    !wgfp_ct_nat_matches(ct, h, &job[i].t,
+							 &job[i].nat)) {
+					ct_dead = true;
+				} else if (pkts != job[i].prev_pkts) {
+					u32 ct_timeout = READ_ONCE(ct->timeout);
+					s32 rem = ct_timeout - nfct_time_stamp;
+
+					if (rem > 0 && rem < 60 * HZ)
+						cmpxchg(&ct->timeout, ct_timeout,
+							nfct_time_stamp + 60 * HZ);
+				}
+				nf_ct_put(ct);
+			}
+		}
+#endif
 		if (probe) {
 			struct wg_peer *p;
 
 			if (job[i].t.family == AF_INET6) {
 				probe->protocol = htons(ETH_P_IPV6);
-				ipv6_hdr(probe)->daddr = job[i].t.daddr6;
+				ipv6_hdr(probe)->daddr =
+					(job[i].nat.flags & WGFP_NAT_DST_IP) ?
+					job[i].nat.daddr6 : job[i].t.daddr6;
 			} else {
 				probe->protocol = htons(ETH_P_IP);
-				ip_hdr(probe)->daddr = job[i].t.daddr;
+				ip_hdr(probe)->daddr =
+					(job[i].nat.flags & WGFP_NAT_DST_IP) ?
+					job[i].nat.daddr : job[i].t.daddr;
 			}
 			p = wg_allowedips_lookup_dst(&pst->peer->device->peer_allowedips,
 						     probe);
@@ -3089,6 +3855,9 @@ static void wgfp_age_fn(struct work_struct *w)
 		fl = wgfp_flow_find(&job[i].t, job[i].ifindex, job[i].hash);
 		if (fl == job[i].fl && fl->state == WGFP_INSTALLED && !fl->del) {
 			if (!family) {
+				fl->del = true;
+				kick = true;
+			} else if (ct_dead) {
 				fl->del = true;
 				kick = true;
 			} else if (foreign) {
@@ -3108,10 +3877,12 @@ static void wgfp_age_fn(struct work_struct *w)
 		spin_unlock_bh(&wgfp_flows_lock);
 	}
 	kfree_skb(probe);
+	kfree(job);
 	if (kick)
 		queue_work(system_wq, &wgfp_flow_work);
 	wgfp_rflows_reap(false);
 	wgfp_psts_reap(false);
+reschedule:
 	if (rcu_access_pointer(wgfp_bs))
 		schedule_delayed_work(&wgfp_age_work, WGFP_AGE_PERIOD);
 }
@@ -3231,6 +4002,18 @@ static void wgfp_stop_work_fn(struct work_struct *w)
 }
 static DECLARE_WORK(wgfp_stop_work, wgfp_stop_work_fn);
 
+static void wgfp_refresh_psts(void)
+{
+	struct wgfp_pst *pst;
+	unsigned int bkt;
+
+	spin_lock_bh(&wgfp_flows_lock);
+	hash_for_each(wgfp_psts, bkt, pst, node)
+		if (!READ_ONCE(pst->stopping))
+			mod_delayed_work(system_wq, &pst->refresh, 0);
+	spin_unlock_bh(&wgfp_flows_lock);
+}
+
 static int wgfp_netdev_event(struct notifier_block *nb, unsigned long event,
 			     void *ptr)
 {
@@ -3243,6 +4026,9 @@ static int wgfp_netdev_event(struct notifier_block *nb, unsigned long event,
 			(void)wgfp_port_quiesce(NULL, dev);
 		return NOTIFY_DONE;
 	}
+	if ((event == NETDEV_DOWN || event == NETDEV_UNREGISTER) && dev &&
+	    (dev->type == ARPHRD_PPP || is_vlan_dev(dev)))
+		wgfp_refresh_psts();
 	if (event != NETDEV_UNREGISTER)
 		return NOTIFY_DONE;
 	rcu_read_lock();

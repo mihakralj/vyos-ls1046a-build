@@ -117,8 +117,8 @@ def test_policy_wired_everywhere():
     fp = FASTPATH.read_text()
     learn = extract(fp, "void wg_fastpath_learn(struct wg_peer *peer, struct sk_buff *skb)\n{\n")
     assert learn.index("dpaa_wgfp_family_ok(") < learn.index("thoff = nhoff")
-    assert "!dpaa_wgfp_family_ok(rt->dst.dev, AF_INET)" in extract(fp, "static struct wgfp_tmpl *wgfp_tmpl4(")
-    assert "!dpaa_wgfp_family_ok(dst->dev, AF_INET6)" in extract(fp, "static struct wgfp_tmpl *wgfp_tmpl6(")
+    assert "!dpaa_wgfp_family_ok(phys_dev, AF_INET)" in extract(fp, "static struct wgfp_tmpl *wgfp_tmpl4(")
+    assert "!dpaa_wgfp_family_ok(phys_dev, AF_INET6)" in extract(fp, "static struct wgfp_tmpl *wgfp_tmpl6(")
     age = extract(fp, "static void wgfp_age_fn(struct work_struct *w)\n{\n")
     assert "family = dpaa_wgfp_family_ok(dev, job[i].t.family);" in age
     assert re.search(r"if \(!family\) \{\s*fl->del = true;", age)

@@ -1902,6 +1902,8 @@ static void wgfp_key(const struct dpaa_wgfp_tuple *t, u8 *key)
 	key[41] = t->proto;
 	memcpy(key + 42, &t->sport, 2);
 	memcpy(key + 44, &t->dport, 2);
+	memcpy(key + 46, &t->vlan_vid, 2);
+	memcpy(key + 48, &t->pppoe_sid, 2);
 }
 
 static dpaa_wgfp_family_fn __rcu wgfp_family_fn;

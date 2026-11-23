@@ -19,7 +19,10 @@
 #define PAGE_SIZE 4096
 #define GFP_KERNEL 0
 #define NETREG_REGISTERED 1
+#define NETDEV_DOWN 3
 #define NETDEV_UNREGISTER 2
+#define NETDEV_CHANGEMTU 4
+#define ARPHRD_PPP 512
 #define NOTIFY_DONE 0
 #define WGFP_AGE_PERIOD 1
 #define pr_warn_ratelimited(...) ((void)0)
@@ -47,8 +50,13 @@ struct rtnl_link_ops { const char *kind; };
 struct net_device {
 	char name[IFNAMSIZ];
 	int reg_state, references, netns;
+	unsigned short type;
 	struct rtnl_link_ops *rtnl_link_ops;
 };
+static bool wgfp_ingress_mtu_ok(const struct net_device *dev) { (void)dev; return true; }
+static int wgfp_port_quiesce(void *priv, struct net_device *dev) { (void)priv; (void)dev; return 0; }
+static bool is_vlan_dev(const struct net_device *dev) { (void)dev; return false; }
+static void wgfp_refresh_psts(void) { }
 struct wgfp_binds {
 	unsigned int n;
 	struct net_device *wgdev[WGFP_MAX_BIND];

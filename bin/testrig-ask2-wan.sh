@@ -236,6 +236,21 @@ EOS
   ssh "${SSHO[@]}" "$GEN1" "sudo sh -s -- add$route_args" < "$ROUTE" || return 1
   printf '%s\n' "$kd" | ssh "${SSHO[@]}" "$ASK2_DUT" "sudo sh -c 'wg set wgw0 private-key /dev/stdin listen-port $WPORT peer $pg endpoint 10.99.57.1:$WPORT allowed-ips 10.99.230.0/24,fd99:230::/64 persistent-keepalive 10 &&
     ip addr add 10.99.230.1/24 dev wgw0 && ip -6 addr add fd99:230::1/64 dev wgw0 nodad && ip link set wgw0 mtu 1420 up'" || return 1
+  if [ "${WGFP_WAN:-1}" = 1 ]; then
+    local wg_token
+    wg_token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    [[ $wg_token =~ ^[0-9a-f]{32}$ ]] || return 1
+    j dut wgfp_lease "$wg_token"
+    onin dut "sudo sh -s -- '$wg_token' 'wgo-$wg_token-wg'" <<'EOS' || return 1
+set -eu
+tok=$1 alias=$2
+P=/sys/module/wireguard/parameters/wgfp_peer_lease
+[ -w "$P" ] || { echo "ERROR: $P not available" >&2; exit 1; }
+printf 'reserve %s\n' "$tok" > "$P"
+ip link property add dev wgw0 altname "$alias"
+printf 'bind %s %s\n' "$tok" "$alias" > "$P"
+EOS
+  fi
   nat_token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
   [[ $nat_token =~ ^[0-9a-f]{32}$ ]] || return 1
   j dut nat "$nat_token"
@@ -260,6 +275,24 @@ undo(){ # undo one journal line; 0 = gone or never created, 1 = left in place
     procs) own "$h" service-stop "$@" ;;
     nat)
       onin "$h" 'sudo sh -s -- delete '"$1" < "$NAT" ;;
+    wgfp_lease)
+      onin "$h" "sudo sh -s -- '$1'" <<'EOS'
+set -eu
+tok=$1
+P=/sys/module/wireguard/parameters/wgfp_peer_lease
+[ -e "$P" ] || exit 0
+cur=$(cat "$P")
+case "$cur" in
+  unowned) exit 0 ;;
+  "owned=$tok dev=off")
+    printf 'release %s\n' "$tok" > "$P" ;;
+  "owned=$tok "*)
+    printf 'stop %s\n' "$tok" > "$P"
+    printf 'release %s\n' "$tok" > "$P" ;;
+  *) echo "ERROR: wgfp_peer_lease owned by another actor: $cur" >&2; exit 1 ;;
+esac
+EOS
+      ;;
     rule6) own "$h" rule6-delete "$@" ;;
     wgroute)
       local args
@@ -305,7 +338,7 @@ teardown(){ # LEASE must be set; deletes in reverse journal order, keeps the lea
     case "${entry[0]}:$kind" in
       g1:rundir|g1:link|dut:link|g2:route) expected=4 ;;
       g1:procs) expected=4 ;;
-      dut:nat) expected=3 ;;
+      dut:nat|dut:wgfp_lease) expected=3 ;;
       g1:rule6) expected=7 ;;
       g1:wgroute) expected=10 ;;
       dut:vyos) expected=3 ;;
@@ -323,7 +356,7 @@ teardown(){ # LEASE must be set; deletes in reverse journal order, keeps the lea
            ${entry[2]} = wgw0 && ${entry[3]} = "ask2wan-$rid-wg" ]] && valid=1 ;;
       dut:link)
         [[ ${entry[2]} = wgw0 && ${entry[3]} = "ask2wan-$rid-wg" ]] && valid=1 ;;
-      dut:nat)
+      dut:nat|dut:wgfp_lease)
         [[ ${entry[2]} =~ ^[0-9a-f]{32}$ ]] && valid=1 ;;
       g2:route)
         for route in "${WAN_G2_ROUTES[@]}"; do
@@ -384,4 +417,4 @@ for r in $(seq 1 "$REPS"); do
     "$HERE/testrig-offload-quick.sh" $BI
 done
 say "wan done"
-[ "${KEEP:-0}" = 1 ] && echo "KEEP=1: environment left up; release with: $0 teardown $LEASE"
+[ "${KEEP:-0}" != 1 ] || echo "KEEP=1: environment left up; release with: $0 teardown $LEASE"

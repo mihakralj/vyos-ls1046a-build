@@ -144,6 +144,7 @@ def test_invalid_journal_entry_prevents_any_cleanup(tmp_path, invalid):
     "g1 link enp1s0f0np0.7 ask2wan-0123456789abcdef-v7",
     "dut link wgw0 ask2wan-0123456789abcdef-wg",
     "dut nat 0123456789abcdef0123456789abcdef",
+    "dut wgfp_lease 0123456789abcdef0123456789abcdef",
     "g2 route fd99:57::/64 fd99:2::185",
     "g1 rule6 10957 157 157 fd99:57::1 fd99:2::/64",
     "g1 wgroute far 10958 158 fd99:230::112 fd99:2::/64 wgw0 1420 158",

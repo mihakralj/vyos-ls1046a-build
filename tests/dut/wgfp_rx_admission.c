@@ -70,7 +70,35 @@ struct dpaa_wgfp_tuple {
 	union { u32 daddr; struct in6_addr daddr6; };
 	u16 sport, dport;
 	u8 proto, family, pad[2];
+	u16 vlan_vid, pppoe_sid;
 };
+
+#define ETH_ALEN 6
+#define VLAN_VID_MASK 0x0fff
+#define rcu_read_lock() do { } while (0)
+#define rcu_read_unlock() do { } while (0)
+static inline void ether_addr_copy(u8 *dst, const u8 *src) { memcpy(dst, src, ETH_ALEN); }
+static inline bool ether_addr_equal(const u8 *a, const u8 *b) { return !memcmp(a, b, ETH_ALEN); }
+
+struct wgfp_l2_path {
+	int phys_ifindex;
+	u8 peer_mac[6];
+	u8 src_mac[6];
+	u16 vlan_vid;
+	u16 pppoe_sid;
+	bool has_vlan;
+	bool has_pppoe;
+};
+
+static bool wgfp_resolve_l2_path(struct net_device *dev,
+				 struct wgfp_l2_path *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (!dev)
+		return false;
+	out->phys_ifindex = dev->ifindex;
+	return true;
+}
 
 struct endpoint {
 	union {
@@ -98,6 +126,7 @@ struct wgfp_flow {
 	struct wgfp_pst *pst;
 	int ifindex, node, state;
 	u32 hash;
+	u8 dst_mac[ETH_ALEN];
 	unsigned long since;
 	bool rx, del;
 };

@@ -101,6 +101,8 @@ struct dpaa_wgfp_tuple {
 	u8 proto;
 	u8 family;		/* AF_INET or AF_INET6 */
 	u8 _pad[2];
+	__be16 vlan_vid;	/* 802.1Q VID (1..4095) in BE, 0 if untagged */
+	__be16 pppoe_sid;	/* PPPoE session ID in BE, 0 if none */
 };
 
 /*

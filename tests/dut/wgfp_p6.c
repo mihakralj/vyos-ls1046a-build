@@ -50,6 +50,14 @@ typedef uint64_t u64;
 #define WGFP_RX_HEADROOM 128
 #define DPAA_WGFP_TX_HEADROOM 64
 #define DPAA_WGFP_TX_BUF_SIZE (4096 - DPAA_WGFP_TX_HEADROOM)
+#define VLAN_HLEN 4
+#define VLAN_VID_MASK 0x0fff
+#define ETH_P_8021Q 0x8100
+#define ETH_P_PPP_SES 0x8864
+#define PPP_IP 0x0021
+#define PPP_IPV6 0x0057
+#define WGFP_PPPOE_HLEN 8
+#define get_unaligned(ptr) ({ __be16 __v; memcpy(&__v, (ptr), sizeof(__v)); __v; })
 #define likely(x) (x)
 #define CHECKSUM_NONE 0
 #define rcu_read_lock() do { } while (0)
@@ -76,6 +84,7 @@ struct dpaa_wgfp_tuple {
 	union { uint32_t daddr; struct in6_addr daddr6; };
 	uint16_t sport, dport;
 	u8 proto, family, _pad[2];
+	uint16_t vlan_vid, pppoe_sid;
 };
 
 struct dpaa_wgfp_frame {
@@ -110,13 +119,22 @@ struct wgfp_pst {
 	int last_rx_egress;
 	int last_rx_ifindex;
 };
+static inline bool is_zero_ether_addr(const u8 *a)
+{
+	return !(a[0] | a[1] | a[2] | a[3] | a[4] | a[5]);
+}
+
 struct wgfp_flow {
 	struct dpaa_wgfp_tuple t;
 	struct wgfp_pst *pst;
+	u8 dst_mac[ETH_ALEN];
 };
+#include "wgfp_p6_nat.h"
+
 struct wgfp_tmpl { int egress; int ifindex; u8 hdr[ETH_HLEN]; };
 struct wgfp_rflow {
 	struct dpaa_wgfp_tuple t;
+	struct wgfp_nat nat;
 	int wg_ifindex;
 	u64 peer_id;
 	u32 mtu;
@@ -771,6 +789,91 @@ static void test_tail(void)
 	direct_ret = 0;
 }
 
+static void test_pppoe_vlan_and_nat_forward(void)
+{
+	struct pkt p = { .inner_proto = IPPROTO_TCP, .tcp_flags = 0x10, .ttl = 64,
+			 .payload = 100, .pad = 4, .nonce = 40, .key_idx = 7 };
+	struct dpaa_wgfp_frame f, f2;
+	struct wgfp_flow fl = { .pst = &pst };
+	u8 encap[2048];
+	u32 outer_ip_len;
+	struct iphdr *i4;
+
+	learn(&p);
+	rec.nat.flags = WGFP_NAT_DST_IP | WGFP_NAT_DST_PORT;
+	rec.nat.daddr = htonl(0x0a630271); /* 10.99.2.113 */
+	rec.nat.dport = htons(50000);
+
+	/* Wrap the plain Eth+IPv4+UDP+WG frame in 802.1Q(7) + PPPoE(0x000a) */
+	f = build(&p);
+	outer_ip_len = f.len - ETH_HLEN;
+	memset(encap, 0, sizeof(encap));
+	memcpy(encap + 128, f.buf + f.off, 12); /* dst+src MAC */
+	encap[128 + 12] = 0x81; encap[128 + 13] = 0x00;
+	encap[128 + 14] = 0x00; encap[128 + 15] = 0x07; /* VID 7 */
+	encap[128 + 16] = 0x88; encap[128 + 17] = 0x64; /* PPP_SES */
+	encap[128 + 18] = 0x11; encap[128 + 19] = 0x00; /* ver/type/code */
+	encap[128 + 20] = 0x00; encap[128 + 21] = 0x0a; /* SID 0x000a */
+	encap[128 + 22] = (u8)((2 + outer_ip_len) >> 8);
+	encap[128 + 23] = (u8)((2 + outer_ip_len) & 0xff);
+	encap[128 + 24] = 0x00; encap[128 + 25] = 0x21; /* PPP_IP */
+	memcpy(encap + 128 + 26, f.buf + f.off + ETH_HLEN, outer_ip_len);
+	f2 = (struct dpaa_wgfp_frame){ .buf = encap, .off = 128,
+		.len = 26 + outer_ip_len, .buf_size = sizeof(encap) };
+
+	/* VID or SID mismatch must return 0 untouched */
+	fl.t.family = AF_INET;
+	fl.t.vlan_vid = htons(8);
+	fl.t.pppoe_sid = htons(0x000a);
+	reset();
+	CHECK(wgfp_rx_fast_frame(&f2, &fl, &port) == 0 && drops == 0 && xmits == 0);
+
+	fl.t.vlan_vid = htons(7);
+	fl.t.pppoe_sid = htons(0x000b);
+	reset();
+	CHECK(wgfp_rx_fast_frame(&f2, &fl, &port) == 0 && drops == 0 && xmits == 0);
+
+	/* Exact VID=7 + SID=0x000a: decrypts + reverse-DNATs + forwards zero-copy */
+	fl.t.vlan_vid = htons(7);
+	fl.t.pppoe_sid = htons(0x000a);
+	reset();
+	frame_snapshot_len = sizeof(encap);
+	memcpy(frame_snapshot, encap, sizeof(encap));
+	CHECK(wgfp_rx_fast_frame(&f2, &fl, &port) == 1);
+	CHECK(drops == 1 && xmits == 1 && xmit_egress == 3 && wgfp_p6_fwd == 1);
+	CHECK(xmit_len == ETH_HLEN + inner_len);
+	i4 = (struct iphdr *)(xmit_buf + ETH_HLEN);
+	CHECK(i4->ttl == 63 && i4->daddr == rec.nat.daddr &&
+	      ip_fast_csum((u8 *)i4, 5) == 0);
+	CHECK(!memcmp(xmit_buf + ETH_HLEN + sizeof(*i4) + 2, &rec.nat.dport, 2));
+
+	/* Custom outer VLAN MAC differing from port.dev_addr works when fl.dst_mac is set */
+	{
+		const u8 custom_mac[ETH_ALEN] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee };
+
+		p.nonce = 41;
+		f = build(&p);
+		outer_ip_len = f.len - ETH_HLEN;
+		memset(encap, 0, sizeof(encap));
+		memcpy(encap + 128, custom_mac, ETH_ALEN);
+		memcpy(encap + 128 + 6, f.buf + f.off + 6, ETH_ALEN);
+		encap[128 + 12] = 0x81; encap[128 + 13] = 0x00;
+		encap[128 + 14] = 0x00; encap[128 + 15] = 0x07;
+		encap[128 + 16] = 0x88; encap[128 + 17] = 0x64;
+		encap[128 + 18] = 0x11; encap[128 + 19] = 0x00;
+		encap[128 + 20] = 0x00; encap[128 + 21] = 0x0a;
+		encap[128 + 22] = (u8)((2 + outer_ip_len) >> 8);
+		encap[128 + 23] = (u8)((2 + outer_ip_len) & 0xff);
+		encap[128 + 24] = 0x00; encap[128 + 25] = 0x21;
+		memcpy(encap + 128 + 26, f.buf + f.off + ETH_HLEN, outer_ip_len);
+		memcpy(fl.dst_mac, custom_mac, ETH_ALEN);
+		reset();
+		frame_snapshot_len = sizeof(encap);
+		memcpy(frame_snapshot, encap, sizeof(encap));
+		CHECK(wgfp_rx_fast_frame(&f2, &fl, &port) == 1 && wgfp_p6_fwd == 1);
+	}
+}
+
 int main(void)
 {
 	test_forward_v4();
@@ -778,6 +881,7 @@ int main(void)
 	test_stack_handoffs();
 	test_left_to_p3();
 	test_tail();
+	test_pppoe_vlan_and_nat_forward();
 	free(last_skb);
 	puts("wgfp_p6: ok");
 	return 0;

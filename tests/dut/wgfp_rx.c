@@ -41,7 +41,7 @@ struct dpaa_wgfp_frame {
 
 struct peer { void *device; };
 struct pst { struct peer *peer; };
-struct wgfp_flow { int ifindex; struct { int family; } t; struct pst *pst; };
+struct wgfp_flow { int ifindex; struct { int family; uint16_t vlan_vid, pppoe_sid; } t; struct pst *pst; };
 
 static int init_net, wgfp_rx_frames, wgfp_rx_stack, fast, stack, delivered_len;
 static struct net_device dev = { IFF_UP, 3 };
