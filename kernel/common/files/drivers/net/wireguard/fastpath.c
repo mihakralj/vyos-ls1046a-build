@@ -1362,6 +1362,8 @@ static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 			     const struct dpaa_wgfp_tuple *t,
 			     struct dpaa_wgfp_tuple *orig_out,
 			     struct wgfp_nat *nat_out);
+static void wgfp_ct_set_liberal(struct net *net, struct sk_buff *skb,
+				const struct dpaa_wgfp_tuple *orig);
 
 static char wgfp_peer_cfg[WGFP_MAX_BIND * (IFNAMSIZ + 1) + 8] = "off";
 static char wgfp_owner_aliases[WGFP_OWNER_ALIASES_SIZE];
@@ -1766,6 +1768,7 @@ struct wgfp_flow {
 	u8 slot;		/* sink index given to dpaa_wgfp_flow_add() */
 	u8 idle;
 	u64 pkts;
+	u64 age_gen;
 	unsigned long since;
 };
 
@@ -2197,8 +2200,11 @@ static unsigned int wgfp_rflow_hook(void *priv, struct sk_buff *skb,
 		r = NULL;
 	}
 	spin_unlock_bh(&wgfp_flows_lock);
-	if (r)
+	if (r) {
+		if (t.proto == IPPROTO_TCP)
+			wgfp_ct_set_liberal(state->net, skb, &orig);
 		atomic64_inc(&wgfp_p6_learn);
+	}
 	return NF_ACCEPT;
 }
 
@@ -3234,23 +3240,9 @@ static bool wgfp_ct_admitted(struct net *net, struct sk_buff *skb,
 	    (ct->status & IPS_SEQ_ADJUST) ||
 	    ct->master || nfct_help(ct))
 		goto out_put;
-	if (post->proto == IPPROTO_TCP) {
-		if (READ_ONCE(ct->proto.tcp.state) != TCP_CONNTRACK_ESTABLISHED)
-			goto out_put;
-		/* WGFP bypasses conntrack on packets 33+, so disable strict
-		 * TCP window tracking just as nf_flow_offload_add() does;
-		 * otherwise 1s P6 renewal and punted FIN/RST fail
-		 * tcp_in_window() and lose reverse-NAT / ct lookup. */
-		if (!(READ_ONCE(ct->proto.tcp.seen[0].flags) &
-		      IP_CT_TCP_FLAG_BE_LIBERAL) ||
-		    !(READ_ONCE(ct->proto.tcp.seen[1].flags) &
-		      IP_CT_TCP_FLAG_BE_LIBERAL)) {
-			spin_lock_bh(&ct->lock);
-			ct->proto.tcp.seen[0].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
-			ct->proto.tcp.seen[1].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
-			spin_unlock_bh(&ct->lock);
-		}
-	}
+	if (post->proto == IPPROTO_TCP &&
+	    READ_ONCE(ct->proto.tcp.state) != TCP_CONNTRACK_ESTABLISHED)
+		goto out_put;
 	if (ct->status & IPS_NAT_MASK) {
 		const struct nf_conntrack_tuple *ct_orig =
 			&ct->tuplehash[dir].tuple;
@@ -3301,6 +3293,64 @@ out_put:
 	*orig_out = *post;
 	memset(nat_out, 0, sizeof(*nat_out));
 	return false;	/* no conntrack: no proof the flow was admitted */
+#endif
+}
+
+/* Disable strict TCP window tracking ONLY once a flow or rflow is actually
+ * installed (matches nf_flow_offload_add()), so declined or non-accelerated
+ * TCP flows keep full firewall window validation. */
+static void wgfp_ct_set_liberal(struct net *net, struct sk_buff *skb,
+				const struct dpaa_wgfp_tuple *orig)
+{
+#if IS_REACHABLE(CONFIG_NF_CONNTRACK)
+	enum ip_conntrack_info ctinfo;
+	struct nf_conn *ct = skb ? nf_ct_get(skb, &ctinfo) : NULL;
+	bool put = false;
+
+	if (!orig || orig->proto != IPPROTO_TCP)
+		return;
+	if (!ct) {
+		struct nf_conntrack_tuple tuple = {};
+		struct nf_conntrack_tuple_hash *h;
+
+		tuple.src.l3num = orig->family;
+		if (orig->family == AF_INET6) {
+			tuple.src.u3.in6 = orig->saddr6;
+			tuple.dst.u3.in6 = orig->daddr6;
+		} else {
+			tuple.src.u3.ip = orig->saddr;
+			tuple.dst.u3.ip = orig->daddr;
+		}
+		tuple.src.u.all = orig->sport;
+		tuple.dst.u.all = orig->dport;
+		tuple.dst.protonum = orig->proto;
+		tuple.dst.dir = IP_CT_DIR_ORIGINAL;
+		h = nf_conntrack_find_get(net, &nf_ct_zone_dflt, &tuple);
+		if (!h)
+			return;
+		ct = nf_ct_tuplehash_to_ctrack(h);
+		put = true;
+	}
+	if (!nf_ct_is_dying(ct) && !nf_ct_is_expired(ct) &&
+	    READ_ONCE(ct->proto.tcp.state) == TCP_CONNTRACK_ESTABLISHED &&
+	    (!(READ_ONCE(ct->proto.tcp.seen[0].flags) &
+	       IP_CT_TCP_FLAG_BE_LIBERAL) ||
+	     !(READ_ONCE(ct->proto.tcp.seen[1].flags) &
+	       IP_CT_TCP_FLAG_BE_LIBERAL))) {
+		spin_lock_bh(&ct->lock);
+		if (!nf_ct_is_dying(ct) &&
+		    ct->proto.tcp.state == TCP_CONNTRACK_ESTABLISHED) {
+			ct->proto.tcp.seen[0].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
+			ct->proto.tcp.seen[1].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
+		}
+		spin_unlock_bh(&ct->lock);
+	}
+	if (put)
+		nf_ct_put(ct);
+#else
+	(void)net;
+	(void)skb;
+	(void)orig;
 #endif
 }
 
@@ -3560,6 +3610,9 @@ static void wgfp_flow_work_fn(struct work_struct *w)
 			      dpaa_wgfp_flow_del(dev, &job[i].t);
 			dev_put(dev);
 		}
+		if (job[i].add && err >= 0 && !job[i].rx &&
+		    job[i].t.proto == IPPROTO_TCP)
+			wgfp_ct_set_liberal(&init_net, NULL, &job[i].t);
 		spin_lock_bh(&wgfp_flows_lock);
 		fl = job[i].fl;
 		if (job[i].add) {
@@ -3747,69 +3800,26 @@ static bool wgfp_ct_nat_matches(const struct nf_conn *ct,
 }
 #endif
 
-/* Withdraw records whose silicon counter stopped moving or whose inner
- * destination no longer maps to their peer (AllowedIPs changed); forget
- * failures and flows that never reached WGFP_ADMIT; free peers without flows.
- * The teardown cancels this work before it frees anything else. */
-static void wgfp_age_fn(struct work_struct *w)
-{
-	struct wgfp_age_job {
-		struct wgfp_flow *fl;
-		struct dpaa_wgfp_tuple t;
-		struct wgfp_nat nat;
-		u64 prev_pkts;
-		int ifindex;
-		u32 hash;
-		struct wgfp_pst *pst;
-	} *job;
-	static unsigned int cursor;
-	unsigned int n = 0, i, bkt, seen = 0;
+struct wgfp_age_job {
 	struct wgfp_flow *fl;
-	struct hlist_node *tmp;
-	struct sk_buff *probe;
+	struct dpaa_wgfp_tuple t;
+	struct wgfp_nat nat;
+	u64 prev_pkts;
+	int ifindex;
+	u32 hash;
+	struct wgfp_pst *pst;
+};
+
+static bool wgfp_age_run_chunk(struct wgfp_age_job *job, unsigned int n,
+			       struct sk_buff *probe)
+{
+	unsigned int i;
 	bool kick = false;
-
-	job = kcalloc(WGFP_BATCH, sizeof(*job), GFP_KERNEL);
-	if (!job)
-		goto reschedule;
-
-	/* wg_allowedips_lookup_dst() takes an skb; one IP header suffices. */
-	probe = alloc_skb(sizeof(struct ipv6hdr), GFP_KERNEL);
-	if (probe) {
-		skb_reset_network_header(probe);
-		skb_put_zero(probe, sizeof(struct ipv6hdr));
-	}
-
-	spin_lock_bh(&wgfp_flows_lock);
-	hash_for_each_safe(wgfp_flows, bkt, tmp, fl, node) {
-		if ((fl->state == WGFP_FAILED && !fl->del &&
-		     time_after(jiffies, fl->since + WGFP_FAIL_HOLD)) ||
-		    (fl->state == WGFP_LEARNING &&
-		     time_after(jiffies, fl->since + WGFP_AGE_IDLE * WGFP_AGE_PERIOD))) {
-			wgfp_flow_free_locked(fl);
-			continue;
-		}
-		/* the outer record lives as long as its peer state */
-		if (fl->state != WGFP_INSTALLED || fl->del || fl->rx)
-			continue;
-		/* round-robin over passes when there are more than a batch */
-		if (seen++ < cursor || n == WGFP_BATCH)
-			continue;
-		job[n].fl = fl;
-		job[n].t = fl->t;
-		job[n].nat = fl->nat;
-		job[n].prev_pkts = fl->pkts;
-		job[n].ifindex = fl->ifindex;
-		job[n].hash = fl->hash;
-		job[n].pst = fl->pst;	/* only this work frees psts */
-		n++;
-	}
-	cursor = (n == WGFP_BATCH) ? cursor + n : 0;
-	spin_unlock_bh(&wgfp_flows_lock);
 
 	for (i = 0; i < n; i++) {
 		struct net_device *dev = dev_get_by_index(&init_net, job[i].ifindex);
 		struct wgfp_pst *pst = job[i].pst;
+		struct wgfp_flow *fl;
 		bool foreign = false, family = false, ct_dead = false;
 		u64 pkts = 0;
 		int err = -ENODEV;
@@ -3910,6 +3920,120 @@ static void wgfp_age_fn(struct work_struct *w)
 		}
 		spin_unlock_bh(&wgfp_flows_lock);
 	}
+	return kick;
+}
+
+/* Withdraw records whose silicon counter stopped moving or whose inner
+ * destination no longer maps to their peer (AllowedIPs changed); forget
+ * failures and flows that never reached WGFP_ADMIT; free peers without flows.
+ * NAT flows are scanned in full every tick (2 s) so active conntrack timeouts
+ * never expire and conntrack -F / NAT changes withdraw within <= 2 s even at
+ * WGFP_FLOW_MAX; non-NAT flows scale batch count to complete within ~10 s.
+ * The teardown cancels this work before it frees anything else. */
+static void wgfp_age_fn(struct work_struct *w)
+{
+	static unsigned int cursor;
+	static u64 nat_age_gen;
+	const unsigned int max_nat_chunks = DIV_ROUND_UP(WGFP_FLOW_MAX, WGFP_BATCH);
+	struct wgfp_age_job *job;
+	unsigned int n, bkt, seen, chunk, non_nat_total = 0, non_nat_chunks;
+	struct wgfp_flow *fl;
+	struct hlist_node *tmp;
+	struct sk_buff *probe;
+	bool kick = false;
+
+	job = kcalloc(WGFP_BATCH, sizeof(*job), GFP_KERNEL);
+	if (!job)
+		goto reschedule;
+
+	/* wg_allowedips_lookup_dst() takes an skb; one IP header suffices. */
+	probe = alloc_skb(sizeof(struct ipv6hdr), GFP_KERNEL);
+	if (probe) {
+		skb_reset_network_header(probe);
+		skb_put_zero(probe, sizeof(struct ipv6hdr));
+	}
+
+	/* Reap stale FAILED/LEARNING entries and count installed non-NAT flows. */
+	spin_lock_bh(&wgfp_flows_lock);
+	hash_for_each_safe(wgfp_flows, bkt, tmp, fl, node) {
+		if ((fl->state == WGFP_FAILED && !fl->del &&
+		     time_after(jiffies, fl->since + WGFP_FAIL_HOLD)) ||
+		    (fl->state == WGFP_LEARNING &&
+		     time_after(jiffies, fl->since + WGFP_AGE_IDLE * WGFP_AGE_PERIOD))) {
+			wgfp_flow_free_locked(fl);
+			continue;
+		}
+		if (fl->state == WGFP_INSTALLED && !fl->del && !fl->rx &&
+		    !fl->nat.flags)
+			non_nat_total++;
+	}
+	spin_unlock_bh(&wgfp_flows_lock);
+
+	/* Pass 1: visit EVERY installed NAT flow on every 2 s tick. */
+	if (++nat_age_gen == 0)
+		nat_age_gen = 1;
+	for (chunk = 0; chunk < max_nat_chunks; chunk++) {
+		n = 0;
+		spin_lock_bh(&wgfp_flows_lock);
+		hash_for_each(wgfp_flows, bkt, fl, node) {
+			if (fl->state != WGFP_INSTALLED || fl->del || fl->rx ||
+			    !fl->nat.flags || fl->age_gen == nat_age_gen)
+				continue;
+			fl->age_gen = nat_age_gen;
+			job[n].fl = fl;
+			job[n].t = fl->t;
+			job[n].nat = fl->nat;
+			job[n].prev_pkts = fl->pkts;
+			job[n].ifindex = fl->ifindex;
+			job[n].hash = fl->hash;
+			job[n].pst = fl->pst;	/* only this work frees psts */
+			if (++n == WGFP_BATCH)
+				break;
+		}
+		spin_unlock_bh(&wgfp_flows_lock);
+		if (!n)
+			break;
+		if (wgfp_age_run_chunk(job, n, probe))
+			kick = true;
+		if (n < WGFP_BATCH)
+			break;
+		cond_resched();
+	}
+
+	/* Pass 2: round-robin non-NAT flows scaled to <= WGFP_AGE_IDLE ticks. */
+	non_nat_chunks = max_t(unsigned int, 1U,
+			       DIV_ROUND_UP(non_nat_total,
+					    WGFP_AGE_IDLE * WGFP_BATCH));
+	for (chunk = 0; chunk < non_nat_chunks; chunk++) {
+		n = 0;
+		seen = 0;
+		spin_lock_bh(&wgfp_flows_lock);
+		hash_for_each(wgfp_flows, bkt, fl, node) {
+			if (fl->state != WGFP_INSTALLED || fl->del || fl->rx ||
+			    fl->nat.flags)
+				continue;
+			if (seen++ < cursor || n == WGFP_BATCH)
+				continue;
+			job[n].fl = fl;
+			job[n].t = fl->t;
+			job[n].nat = fl->nat;
+			job[n].prev_pkts = fl->pkts;
+			job[n].ifindex = fl->ifindex;
+			job[n].hash = fl->hash;
+			job[n].pst = fl->pst;	/* only this work frees psts */
+			n++;
+		}
+		cursor = (n == WGFP_BATCH) ? cursor + n : 0;
+		spin_unlock_bh(&wgfp_flows_lock);
+		if (!n)
+			break;
+		if (wgfp_age_run_chunk(job, n, probe))
+			kick = true;
+		if (!cursor)
+			break;
+		cond_resched();
+	}
+
 	kfree_skb(probe);
 	kfree(job);
 	if (kick)

@@ -679,6 +679,7 @@ struct ask_hw_port {
 	u8              g4_udp_class;   /* F-323 G4 UDP class row (1..3), 0=none */
 	u8              g4_esp_class;   /* F-323 G4 ESP class row (1..3), 0=none */
 	u8              l2_class;       /* F-324 G5b ETH-HXS L2_DA class row (1..3) */
+	bool            g4_suspended_for_l2; /* G4 detached/skipped for bridge L2 */
 	bool            fe_retained;    /* F-289 FE disengage failed; FMan kept state */
 	bool            teardown_in_progress;
 	bool            l2_tearing_down;
@@ -1911,8 +1912,12 @@ static int ask_hw_offload_engage_profile(u8 hw_port_id,
 	 * family admission so concurrent REPLACE never routes UDP to row 0.
 	 * Skip when engaging a mixed-profile bridge member (G5b will attach
 	 * ETH HXS L2_DA immediately under rtnl). */
-	if (!skip_g4)
+	if (!skip_g4) {
+		p->g4_suspended_for_l2 = false;
 		ask_hw_g4_attach_port(h, p);
+	} else {
+		p->g4_suspended_for_l2 = READ_ONCE(ask_g4_udp_class);
+	}
 	ask_hw_set_family_locked(hw_port_id, family);
 	/* F-266: optional; a failure leaves the port engaged without it. */
 	ask_hw_punt_apply(h, p, ask_hw_punt_wanted(p));
@@ -2285,6 +2290,7 @@ int ask_hw_offload_disengage(u8 hw_port_id)
 			p->g4_udp_class = 0;
 			p->g4_esp_class = 0;
 			p->l2_class = 0;
+			p->g4_suspended_for_l2 = false;
 		}
 		p->teardown_in_progress = !rc;
 		p->l2_tearing_down = !rc && had_l2;
@@ -2496,6 +2502,7 @@ int ask_hw_fe_reengage(u8 hw_port_id)
 		p->g4_udp_class = 0;
 		p->g4_esp_class = 0;
 		p->l2_class = 0;
+		p->g4_suspended_for_l2 = false;
 		clear_bit(hw_port_id, ask_hw_port_l2);
 		rc = fman_pcd_fe_engage(h->fman, hw_port_id, 0);
 	}
@@ -3127,9 +3134,36 @@ bool ask_hw_port_has_g4(u8 hw_port_id)
 	return has;
 }
 
+bool ask_hw_port_wants_g4_restore(u8 hw_port_id)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	bool wants = false;
+	unsigned int i;
+
+	if (!h || hw_port_id >= ARRAY_SIZE(ask_hw_role_admin_disabled))
+		return false;
+	mutex_lock(&h->lock);
+	for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+		struct ask_hw_port *p = &h->port[i];
+
+		if (p->in_use && p->port_id == hw_port_id) {
+			wants = p->offload_engaged && !p->fe_retained &&
+				!p->teardown_in_progress &&
+				!ask_hw_role_admin_disabled[hw_port_id] &&
+				ask_hw_port_family_get(hw_port_id) != 0 &&
+				p->g4_suspended_for_l2 &&
+				READ_ONCE(ask_g4_udp_class);
+			break;
+		}
+	}
+	mutex_unlock(&h->lock);
+	return wants;
+}
+
 static int ask_hw_g4_detach_port_locked(struct ask_hw_pcd *h,
 					struct ask_hw_port *p)
 {
+	bool had_g4 = p->g4_udp_class || p->g4_esp_class;
 	int rc;
 
 	if (p->g4_udp_class) {
@@ -3159,6 +3193,8 @@ static int ask_hw_g4_detach_port_locked(struct ask_hw_pcd *h,
 		}
 		p->g4_esp_class = 0;
 	}
+	if (had_g4)
+		p->g4_suspended_for_l2 = true;
 	return 0;
 }
 
@@ -3280,7 +3316,23 @@ int ask_hw_l2_class_detach(u8 hw_port_id)
 			break;
 		}
 	}
-	if (!p || !p->offload_engaged || !p->l2_class) {
+	if (!p || !p->offload_engaged || p->fe_retained ||
+	    p->teardown_in_progress) {
+		mutex_unlock(&h->lock);
+		return 0;
+	}
+	if (!p->l2_class) {
+		/* Restore G4 only if it was explicitly suspended for bridge L2
+		 * (e.g. aborted join or bridge_offload 1->0) and the port is
+		 * still active and not admin-disabled/disengaging. */
+		if (p->g4_suspended_for_l2 &&
+		    hw_port_id < ARRAY_SIZE(ask_hw_role_admin_disabled) &&
+		    !ask_hw_role_admin_disabled[hw_port_id] &&
+		    ask_hw_port_family_get(hw_port_id) != 0) {
+			p->g4_suspended_for_l2 = false;
+			if (!p->g4_udp_class && !p->g4_esp_class)
+				ask_hw_g4_attach_port(h, p);
+		}
 		mutex_unlock(&h->lock);
 		return 0;
 	}
@@ -3290,7 +3342,13 @@ int ask_hw_l2_class_detach(u8 hw_port_id)
 		ask_pr_info("hw: G5b L2_DA class row %u detached on port 0x%02x\n",
 			    p->l2_class, hw_port_id);
 		p->l2_class = 0;
-		ask_hw_g4_attach_port(h, p);
+		if (p->g4_suspended_for_l2 &&
+		    hw_port_id < ARRAY_SIZE(ask_hw_role_admin_disabled) &&
+		    !ask_hw_role_admin_disabled[hw_port_id] &&
+		    ask_hw_port_family_get(hw_port_id) != 0) {
+			p->g4_suspended_for_l2 = false;
+			ask_hw_g4_attach_port(h, p);
+		}
 	} else if (rc == -EBUSY) {
 		set_bit(hw_port_id, ask_hw_port_l2);
 	} else {

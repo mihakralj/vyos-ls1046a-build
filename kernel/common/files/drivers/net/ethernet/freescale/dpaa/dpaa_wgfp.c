@@ -87,7 +87,9 @@ void dpaa_wgfp_egress_deactivate(struct net_device *dev);
 #define WGFP_MAX_BPIDS		64
 
 static struct device *wgfp_bpid_dev[WGFP_MAX_BPIDS];
-static u8 wgfp_bpid_need_sync[WGFP_MAX_BPIDS];
+static u8 wgfp_bpid_need_sync[WGFP_MAX_BPIDS] = {
+	[0 ... WGFP_MAX_BPIDS - 1] = 1,
+};
 
 static inline struct device *wgfp_dma_dev_fast(u8 bpid, bool *need_sync)
 {
@@ -107,6 +109,9 @@ static inline struct device *wgfp_dma_dev_fast(u8 bpid, bool *need_sync)
 			smp_wmb();
 			WRITE_ONCE(wgfp_bpid_dev[bpid], dev);
 		}
+	} else {
+		/* Pair with smp_wmb() above before reading cached need_sync. */
+		smp_rmb();
 	}
 	*need_sync = dev && READ_ONCE(wgfp_bpid_need_sync[bpid]);
 	return dev;
@@ -1852,10 +1857,13 @@ static int wgfp_netdev_event(struct notifier_block *nb, unsigned long event,
 	if (event == NETDEV_UNREGISTER) {
 		unsigned int i;
 
-		for (i = 0; i < WGFP_MAX_BPIDS; i++) {
+		/* Reset need_sync to 1 (conservative sync) before clearing the
+		 * cached dev pointer so in-flight frames never skip DMA sync. */
+		for (i = 0; i < WGFP_MAX_BPIDS; i++)
+			WRITE_ONCE(wgfp_bpid_need_sync[i], 1);
+		smp_wmb();
+		for (i = 0; i < WGFP_MAX_BPIDS; i++)
 			WRITE_ONCE(wgfp_bpid_dev[i], NULL);
-			WRITE_ONCE(wgfp_bpid_need_sync[i], 0);
-		}
 	}
 	return NOTIFY_OK;
 }

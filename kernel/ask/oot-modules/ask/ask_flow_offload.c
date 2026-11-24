@@ -1117,6 +1117,10 @@ static int ask_flow_pending_enqueue(u64 cookie,
 		 * silicon.  PR14z6 (future) can capture the dir at
 		 * defer time and replay it here.
 		 */
+		/* F-323/G5b: resample G4 UDP class index in case the port
+		 * attached/detached a class while this flow waited for neigh. */
+		if (p->key.l4_proto == IPPROTO_UDP)
+			p->key.table_idx = ask_hw_get_udp_class(p->key.port_id);
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
 		rc = ask_neigh_republish_fenced(t, p->cookie, &p->key, p->oif,
 						p->action_flags, p->dir,
@@ -1380,7 +1384,8 @@ static int ask_neigh_republish_fenced(struct ask_flow_table *t, u64 cookie,
 	rc = ask_flow_fe_install(key, hw_id, NULL, cookie, fe_token);
 	if (rc) {
 		int wrc = ask_flow_withdraw_owned(t, cookie, generation,
-						  fe_token, key, hw_backed,
+						  fe_token, key,
+						  hw_backed && rc != -EAGAIN,
 						  "neigh republish rollback",
 						  NULL);
 
@@ -1599,6 +1604,10 @@ bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 						 &old_mac_overflow, fx->old_mac);
 			goto neigh_next;
 		}
+		/* F-323/G5b: resample G4 UDP class index after withdrawing
+		 * old_key so SW+HW stay synchronized with current class state. */
+		if (fx->key.l4_proto == IPPROTO_UDP)
+			fx->key.table_idx = ask_hw_get_udp_class(fx->key.port_id);
 		rc = ask_neigh_republish(t, fx->cookie, &fx->key, fx->oif,
 					 fx->action_flags, fx->dir,
 					 fx->generation, policy_epoch);
@@ -1798,6 +1807,10 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 					    p->cookie);
 			goto poll_next;
 		}
+		/* F-323/G5b: resample G4 UDP class index in case the port
+		 * attached/detached a class while this flow waited for neigh. */
+		if (p->key.l4_proto == IPPROTO_UDP)
+			p->key.table_idx = ask_hw_get_udp_class(p->key.port_id);
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
 		rc = ask_neigh_republish_fenced(t, p->cookie, &p->key, p->oif,
 						p->action_flags, p->dir,
@@ -5730,7 +5743,8 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	rc = ask_flow_fe_install(&key, hw_id, egress_dev, f->cookie, fe_token);
 	if (rc) {
 		int rrc = ask_flow_withdraw_owned(t, (u64)f->cookie, generation,
-						  fe_token, &key, true,
+						  fe_token, &key,
+						  rc != -EAGAIN,
 						  "REPLACE rollback", NULL);
 
 		ask_pr_warn("flow_offload: REPLACE rollback cookie=0x%lx fe_flow_insert=%d\n",

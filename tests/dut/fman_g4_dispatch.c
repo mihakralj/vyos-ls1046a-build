@@ -107,6 +107,8 @@ static void iowrite32be(u32 val, void *addr)
 
 #define FMAN_PCD_FE_MAX_CLASSES		3
 #define FMAN_PCD_FE_CLASS_CODE_MAX	16
+#define FMAN_PCD_FE_CLASS_MAC_MAX	2
+#define FMAN_PCD_FE_CLASS_MAC_WORDS	9
 #define FMAN_EHASH_MASK_MAX		0x7fffU
 
 struct fman_pcd_fe_class_cfg {
@@ -120,6 +122,8 @@ struct fman_pcd_fe_class_cfg {
 	u8   code_words;
 	u8   patch_word_idx;
 	u32  code[FMAN_PCD_FE_CLASS_CODE_MAX];
+	u8   mac_exclude_cnt;
+	u8   mac_exclude[FMAN_PCD_FE_CLASS_MAC_MAX][6];
 };
 
 struct keygen_scheme {
@@ -189,6 +193,9 @@ struct fman_pcd_fe_class {
 	u32  saved_ssa;
 	u32  prev_code[FMAN_PCD_FE_CLASS_CODE_MAX];
 	struct fman_pcd_ehash_table *table;
+	bool mac_filter;
+	u8   mac_exclude_cnt;
+	u8   mac_exclude[FMAN_PCD_FE_CLASS_MAC_MAX][6];
 };
 
 struct fman_pcd_fe_port {
@@ -221,7 +228,8 @@ static int trace_n;
 static void log_ev(enum ev_kind e) { assert(trace_n < 64); trace[trace_n++] = e; }
 
 enum fail_point {
-	FAIL_NONE = 0, FAIL_KG_SETUP, FAIL_KG_BIND, FAIL_PRS_WRITE,
+	FAIL_NONE = 0, FAIL_KG_SETUP, FAIL_KG_SETUP_AND_CLEAR,
+	FAIL_KG_BIND, FAIL_KG_BIND_AND_CLEAR, FAIL_PRS_WRITE,
 	FAIL_SP_ATTACH, FAIL_SP_ATTACH_AND_DEL, FAIL_SYNC1, FAIL_SYNC2,
 	FAIL_SP_DISARM
 };
@@ -305,15 +313,19 @@ kg_find_port_scheme(struct fman_keygen *kg, u8 hw_port_id, u8 *id_out)
 
 static int keygen_scheme_setup_verified(struct fman_keygen *kg, u8 sid)
 {
-	if (inject_fail == FAIL_KG_SETUP)
-		return -EIO;
 	kg->schemes[sid].used = true;
 	kg->hw_cleared[sid] = false;
+	if (inject_fail == FAIL_KG_SETUP ||
+	    inject_fail == FAIL_KG_SETUP_AND_CLEAR)
+		return -EIO;
 	return 0;
 }
 
 static int keygen_scheme_clear(struct fman_keygen *kg, u8 sid)
 {
+	if (inject_fail == FAIL_KG_SETUP_AND_CLEAR ||
+	    inject_fail == FAIL_KG_BIND_AND_CLEAR)
+		return -EIO;
 	memset(&kg->schemes[sid], 0, sizeof(kg->schemes[sid]));
 	kg->hw_cleared[sid] = true;
 	kg->hw_spc[sid] = 0;
@@ -328,7 +340,8 @@ static int keygen_scheme_read_spc(struct fman_keygen *kg, u8 sid, u32 *spc)
 
 static int keygen_bind_port_to_schemes(struct fman_keygen *kg, u8 sid, bool bind)
 {
-	if (bind && inject_fail == FAIL_KG_BIND)
+	if (bind && (inject_fail == FAIL_KG_BIND ||
+		     inject_fail == FAIL_KG_BIND_AND_CLEAR))
 		return -EIO;
 	if (!bind && inject_fail == FAIL_SP_ATTACH_AND_DEL)
 		return -EIO;
@@ -647,6 +660,35 @@ int main(void)
 	mock_primary_conflict = false;
 	mock_miss_fqid = 0;
 	assert(fman_pcd_fe_class_attach(&fm, 0x10, &cfg, &idx1) == -EIO);
+
+	/* 9. Attach fail-closed when KG setup/bind fails AND scheme clear fails:
+	 * must fault port and retain MURAM row + DDR table + parser slot so
+	 * a live enabled KG scheme cannot reference a freed table. */
+	reset_env(&fm, &kg, &pcd, &fp, &primary_tbl);
+	inject_fail = FAIL_KG_SETUP_AND_CLEAR;
+	cfg.hxs_slot = 11;
+	cfg.key_size = 49;
+	assert(fman_pcd_fe_class_attach(&fm, 0x10, &cfg, &idx1) == -EIO);
+	assert(test_bit(0x10, pcd.fe_port_faulted));
+	assert(kg.schemes[31].used);
+	assert(mock_muram[(0x400 + 16) / 4 + 0] != 0);
+	assert(list_last_entry(&pcd.fe_ehash_tables,
+			       struct fman_pcd_ehash_table, node) != &primary_tbl);
+	fman_pcd_ehash_table_free(&pcd, list_last_entry(&pcd.fe_ehash_tables,
+							struct fman_pcd_ehash_table, node));
+
+	reset_env(&fm, &kg, &pcd, &fp, &primary_tbl);
+	inject_fail = FAIL_KG_BIND_AND_CLEAR;
+	cfg.hxs_slot = 11;
+	cfg.key_size = 49;
+	assert(fman_pcd_fe_class_attach(&fm, 0x10, &cfg, &idx1) == -EIO);
+	assert(test_bit(0x10, pcd.fe_port_faulted));
+	assert(kg.schemes[31].used);
+	assert(mock_muram[(0x400 + 16) / 4 + 0] != 0);
+	assert(list_last_entry(&pcd.fe_ehash_tables,
+			       struct fman_pcd_ehash_table, node) != &primary_tbl);
+	fman_pcd_ehash_table_free(&pcd, list_last_entry(&pcd.fe_ehash_tables,
+							struct fman_pcd_ehash_table, node));
 
 	printf("fman_g4_dispatch: all checks passed\n");
 	return 0;

@@ -286,8 +286,11 @@ static int fman_pcd_ehash_table_free(struct fman_pcd *pcd, struct fman_pcd_ehash
     return 0;
 }
 static int fman_pcd_kg_port_add_class_scheme(struct fman_pcd *pcd, u8 pid, u8 row,
-        u32 ekfc, const u32 gec[8], bool custom_gec, u8 *sid_out) {
+        u32 ekfc, const u32 gec[8], bool custom_gec, u8 *sid_out,
+        bool *retained_out) {
     (void)pcd; (void)pid; (void)row; (void)ekfc; (void)gec; (void)custom_gec;
+    if (retained_out)
+        *retained_out = false;
     *sid_out = sim_next_sid--;
     return 0;
 }

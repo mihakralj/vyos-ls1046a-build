@@ -328,29 +328,40 @@ int ask_bridge_sync_port_class(struct net_device *dev)
 	br = netif_is_bridge_port(dev) ? netdev_master_upper_dev_get(dev) : NULL;
 	if (br && netif_is_bridge_master(br) && ask_hw_bridge_offload_armed()) {
 		cnt = ask_bridge_collect_router_macs(dev, br, macs);
-		if (cnt) {
-			/* If G4 UDP/ESP classes are active on this port (e.g.
-			 * bridge_offload 0->1 while g4_udp_class=1), pause G4
-			 * admission and withdraw routed flows before detaching
-			 * G4 so L2_DA attach does not fail -EBUSY. */
-			if (ask_hw_port_has_g4(port)) {
-				ask_hw_g4_pause_port(port);
-				rc = ask_flow_port_withdraw(port, dev->ifindex);
-				if (rc)
-					ask_hw_g4_resume_port(port);
-				else
-					rc = ask_hw_g4_detach_port(port);
-				if (rc) {
-					pr_warn_ratelimited("ask: bridge: G5b G4 quiesce on %s (port 0x%02x) failed: %d\n",
-							    netdev_name(dev), port, rc);
-					return rc;
-				}
-			}
-			rc = ask_hw_l2_class_attach(port, macs, cnt);
-			if (rc && rc != -ENODEV)
-				pr_warn_ratelimited("ask: bridge: G5b class sync on %s (port 0x%02x) failed: %d\n",
+		if (!cnt)
+			return 0;
+		/* If G4 UDP/ESP classes are active on this port (e.g.
+		 * bridge_offload 0->1 while g4_udp_class=1), pause G4
+		 * admission and withdraw routed flows before detaching
+		 * G4 so L2_DA attach does not fail -EBUSY. */
+		if (ask_hw_port_has_g4(port)) {
+			ask_hw_g4_pause_port(port);
+			rc = ask_flow_port_withdraw(port, dev->ifindex);
+			if (rc)
+				ask_hw_g4_resume_port(port);
+			else
+				rc = ask_hw_g4_detach_port(port);
+			if (rc) {
+				pr_warn_ratelimited("ask: bridge: G5b G4 quiesce on %s (port 0x%02x) failed: %d\n",
 						    netdev_name(dev), port, rc);
-			return rc == -ENODEV ? 0 : rc;
+				return rc;
+			}
+		}
+		rc = ask_hw_l2_class_attach(port, macs, cnt);
+		if (rc && rc != -ENODEV)
+			pr_warn_ratelimited("ask: bridge: G5b class sync on %s (port 0x%02x) failed: %d\n",
+					    netdev_name(dev), port, rc);
+		return rc == -ENODEV ? 0 : rc;
+	}
+	/* If detaching L2_DA (or recovering an aborted join) will re-attach G4
+	 * UDP/ESP classes, withdraw live row-0 routed flows first so HXS 11/12
+	 * cannot divert packets away from active row-0 records. */
+	if (ask_hw_port_wants_g4_restore(port)) {
+		rc = ask_flow_port_withdraw(port, dev->ifindex);
+		if (rc) {
+			pr_warn_ratelimited("ask: bridge: G5b routed withdraw before G4 restore on %s (port 0x%02x) failed: %d\n",
+					    netdev_name(dev), port, rc);
+			return rc;
 		}
 	}
 	rc = ask_hw_l2_class_detach(port);
@@ -1221,12 +1232,18 @@ static int ask_bridge_role_prechange(struct net_device *dev,
 			return NOTIFY_OK;
 		}
 		if (ask_hw_port_family_mask(port)) {
-			ask_hw_g4_pause_port(port);
+			bool drop_g4 = ask_hw_bridge_offload_armed() &&
+				       ask_hw_port_has_g4(port);
+
+			if (drop_g4)
+				ask_hw_g4_pause_port(port);
 			rc = ask_flow_port_withdraw(port, dev->ifindex);
-			if (rc)
-				ask_hw_g4_resume_port(port);
-			else
+			if (rc) {
+				if (drop_g4)
+					ask_hw_g4_resume_port(port);
+			} else if (drop_g4) {
 				rc = ask_hw_g4_detach_port(port);
+			}
 			if (rc) {
 				ask_pr_err("bridge: G5b veto join %s %s: routed/G4 quiesce failed: %d\n",
 					   netdev_name(dev),

@@ -329,15 +329,15 @@ if d "test -x /usr/local/bin/pcd-snapshot"; then
   HAVE_PCD_SNAP=1
 fi
 
-d "echo $BRIDGE_OFFLOAD | sudo tee /sys/module/ask/parameters/bridge_offload >/dev/null"
 SET_OFFLOAD=1
+d "echo $BRIDGE_OFFLOAD | sudo tee /sys/module/ask/parameters/bridge_offload >/dev/null"
 
-g1 "sudo ip addr add $A1/24 dev $GEN_IF; sudo ip -6 addr add $B1/64 dev $GEN_IF nodad"
 ADDED_G1=1
-g2 "sudo ip addr add $A2/24 dev $GEN_IF; sudo ip -6 addr add $B2/64 dev $GEN_IF nodad"
+g1 "set -e; sudo ip addr add $A1/24 dev $GEN_IF; sudo ip -6 addr add $B1/64 dev $GEN_IF nodad"
 ADDED_G2=1
-g2 "iperf3 -s -p $IPERF_PORT -D"
+g2 "set -e; sudo ip addr add $A2/24 dev $GEN_IF; sudo ip -6 addr add $B2/64 dev $GEN_IF nodad"
 STARTED_SRV=1
+g2 "iperf3 -s -p $IPERF_PORT -D"
 
 df_probe_bridge(){
   local m=$1 s4 s6 ok i
@@ -366,12 +366,13 @@ for m in "${MTU_LIST[@]}"; do
   fi
 
   say "creating non-destructive bridge $BR (eth3+eth4, MTU $m, bridge_offload=$BRIDGE_OFFLOAD)"
-  d "sudo ip link add $BR type bridge vlan_filtering 0
+  CREATED_BR=1
+  d "set -e
+     sudo ip link add $BR type bridge vlan_filtering 0
      sudo ip link set $BR mtu $m
      sudo ip link set eth3 master $BR
      sudo ip link set eth4 master $BR
      sudo ip link set $BR up"
-  CREATED_BR=1
   sleep 3
   armed_check || die "fe_arm faulted or disarmed after joining $BR"
   df_probe_bridge "$m"

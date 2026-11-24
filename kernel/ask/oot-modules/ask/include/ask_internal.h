@@ -149,6 +149,7 @@ void ask_hw_g4_pause_port(u8 hw_port_id);
 void ask_hw_g4_resume_port(u8 hw_port_id);
 int  ask_hw_g4_detach_port(u8 hw_port_id);
 bool ask_hw_port_has_g4(u8 hw_port_id);
+bool ask_hw_port_wants_g4_restore(u8 hw_port_id);
 int  ask_hw_l2_class_attach(u8 hw_port_id, const u8 macs[][6], u8 mac_cnt);
 int  ask_hw_l2_class_detach(u8 hw_port_id);
 u8   ask_hw_port_family_mask(u8 hw_port_id);
