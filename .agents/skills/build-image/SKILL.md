@@ -1,5 +1,6 @@
 ---
-name: build-image description: Dispatch (or locate) a VyOS LS1046A CI build, retrieve the latest ISO artifact from the GitHub Actions run, deploy it to the lxc200 TFTP/HTTP relay, and emit the exact `add system image <url>` command the operator runs on the board.
+name: build-image
+description: Dispatch (or locate) a VyOS LS1046A CI build, retrieve the latest ISO artifact from the GitHub Actions run, deploy it to the lxc200 TFTP/HTTP relay, and emit the exact `add system image <url>` command the operator runs on the board.
 ---
 
 # build-image

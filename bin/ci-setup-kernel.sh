@@ -3165,6 +3165,9 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # F-324: G5b full mixed-profile Bridge IRB via ETH HXS (slot 0) DA-MAC exclusion dispatch.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_324.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-f324-g5b-fixup.py" "$(pwd)" 2>&1
+    # F-325: fix upstream fman_memac memac_set_allmulti(false) wiping active multicast buckets.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_325.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f325-memac-allmulti.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_prepared_disarm,fman_arm_table 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-keygen-window.py" "$(pwd)" 2>&1
