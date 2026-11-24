@@ -144,6 +144,13 @@ void ask_hw_l2_fq_put(u32 fqid);
 int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 fe_token,
 			   u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
+bool ask_hw_irb_mixed_enabled(void);
+void ask_hw_g4_pause_port(u8 hw_port_id);
+void ask_hw_g4_resume_port(u8 hw_port_id);
+int  ask_hw_g4_detach_port(u8 hw_port_id);
+bool ask_hw_port_has_g4(u8 hw_port_id);
+int  ask_hw_l2_class_attach(u8 hw_port_id, const u8 macs[][6], u8 mac_cnt);
+int  ask_hw_l2_class_detach(u8 hw_port_id);
 u8   ask_hw_port_family_mask(u8 hw_port_id);
 u8   ask_hw_get_udp_class(u8 hw_port_id);
 int  ask_bridge_port_quiesce(u8 hw_port_id);
@@ -1332,6 +1339,9 @@ void ask_bridge_exit(void);
 void ask_bridge_kick(void);
 void ask_bridge_forget_port(u8 hw_port_id);
 enum fman_pcd_fe_profile ask_bridge_port_profile(struct net_device *dev);
+bool ask_bridge_port_wants_l2_class(struct net_device *dev);
+int  ask_bridge_sync_port_class(struct net_device *dev);
+int  ask_bridge_sync_classes(void);
 struct fman_pcd_fe_flow_action;
 void ask_bridge_key(u8 *key, const u8 *da, const u8 *sa, u16 tci,
 		    __be16 eth_type);

@@ -267,11 +267,126 @@ void ask_bridge_kick(void)
 		schedule_work(&ask_bridge_work);
 }
 
-/* D1: an engaged bridge member is L2_DA while the kill switch is on. */
+/* D1 / G5b: in mixed-profile IRB mode (default), bridge members keep ROUTED on
+ * row 0 and carry their 16B L2_DA table as a secondary ETH-HXS class. Legacy
+ * irb_mixed_profile=0 falls back to pure L2_DA on row 0. */
 static enum fman_pcd_fe_profile ask_bridge_profile_for(struct net_device *br)
 {
+	if (ask_hw_irb_mixed_enabled())
+		return FMAN_PCD_FE_PROFILE_ROUTED;
 	return br && ask_hw_bridge_offload_armed() ?
 		FMAN_PCD_FE_PROFILE_L2_DA : FMAN_PCD_FE_PROFILE_ROUTED;
+}
+
+/* Collect up to 2 valid unicast router MACs (bridge master + port own MAC if
+ * distinct) that must stay on row 0 (ROUTED) for IRB/local delivery. rtnl held. */
+static u8 ask_bridge_collect_router_macs(struct net_device *dev,
+					 struct net_device *br,
+					 u8 macs[FMAN_PCD_FE_CLASS_MAC_MAX][6])
+{
+	u8 cnt = 0;
+
+	if (br && is_valid_ether_addr(br->dev_addr))
+		ether_addr_copy(macs[cnt++], br->dev_addr);
+	if (dev && is_valid_ether_addr(dev->dev_addr) &&
+	    cnt < FMAN_PCD_FE_CLASS_MAC_MAX &&
+	    (!cnt || !ether_addr_equal(macs[0], dev->dev_addr)))
+		ether_addr_copy(macs[cnt++], dev->dev_addr);
+	return cnt;
+}
+
+/* True when @dev will hold a G5b ETH-HXS L2_DA secondary class (so engage
+ * should skip G4 UDP/ESP attachment). rtnl held. */
+bool ask_bridge_port_wants_l2_class(struct net_device *dev)
+{
+	struct net_device *br;
+
+	ASSERT_RTNL();
+	if (!dev || !ask_hw_irb_mixed_enabled() || !ask_hw_bridge_offload_armed())
+		return false;
+	if (!netif_is_bridge_port(dev))
+		return false;
+	br = netdev_master_upper_dev_get(dev);
+	return br && netif_is_bridge_master(br);
+}
+
+/* Synchronize @dev's G5b secondary L2_DA class with its live bridge membership,
+ * router MACs and ask.bridge_offload switch. rtnl held. */
+int ask_bridge_sync_port_class(struct net_device *dev)
+{
+	u8 macs[FMAN_PCD_FE_CLASS_MAC_MAX][6];
+	struct net_device *br;
+	u8 port, cnt;
+	int rc;
+
+	ASSERT_RTNL();
+	if (!dev || !ask_hw_irb_mixed_enabled() || ask_hw_dev_port(dev, &port))
+		return 0;
+	if (!ask_hw_port_family_mask(port))
+		return 0;
+
+	br = netif_is_bridge_port(dev) ? netdev_master_upper_dev_get(dev) : NULL;
+	if (br && netif_is_bridge_master(br) && ask_hw_bridge_offload_armed()) {
+		cnt = ask_bridge_collect_router_macs(dev, br, macs);
+		if (cnt) {
+			/* If G4 UDP/ESP classes are active on this port (e.g.
+			 * bridge_offload 0->1 while g4_udp_class=1), pause G4
+			 * admission and withdraw routed flows before detaching
+			 * G4 so L2_DA attach does not fail -EBUSY. */
+			if (ask_hw_port_has_g4(port)) {
+				ask_hw_g4_pause_port(port);
+				rc = ask_flow_port_withdraw(port, dev->ifindex);
+				if (rc)
+					ask_hw_g4_resume_port(port);
+				else
+					rc = ask_hw_g4_detach_port(port);
+				if (rc) {
+					pr_warn_ratelimited("ask: bridge: G5b G4 quiesce on %s (port 0x%02x) failed: %d\n",
+							    netdev_name(dev), port, rc);
+					return rc;
+				}
+			}
+			rc = ask_hw_l2_class_attach(port, macs, cnt);
+			if (rc && rc != -ENODEV)
+				pr_warn_ratelimited("ask: bridge: G5b class sync on %s (port 0x%02x) failed: %d\n",
+						    netdev_name(dev), port, rc);
+			return rc == -ENODEV ? 0 : rc;
+		}
+	}
+	rc = ask_hw_l2_class_detach(port);
+	if (rc)
+		pr_warn_ratelimited("ask: bridge: G5b class detach on %s (port 0x%02x) failed: %d\n",
+				    netdev_name(dev), port, rc);
+	return rc;
+}
+
+static int ask_bridge_sync_classes_rtnl(void)
+{
+	struct net_device *dev;
+	int first_err = 0;
+
+	ASSERT_RTNL();
+	if (!ask_hw_irb_mixed_enabled())
+		return 0;
+	for_each_netdev(&init_net, dev) {
+		int rc = ask_bridge_sync_port_class(dev);
+
+		if (rc && !first_err)
+			first_err = rc;
+	}
+	return first_err;
+}
+
+int ask_bridge_sync_classes(void)
+{
+	int rc;
+
+	if (!ask_hw_irb_mixed_enabled())
+		return 0;
+	rtnl_lock();
+	rc = ask_bridge_sync_classes_rtnl();
+	rtnl_unlock();
+	return rc;
 }
 
 /* Role for an engage of @dev from its current membership (rtnl held). */
@@ -371,9 +486,16 @@ static bool ask_bridge_flow_ok(int br_ifindex, int in_ifindex, int out_ifindex,
 	if (*act == ASK_BRIDGE_ACT_PUSH && !ask_vlan_push_only_enabled())
 		return false;
 	if (tci) {
+		struct net_device *v;
+
+		/* Reject only a VLAN vif stacked directly on @in (eth4.<vid>);
+		 * __vlan_find_dev_deep_rcu() falls back to the bridge master
+		 * and would match an IRB SVI (br0.<vid>), blocking tagged L2
+		 * bridging whenever an SVI exists for that VLAN. */
 		rcu_read_lock();
-		vif = __vlan_find_dev_deep_rcu(in, htons(ETH_P_8021Q),
-					       tci & VLAN_VID_MASK);
+		v = __vlan_find_dev_deep_rcu(in, htons(ETH_P_8021Q),
+					     tci & VLAN_VID_MASK);
+		vif = v && vlan_dev_real_dev(v) == in;
 		rcu_read_unlock();
 	}
 	return !vif &&
@@ -726,6 +848,7 @@ static void ask_bridge_work_fn(struct work_struct *w)
 	rtnl_lock();
 	/* Before ask_bridge_lock: a role prepare re-enters it via quiesce. */
 	ask_bridge_reconcile_roles();
+	(void)ask_bridge_sync_classes_rtnl();
 	mutex_lock(&ask_bridge_lock);
 	if (!ask_bridge_vlan_paused) {
 		spin_lock_bh(&ask_bridge_cand_lock);
@@ -743,6 +866,10 @@ static void ask_bridge_work_fn(struct work_struct *w)
 		queue_delayed_work(system_wq, &ask_bridge_age_work,
 				   ASK_BRIDGE_AGE_PERIOD);
 	mutex_unlock(&ask_bridge_lock);
+	/* Run class sync again after resync so any port whose stale L2 records
+	 * were just removed (failed leave quiesce or bridge_offload=0) detaches
+	 * its ETH-HXS L2_DA class immediately in the same work pass. */
+	(void)ask_bridge_sync_classes_rtnl();
 	rtnl_unlock();
 }
 
@@ -1069,6 +1196,47 @@ static int ask_bridge_role_prechange(struct net_device *dev,
 	if (!info->upper_dev || !netif_is_bridge_master(info->upper_dev) ||
 	    ask_hw_dev_port(dev, &port))
 		return NOTIFY_OK;
+
+	/* G5b mixed-profile IRB: primary row 0 stays ROUTED across join/leave.
+	 * On leave: withdraw routed flows first (so G4 reattach on detach sees
+	 * an empty row 0), quiesce BOTH ingress and peer egress bridge records
+	 * referencing @dev, then detach the secondary L2_DA class.
+	 * On join: pause G4 UDP admission, withdraw stale routed flows, and
+	 * detach G4 UDP/ESP before CHANGEUPPER attaches the L2_DA class. */
+	if (ask_hw_irb_mixed_enabled()) {
+		if (!info->linking) {
+			rc = ask_flow_port_withdraw(port, dev->ifindex);
+			if (rc)
+				ask_pr_err("bridge: G5b leave %s %s: routed withdraw failed: %d (leave proceeds)\n",
+					   netdev_name(dev),
+					   netdev_name(info->upper_dev), rc);
+			rc = ask_bridge_dev_quiesce(port, dev->ifindex);
+			if (!rc)
+				rc = ask_hw_l2_class_detach(port);
+			if (rc)
+				ask_pr_err("bridge: G5b leave %s %s: L2 class quiesce/detach failed: %d (leave proceeds)\n",
+					   netdev_name(dev),
+					   netdev_name(info->upper_dev), rc);
+			ask_bridge_kick();
+			return NOTIFY_OK;
+		}
+		if (ask_hw_port_family_mask(port)) {
+			ask_hw_g4_pause_port(port);
+			rc = ask_flow_port_withdraw(port, dev->ifindex);
+			if (rc)
+				ask_hw_g4_resume_port(port);
+			else
+				rc = ask_hw_g4_detach_port(port);
+			if (rc) {
+				ask_pr_err("bridge: G5b veto join %s %s: routed/G4 quiesce failed: %d\n",
+					   netdev_name(dev),
+					   netdev_name(info->upper_dev), rc);
+				return notifier_from_errno(rc);
+			}
+		}
+		return NOTIFY_OK;
+	}
+
 	profile = ask_bridge_profile_for(info->linking ?
 					 info->upper_dev : NULL);
 	state = &ask_bridge_role[port];
@@ -1132,12 +1300,26 @@ static int ask_bridge_netdev_notifier(struct notifier_block *nb,
 
 	if (event == NETDEV_PRECHANGEUPPER)
 		return ask_bridge_role_prechange(dev, info);
+	if (event == NETDEV_CHANGEADDR && ask_hw_irb_mixed_enabled()) {
+		if (netif_is_bridge_master(dev)) {
+			struct net_device *lower;
+			struct list_head *iter;
+
+			netdev_for_each_lower_dev(dev, lower, iter)
+				ask_bridge_sync_port_class(lower);
+		} else if (netif_is_bridge_port(dev)) {
+			ask_bridge_sync_port_class(dev);
+		}
+		return NOTIFY_DONE;
+	}
 	if (event != NETDEV_CHANGEUPPER)
 		return NOTIFY_DONE;
-	/* Membership is final now: settle this port's generation to it. */
+	/* Membership is final now: settle this port's generation and G5b class. */
 	if (info->upper_dev && netif_is_bridge_master(info->upper_dev) &&
-	    !ask_hw_dev_port(dev, &port))
+	    !ask_hw_dev_port(dev, &port)) {
 		ask_bridge_reconcile_port(port);
+		ask_bridge_sync_port_class(dev);
+	}
 	ask_bridge_kick();
 	return NOTIFY_DONE;
 }

@@ -904,14 +904,17 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 	if (!fam_mask || (fam_mask & ~(ASK_FAM_V4 | ASK_FAM_V6)))
 		return -EINVAL;	/* engage with no/unknown family is nonsensical */
 
-	/* T-M6-2 B3a (bridge plan D1): a bridge member engages as L2_DA, any
-	 * other port ROUTED. rtnl keeps membership stable across the decision
-	 * and the engage; a port armed with the other profile is switched. */
+	/* T-M6-2 B3a / G5b: mixed-profile IRB engages bridge members as ROUTED
+	 * on row 0 and attaches a secondary 16B L2_DA class on ETH HXS slot 0;
+	 * legacy irb_mixed_profile=0 falls back to pure L2_DA on row 0. rtnl
+	 * keeps membership and MACs stable across engage + class sync. */
 	rtnl_lock();
 	dev = ask_hw_port_netdev(port_id);
 	rc = ask_hw_offload_engage_role(port_id,
 			dev ? ask_bridge_port_profile(dev) :
 			      FMAN_PCD_FE_PROFILE_ROUTED, false, fam_mask);
+	if (!rc && dev)
+		ask_bridge_sync_port_class(dev);
 	rtnl_unlock();
 	if (rc) {
 		ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);

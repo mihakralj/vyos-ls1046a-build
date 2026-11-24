@@ -4617,6 +4617,16 @@ static struct notifier_block ask_fib_nb = {
 	.notifier_call = ask_fib_event,
 };
 
+static void ask_devchg_queue_bridge_lowers(struct net_device *br)
+{
+	struct net_device *lower;
+	struct list_head *iter;
+
+	ask_devchg_queue(br->ifindex);
+	netdev_for_each_lower_dev(br, lower, iter)
+		ask_devchg_queue(lower->ifindex);
+}
+
 static int ask_pppoe_netdev_event(struct notifier_block *nb,
 				  unsigned long event, void *ptr)
 {
@@ -4629,20 +4639,38 @@ static int ask_pppoe_netdev_event(struct notifier_block *nb,
 	if ((event == NETDEV_CHANGEMTU || event == NETDEV_CHANGEADDR) &&
 	    ask_flow_default_table()) {
 		ask_devchg_queue(dev->ifindex);
-		if (is_vlan_dev(dev))
-			ask_devchg_queue(vlan_dev_real_dev(dev)->ifindex);
+		if (is_vlan_dev(dev)) {
+			struct net_device *real = vlan_dev_real_dev(dev);
+
+			if (netif_is_bridge_master(real))
+				ask_devchg_queue_bridge_lowers(real);
+			else
+				ask_devchg_queue(real->ifindex);
+		} else if (netif_is_bridge_master(dev)) {
+			/* G5b: IRB flows anchor key.iif/oif on bridge member
+			 * ports, so a bridge MAC/MTU change must retire flows
+			 * on all lower devices too. */
+			ask_devchg_queue_bridge_lowers(dev);
+		}
 	}
 	/*
-	 * T1: a VLAN vif going down or away. nf_flow_table_cleanup() matches
-	 * the flow's iifidx, which is the physical lower device on VLAN paths,
-	 * so it never sees these flows; without this the POP/PUSH records of
-	 * the deleted VID keep forwarding in hardware. Retire records whose
-	 * ingress (key.iif is the owning vif), egress or next-hop device is the
-	 * vif; only the vif, not its real device, whose other flows are fine.
+	 * T1 / G5b: a VLAN vif (including bridge VLAN SVI br0.<vid>) or bridge
+	 * master going down or away. nf_flow_table_cleanup() matches the flow's
+	 * iifidx (the physical lower device), so retire IRB/VLAN records
+	 * anchored on bridge lowers too.
 	 */
 	if ((event == NETDEV_DOWN || event == NETDEV_UNREGISTER) &&
-	    is_vlan_dev(dev) && ask_flow_default_table())
-		ask_devchg_queue(dev->ifindex);
+	    ask_flow_default_table()) {
+		if (is_vlan_dev(dev)) {
+			struct net_device *real = vlan_dev_real_dev(dev);
+
+			ask_devchg_queue(dev->ifindex);
+			if (netif_is_bridge_master(real))
+				ask_devchg_queue_bridge_lowers(real);
+		} else if (netif_is_bridge_master(dev)) {
+			ask_devchg_queue_bridge_lowers(dev);
+		}
+	}
 	return NOTIFY_DONE;
 }
 
@@ -5297,46 +5325,96 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 * port/TX-FQ stay physical. If the neigh isn't cached yet the flow
 	 * parks pending and the poll (also vif-aware) drains it later.
 	 */
+	/*
+	 * G5b / T-M6-8: resolve the L3 neighbour device (where Linux ARP/ND
+	 * entries live). For FLOW_OFFLOAD_XMIT_DIRECT through a bridge VLAN SVI
+	 * (br0.<vid>, both v4/v6 and both trunk/access), the kernel's
+	 * tuple->out.ifidx names the VLAN SVI directly; for a plain bridge
+	 * (br0), egress_dev is the physical member port and ARP/ND lives on its
+	 * bridge master upper. Falling through handles non-bridge VLAN PUSH
+	 * flows (eth3.<vid>).
+	 */
 	neigh_dev = egress_dev;
-	if (!is_v6 && (key.vlan_edit_flags & ASK_VLANF_PUSH) &&
-	    egress_dev && !is_vlan_dev(egress_dev)) {
-		struct net_device *vdev;
-		u16 vid = ntohs(key.vlan_push_tci) & VLAN_VID_MASK;
+	{
+		bool neigh_dev_held = false;
 
-		rcu_read_lock();
-		vdev = __vlan_find_dev_deep_rcu(egress_dev,
-						key.vlan_push_tpid, vid);
-		if (vdev)
-			dev_hold(vdev);
-		rcu_read_unlock();
-		if (vdev)
-			neigh_dev = vdev;
-	}
+		if (direct_mac && virt_addr_valid((void *)f->cookie)) {
+			const struct flow_offload_tuple *dt =
+				(const struct flow_offload_tuple *)f->cookie;
 
-	if (neigh_dev) {
-		key.nh_ifindex = neigh_dev->ifindex;
+			if (dt->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
+			    dt->out.ifidx) {
+				struct net_device *odev;
+
+				rcu_read_lock();
+				odev = dev_get_by_index_rcu(&init_net,
+							    dt->out.ifidx);
+				if (odev && is_vlan_dev(odev) &&
+				    odev != egress_dev) {
+					dev_hold(odev);
+					neigh_dev = odev;
+					neigh_dev_held = true;
+				}
+				rcu_read_unlock();
+			}
+		}
+		if (!neigh_dev_held && egress_dev &&
+		    netif_is_bridge_port(egress_dev)) {
+			struct net_device *br;
+
+			rcu_read_lock();
+			br = netdev_master_upper_dev_get_rcu(egress_dev);
+			if (br && netif_is_bridge_master(br)) {
+				dev_hold(br);
+				neigh_dev = br;
+				neigh_dev_held = true;
+			}
+			rcu_read_unlock();
+		}
+		if (!neigh_dev_held && !is_v6 &&
+		    (key.vlan_edit_flags & ASK_VLANF_PUSH) &&
+		    egress_dev && !is_vlan_dev(egress_dev)) {
+			struct net_device *vdev;
+			u16 vid = ntohs(key.vlan_push_tci) & VLAN_VID_MASK;
+
+			rcu_read_lock();
+			vdev = __vlan_find_dev_deep_rcu(egress_dev,
+							key.vlan_push_tpid,
+							vid);
+			if (vdev) {
+				dev_hold(vdev);
+				neigh_dev = vdev;
+				neigh_dev_held = true;
+			}
+			rcu_read_unlock();
+		}
+
+		if (neigh_dev) {
+			key.nh_ifindex = neigh_dev->ifindex;
+			if (is_v6)
+				memcpy(key.nh_ip, &dst_ip6, sizeof(dst_ip6));
+			else
+				memcpy(key.nh_ip, &dst_ip, sizeof(dst_ip));
+			neigh_epoch = ask_neigh_epoch_read(key.nh_ifindex,
+							   key.l3_proto,
+							   key.nh_ip);
+		}
+
 		if (is_v6)
-			memcpy(key.nh_ip, &dst_ip6, sizeof(dst_ip6));
+			ask_resolve_neigh_v6(neigh_dev, &dst_ip6,
+					     key.next_hop_mac, key.egress_mac);
 		else
-			memcpy(key.nh_ip, &dst_ip, sizeof(dst_ip));
-		neigh_epoch = ask_neigh_epoch_read(key.nh_ifindex, key.l3_proto,
-						   key.nh_ip);
+			ask_resolve_neigh_v4(neigh_dev, dst_ip,
+					     key.next_hop_mac, key.egress_mac);
+
+		if (egress_dev)
+			key.oif_phys_ifindex = is_vlan_dev(egress_dev) ?
+				vlan_dev_real_dev(egress_dev)->ifindex :
+				egress_dev->ifindex;
+
+		if (neigh_dev_held)
+			dev_put(neigh_dev);
 	}
-
-	if (is_v6)
-		ask_resolve_neigh_v6(neigh_dev, &dst_ip6,
-				     key.next_hop_mac, key.egress_mac);
-	else
-		ask_resolve_neigh_v4(neigh_dev, dst_ip,
-				     key.next_hop_mac, key.egress_mac);
-
-	if (egress_dev)
-		key.oif_phys_ifindex = is_vlan_dev(egress_dev) ?
-			vlan_dev_real_dev(egress_dev)->ifindex :
-			egress_dev->ifindex;
-
-	if (neigh_dev != egress_dev)
-		dev_put(neigh_dev);
 
 	/* T-M6-SP4: a LAN->PPPoE flow's next hop is the concentrator, which no
 	 * neighbour table knows; the kernel's DIRECT xmit tuple carries both
@@ -6529,6 +6607,22 @@ static bool ask_neigh_sw_match(const struct flow_offload *flow, void *data)
 		    (t->out.ifidx == (u32)ctx->ifindex ||
 		     t->out.hw_ifidx == (u32)ctx->ifindex))
 			dev_hit = true;
+		/* G5b: plain-bridge IRB DIRECT tuples have out.ifidx and
+		 * out.hw_ifidx set to the bridge member port while ARP/ND
+		 * events arrive on the bridge master. */
+		if (!dev_hit && ctx->ifindex > 0 && t->out.hw_ifidx) {
+			struct net_device *hw_dev =
+				dev_get_by_index_rcu(&init_net,
+						     t->out.hw_ifidx);
+
+			if (hw_dev && netif_is_bridge_port(hw_dev)) {
+				struct net_device *br =
+					netdev_master_upper_dev_get_rcu(hw_dev);
+
+				if (br && br->ifindex == ctx->ifindex)
+					dev_hit = true;
+			}
+		}
 		if (!dev_hit) {
 			dst = READ_ONCE(t->dst_cache);
 			if (dst) {
