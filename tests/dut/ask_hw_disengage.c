@@ -54,8 +54,13 @@ struct ask_hw_port {
 	bool offload_engaged;
 	enum fman_pcd_fe_profile engaged_profile;
 	u32 punt_mask;
+	u8 g4_udp_class;
+	u8 g4_esp_class;
+	u8 l2_class;
+	bool g4_suspended_for_l2;
 	bool fe_retained;
 	bool teardown_in_progress;
+	bool l2_tearing_down;
 	bool module_pinned;
 };
 
@@ -79,6 +84,9 @@ struct ask_hw_pcd {
 static struct ask_hw_pcd *ask_hw_pcd_inst;
 static struct kmem_cache *ask_hw_cookie_cache;
 static unsigned long ask_hw_port_l2[1];
+static unsigned long ask_hw_port_l2_only[1];
+static bool ask_g4_udp_class;
+static u8 ask_hw_port_udp_class[64];
 static unsigned long ask_hw_enq_fe_off;
 static bool ask_hw_ready;
 static u8 families[64];
@@ -105,7 +113,24 @@ static u8 expected_flush_family;
 static int ask_hw_offload_engage_profile(u8 port,
 					 enum fman_pcd_fe_profile profile,
 					 bool from_flow, u8 family,
-					 u64 expected_role_policy_seq);
+					 u64 expected_role_policy_seq,
+					 bool skip_g4);
+static void ask_hw_g4_attach_port(struct ask_hw_pcd *h, struct ask_hw_port *p)
+{
+	(void)h;
+	(void)p;
+}
+static bool ask_bridge_port_wants_l2_class(struct net_device *dev)
+{
+	(void)dev;
+	return false;
+}
+static int ask_bridge_sync_port_class(struct net_device *dev)
+{
+	(void)dev;
+	return 0;
+}
+#define ASSERT_RTNL() assert(rtnl_held)
 int ask_hw_offload_disengage(u8 port);
 void ask_hw_offload_set_family(u8 port, u8 family);
 
@@ -178,7 +203,7 @@ static void ask_bridge_forget_port(u8 port)
 	if (check_forget_race) {
 		assert(ask_hw_offload_engage_profile(port,
 			   FMAN_PCD_FE_PROFILE_ROUTED, false, ASK_FAM_V6,
-			   0) == -EAGAIN);
+			   0, false) == -EAGAIN);
 		ask_hw_offload_set_family(port, ASK_FAM_V6);
 		assert(!families[port]);
 	}
@@ -339,25 +364,25 @@ int main(void)
 	h = new_pcd();
 	ask_hw_ready = false;
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V4, 0) == -EAGAIN);
+					     false, ASK_FAM_V4, 0, false) == -EAGAIN);
 	ask_hw_ready = true;
 	allow_module_get = false;
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V4, 0) == -ENODEV);
+					     false, ASK_FAM_V4, 0, false) == -ENODEV);
 	assert(!engages && !module_refs && !families[0x10]);
 	allow_module_get = true;
 
 	/* Publish the requested family only after successful hardware engage. */
 	expect_unpublished = true;
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V4, 0) == 0);
+					     false, ASK_FAM_V4, 0, false) == 0);
 	expect_unpublished = false;
 	assert(h->port[0].offload_engaged && h->port[0].module_pinned);
 	assert(engages == 1 && module_refs == 1 && families[0x10] == ASK_FAM_V4);
 	check_flush_family = true;
 	expected_flush_family = ASK_FAM_V6;
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V6, 0) == 0);
+					     false, ASK_FAM_V6, 0, false) == 0);
 	assert(engages == 1 && module_refs == 1 && families[0x10] == ASK_FAM_V6 &&
 	       flushes == 1);
 	ask_hw_offload_set_family(0x10, ASK_FAM_V6);
@@ -402,13 +427,13 @@ int main(void)
 	engage_rc = -ETIMEDOUT;
 	expect_unpublished = true;
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V4, 0) == -ETIMEDOUT);
+					     false, ASK_FAM_V4, 0, false) == -ETIMEDOUT);
 	expect_unpublished = false;
 	assert(h->port[0].fe_retained && h->port[0].module_pinned);
 	assert(!h->port[0].offload_engaged && module_refs == 1);
 	assert(!families[0x10]);
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V6, 0) == -ESHUTDOWN);
+					     false, ASK_FAM_V6, 0, false) == -ESHUTDOWN);
 	/* A bridge re-role (if_engaged) of a retained, unengaged port is a
 	 * no-op: it must neither veto the topology change nor republish. */
 	assert(ask_hw_offload_engage_role(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
@@ -426,7 +451,7 @@ int main(void)
 	reset();
 	h = new_pcd();
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, 0, 0) == 0);
+					     false, 0, 0, false) == 0);
 	disengage_rc = -ETIMEDOUT;
 	assert(ask_hw_offload_disengage(0x10) == -ETIMEDOUT);
 	assert(!h->port[0].offload_engaged && h->port[0].fe_retained);
@@ -442,7 +467,7 @@ int main(void)
 	reset();
 	h = new_pcd();
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V4, 0) == 0);
+					     false, ASK_FAM_V4, 0, false) == 0);
 	disengage_rc = -EBUSY;
 	assert(ask_hw_offload_disengage(0x10) == -EBUSY);
 	assert(prepare_calls == 1 && disengages == 1 && vlan_teardowns == 1);
@@ -455,7 +480,7 @@ int main(void)
 	reset();
 	h = new_pcd();
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V4, 0) == 0);
+					     false, ASK_FAM_V4, 0, false) == 0);
 	reserve_rc = -ESHUTDOWN;
 	assert(ask_hw_offload_disengage(0x10) == -ESHUTDOWN);
 	assert(!prepare_calls && !disengages && !vlan_teardowns);
@@ -467,7 +492,7 @@ int main(void)
 	reset();
 	h = new_pcd();
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V4, 0) == 0);
+					     false, ASK_FAM_V4, 0, false) == 0);
 	punt_rc = -ETIMEDOUT;
 	assert(ask_hw_offload_disengage(0x10) == -ETIMEDOUT);
 	assert(prepare_calls == 1 && !disengages && !vlan_teardowns);
@@ -479,7 +504,7 @@ int main(void)
 	reset();
 	h = new_pcd();
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_L2_DA,
-					     false, ASK_FAM_V4, 0) == 0);
+					     false, ASK_FAM_V4, 0, false) == 0);
 	assert(ask_hw_port_l2[0] == (1UL << 0x10));
 	vlan_rc = -EOPNOTSUPP;
 	assert(ask_hw_offload_disengage(0x10) == -EOPNOTSUPP);
@@ -528,7 +553,7 @@ int main(void)
 	reset();
 	h = new_pcd();
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V4, 0) == 0);
+					     false, ASK_FAM_V4, 0, false) == 0);
 	reserve_rc = -EBUSY;
 	assert(ask_hw_fe_reengage(0x10) == -EBUSY);
 	assert(families[0x10] == ASK_FAM_V4 && h->port[0].offload_engaged);
@@ -546,7 +571,7 @@ int main(void)
 	reset();
 	h = new_pcd();
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, 0, 0) == 0);
+					     false, 0, 0, false) == 0);
 	disengage_rc = -ETIMEDOUT;
 	expect_disengage_unpublished = true;
 	assert(ask_hw_fe_reengage(0x10) == -ETIMEDOUT);
@@ -558,7 +583,7 @@ int main(void)
 	reset();
 	h = new_pcd();
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, 0, 0) == 0);
+					     false, 0, 0, false) == 0);
 	engage_rc = -EIO;
 	expect_disengage_unpublished = expect_unpublished = true;
 	assert(ask_hw_fe_reengage(0x10) == -EIO);
@@ -570,16 +595,16 @@ int main(void)
 	reset();
 	h = new_pcd();
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V4, 0) == 0);
+					     false, ASK_FAM_V4, 0, false) == 0);
 	ask_hw_family_seq = U64_MAX;
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V6, 0) == -EOVERFLOW);
+					     false, ASK_FAM_V6, 0, false) == -EOVERFLOW);
 	assert(families[0x10] == ASK_FAM_V4 && engages == 1);
 	assert(ask_hw_fe_reengage(0x10) == -EOVERFLOW && !disengages);
 	ask_hw_offload_set_family(0x10, 0);
 	assert(ask_hw_family_seq_exhausted);
 	assert(ask_hw_offload_engage_profile(0x10, FMAN_PCD_FE_PROFILE_ROUTED,
-					     false, ASK_FAM_V4, 0) == -EOVERFLOW);
+					     false, ASK_FAM_V4, 0, false) == -EOVERFLOW);
 	discard_retained_fixture(h);
 
 	puts("OK: ASK pins FE owners and fences failed or concurrent teardown");

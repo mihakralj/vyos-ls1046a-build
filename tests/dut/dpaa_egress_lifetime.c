@@ -49,12 +49,19 @@ struct net_device {
 struct wgfp_egress {
 	struct net_device *dev;
 	struct device *tx_dma_dev;
+	bool tx_dma_need_sync;
 	int ifindex;
 	u32 tx_fqid;
 	bool active;
 	bool retired;
 	bool quarantined;
 };
+
+static bool dma_dev_need_sync(struct device *dev)
+{
+	(void)dev;
+	return false;
+}
 
 static struct net_device *wgfp_eg_dev[WGFP_MAX_EGRESS];
 static struct wgfp_egress wgfp_egresses[WGFP_MAX_EGRESS];

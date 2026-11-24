@@ -31,7 +31,9 @@ static int err_logs;
 #define NOTIFY_OK 1
 #define NETDEV_PRECHANGEUPPER 1
 #define NETDEV_CHANGEUPPER 2
+#define NETDEV_CHANGEADDR 3
 #define notifier_from_errno(e) (0x8000 | -(e))
+struct list_head { int dummy; };
 
 enum fman_pcd_fe_profile {
 	FMAN_PCD_FE_PROFILE_ROUTED,
@@ -89,12 +91,18 @@ static int ask_hw_offload_disengage(u8 p)
 	return 0;
 }
 
+struct net_device;
+static struct net_device *ask_hw_port_netdev(u8 p);
+static bool ask_bridge_port_wants_l2_class(struct net_device *d);
+
 /* Mirrors the policy/admin gates of the real engage path. */
 static int ask_hw_offload_engage_profile(u8 p, enum fman_pcd_fe_profile prof,
-					 bool from_flow, u8 f, u64 seq)
+					 bool from_flow, u8 f, u64 seq,
+					 bool skip_g4)
 {
 	struct ask_hw_port *s = slot(p);
 
+	(void)skip_g4;
 	if (seq && ask_hw_role_admin_disabled[p])
 		return -EACCES;
 	if (seq && seq != ask_hw_role_policy_seq[p])
@@ -133,8 +141,51 @@ struct notifier_block { int dummy; };
 static struct net_device br = { .ifindex = 10, .name = "br0", .is_bridge = true };
 static struct net_device eth = { .ifindex = 5, .name = "eth3", .port = 0x10 };
 static u64 ask_bridge_role_generation_dummy;
+static bool irb_mixed, bridge_offload_armed, port_has_g4;
+static int g4_pauses, g4_resumes, g4_detaches, l2_detaches, flow_withdraws, bridge_kicks;
+static int flow_withdraw_rc, g4_detach_rc, l2_detach_rc;
+
+static struct net_device *ask_hw_port_netdev(u8 p)
+{
+	return p == eth.port ? &eth : NULL;
+}
+static bool ask_bridge_port_wants_l2_class(struct net_device *d)
+{
+	return irb_mixed && bridge_offload_armed && d && d->master &&
+	       d->master->is_bridge;
+}
+static bool ask_hw_irb_mixed_enabled(void) { return irb_mixed; }
+static bool ask_hw_bridge_offload_armed(void) { return bridge_offload_armed; }
+static u8 ask_hw_port_family_mask(u8 p) { return fam[p]; }
+static bool ask_hw_port_has_g4(u8 p) { (void)p; return port_has_g4; }
+static void ask_hw_g4_pause_port(u8 p) { (void)p; g4_pauses++; }
+static void ask_hw_g4_resume_port(u8 p) { (void)p; g4_resumes++; }
+static int ask_hw_g4_detach_port(u8 p)
+{
+	(void)p;
+	g4_detaches++;
+	if (!g4_detach_rc)
+		port_has_g4 = false;
+	return g4_detach_rc;
+}
+static int ask_hw_l2_class_detach(u8 p) { (void)p; l2_detaches++; return l2_detach_rc; }
+static int ask_flow_port_withdraw(u8 p, int ifindex)
+{
+	(void)p; (void)ifindex;
+	flow_withdraws++;
+	return flow_withdraw_rc;
+}
+static int ask_bridge_dev_quiesce(u8 p, int ifindex)
+{
+	(void)p; (void)ifindex;
+	return bridge_quiesce_rc;
+}
+static int ask_bridge_sync_port_class(struct net_device *d) { (void)d; return 0; }
 
 static bool netif_is_bridge_master(struct net_device *d) { return d->is_bridge; }
+static bool netif_is_bridge_port(struct net_device *d) { return d->master != NULL; }
+#define netdev_for_each_lower_dev(dev, lower, iter) \
+	for ((void)(dev), (void)(iter), (lower) = NULL; (lower); )
 static int ask_hw_dev_port(struct net_device *d, u8 *p)
 {
 	if (d->is_bridge)
@@ -151,7 +202,7 @@ static enum fman_pcd_fe_profile ask_bridge_port_profile(struct net_device *d)
 	return ask_bridge_profile_for(d->master);
 }
 static int ask_bridge_port_quiesce(u8 p) { return bridge_quiesce_rc; }
-static void ask_bridge_kick(void) { }
+static void ask_bridge_kick(void) { bridge_kicks++; }
 static const char *netdev_name(struct net_device *d) { return d->name; }
 static struct net_device *netdev_notifier_info_to_dev(void *ptr)
 {
@@ -177,6 +228,12 @@ static void reset(void)
 	err_logs = 0;
 	eth.master = NULL;
 	ask_hw_ready = true;
+	irb_mixed = false;
+	bridge_offload_armed = false;
+	port_has_g4 = false;
+	g4_pauses = g4_resumes = g4_detaches = l2_detaches = 0;
+	flow_withdraws = bridge_kicks = 0;
+	flow_withdraw_rc = g4_detach_rc = l2_detach_rc = 0;
 	(void)ask_bridge_role_generation_dummy;
 }
 
@@ -312,6 +369,47 @@ static void test_obsolete_reconcile_is_dropped(void)
 	assert(err_logs <= 1);
 }
 
+/* #5: G5b mixed-profile join preserves G4 when bridge_offload=0, detaches G4
+ * and kicks bridge work (for veto recovery) when bridge_offload=1, and resumes
+ * G4 if routed withdrawal fails. */
+static void test_g5b_mixed_profile_join_g4_policy(void)
+{
+	/* bridge_offload=0: join withdraws routed flows but leaves G4 intact */
+	reset();
+	irb_mixed = true;
+	bridge_offload_armed = false;
+	port_has_g4 = true;
+	engage(0x10, FMAN_PCD_FE_PROFILE_ROUTED);
+	assert(event(NETDEV_PRECHANGEUPPER, true) == NOTIFY_OK);
+	assert(flow_withdraws == 1);
+	assert(g4_pauses == 0 && g4_detaches == 0 && g4_resumes == 0);
+	assert(port_has_g4);
+	assert(bridge_kicks == 0);
+
+	/* bridge_offload=1: join pauses G4, withdraws routed flows, detaches G4,
+	 * and schedules bridge work so a vetoed join restores G4 promptly. */
+	reset();
+	irb_mixed = true;
+	bridge_offload_armed = true;
+	port_has_g4 = true;
+	engage(0x10, FMAN_PCD_FE_PROFILE_ROUTED);
+	assert(event(NETDEV_PRECHANGEUPPER, true) == NOTIFY_OK);
+	assert(flow_withdraws == 1 && g4_pauses == 1 && g4_detaches == 1);
+	assert(!port_has_g4);
+	assert(bridge_kicks == 1);
+
+	/* bridge_offload=1 with withdrawal failure: G4 admission is resumed. */
+	reset();
+	irb_mixed = true;
+	bridge_offload_armed = true;
+	port_has_g4 = true;
+	flow_withdraw_rc = -EBUSY;
+	engage(0x10, FMAN_PCD_FE_PROFILE_ROUTED);
+	assert(event(NETDEV_PRECHANGEUPPER, true) == notifier_from_errno(-EBUSY));
+	assert(g4_pauses == 1 && g4_resumes == 1 && g4_detaches == 0);
+	assert(port_has_g4);
+}
+
 int main(void)
 {
 	test_admin_disabled_join_not_vetoed();
@@ -319,6 +417,7 @@ int main(void)
 	test_failed_leave_reconciles();
 	test_vetoed_join_restores_family();
 	test_obsolete_reconcile_is_dropped();
+	test_g5b_mixed_profile_join_g4_policy();
 	puts("ask_role_lifecycle: ok");
 	return 0;
 }

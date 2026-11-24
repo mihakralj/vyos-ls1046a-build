@@ -308,9 +308,36 @@ int main(void)
 	assert(orig.saddr == exp_lan && orig.daddr == exp_wan);
 	assert(orig.sport == htons(40923) && orig.dport == htons(5201));
 	assert(nat.flags == WGFP_NAT_SRC_IP && nat.saddr == exp_nat);
+	/* Admission check must be side-effect free: declined flows must keep
+	 * strict TCP window tracking until actually installed. */
+	assert(!(ct.proto.tcp.seen[0].flags & IP_CT_TCP_FLAG_BE_LIBERAL));
+	assert(!(ct.proto.tcp.seen[1].flags & IP_CT_TCP_FLAG_BE_LIBERAL));
+	assert(ct.use == 1);
+
+	/* Installing the flow calls wgfp_ct_set_liberal() via tuple lookup (skb==NULL). */
+	wgfp_ct_set_liberal(&net, NULL, &orig);
 	assert(ct.proto.tcp.seen[0].flags & IP_CT_TCP_FLAG_BE_LIBERAL);
 	assert(ct.proto.tcp.seen[1].flags & IP_CT_TCP_FLAG_BE_LIBERAL);
 	assert(ct.use == 1);
+
+	/* wgfp_ct_set_liberal() must NOT mark non-ESTABLISHED or dying entries liberal. */
+	ct.proto.tcp.seen[0].flags = 0;
+	ct.proto.tcp.seen[1].flags = 0;
+	ct.proto.tcp.state = 1; /* SYN_SENT */
+	wgfp_ct_set_liberal(&net, NULL, &orig);
+	assert(!(ct.proto.tcp.seen[0].flags & IP_CT_TCP_FLAG_BE_LIBERAL));
+	assert(ct.use == 1);
+	ct.proto.tcp.state = TCP_CONNTRACK_ESTABLISHED;
+	ct.dying = true;
+	wgfp_ct_set_liberal(&net, NULL, &orig);
+	assert(!(ct.proto.tcp.seen[0].flags & IP_CT_TCP_FLAG_BE_LIBERAL));
+	assert(ct.use == 1);
+	ct.dying = false;
+	skb.ct = &ct;
+	wgfp_ct_set_liberal(&net, &skb, &orig);
+	assert(ct.proto.tcp.seen[0].flags & IP_CT_TCP_FLAG_BE_LIBERAL);
+	assert(ct.proto.tcp.seen[1].flags & IP_CT_TCP_FLAG_BE_LIBERAL);
+	skb.ct = NULL;
 
 	/* 2. Port-mapped SNAT44 (src IP + src port rewritten) with skb->_nfct == NULL. */
 	set_v4_ct(&ct, IPPROTO_TCP,

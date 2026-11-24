@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # testrig-trex-ndr.sh <dut-name> <dut-mgmt-ip> <gen: local|dell1> <outdir> [rep list, default "1 2 3"]
 # env SIZES (default "64 512 1518"), FLOWS (default "1 1024"; 65536+ flows belong to bin/testrig-flow-ladder.sh)
+# env DUT_USER (default vyos), DUT_KEY (default ~/.ssh/vyos_key): for a vendor OpenWrt DUT use DUT_USER=root with
+# an appropriate key; sudo and the ASK2 debugfs snapshot are swapped for a plain root login and `ask-flowtable status`.
 # The generator hosts' neighbour entries are pinned on the DUT first: TRex answers ARP only in service mode, and an
 # expiring entry tore down every flow behind it mid-search (plans/ASK2-FLOW-SCALING-PLAN.md §0.1). TRex profiles and
 # drivers: bin/trex/ (installed in /opt/trex on the generator).
@@ -14,17 +16,27 @@ DUT=$1 DIP=$2 GEN=$3 O=$4 REPS=${5:-1 2 3}
 P=/mnt/builds/wgfp/plan; mkdir -p $O; CSV=$O/results-$DUT.csv
 . /mnt/builds/vyos-ls1046a-build/bin/testrig-env.sh
 st(){ printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a $P/STATUS; }
-D="ssh -n -o BatchMode=yes -o ConnectTimeout=20 -o IdentitiesOnly=yes -i $HOME/.ssh/vyos_key vyos@$DIP"
+DUT_USER=${DUT_USER:-vyos} DUT_KEY=${DUT_KEY:-$HOME/.ssh/vyos_key}
+D="ssh -n -o BatchMode=yes -o ConnectTimeout=20 -o IdentitiesOnly=yes -i $DUT_KEY $DUT_USER@$DIP"
+DSUDO=sudo; [ "$DUT_USER" = root ] && DSUDO=""
 if [ "$GEN" = local ]; then T="bash -c"; fetch(){ cp "$1" "$2"; }
 else T="ssh -n -o BatchMode=yes -o ConnectTimeout=20 $RIG_SSHK $GEN1"; fetch(){ scp -q $RIG_SSHK "$GEN1:$1" "$2"; }; fi
-$D "sudo ip neigh replace ${GEN_IP3:-10.99.1.112} lladdr ${GEN_MAC3:-3c:fd:fe:2a:f0:20} dev eth3 nud permanent && sudo ip neigh replace ${GEN_IP4:-10.99.2.113} lladdr ${GEN_MAC4:-3c:fd:fe:2a:f0:22} dev eth4 nud permanent" \
+$D "$DSUDO ip neigh replace ${GEN_IP3:-10.99.1.112} lladdr ${GEN_MAC3:-3c:fd:fe:2a:f0:20} dev eth3 nud permanent && $DSUDO ip neigh replace ${GEN_IP4:-10.99.2.113} lladdr ${GEN_MAC4:-3c:fd:fe:2a:f0:22} dev eth4 nud permanent" \
   || { st "trexrun $DUT: cannot pin generator neighbours"; exit 2; }
-IMG=$($D 'grep -o "BOOT_IMAGE=/boot/[^/ ]*" /proc/cmdline | cut -d/ -f3')
-BOOT=$($D 'uptime -s | tr " " T')
-snap(){ $D 'date -u +%T; uptime; for i in eth3 eth4; do ip -s -s link show $i; done; sudo ask-check 2>&1 | tail -2
+IMG=$($D 'grep -o "BOOT_IMAGE=/boot/[^/ ]*" /proc/cmdline | cut -d/ -f3'); IMG=${IMG:--}   # vendor has no BOOT_IMAGE=; keep a non-empty field so row()'s positional args don't shift
+BOOT=$($D 'uptime -s 2>/dev/null | tr " " T'); BOOT=${BOOT:--}   # busybox uptime may lack -s; keep a non-empty field so row() args never shift
+# ASK2 (vyos) reads ask-check + fman_pcd debugfs; the vendor (OpenWrt, root login, no sudo/debugfs path) uses
+# ask-flowtable status instead. Purely diagnostic text beside the results; not parsed into the tables.
+if [ "$DUT_USER" = root ]; then
+  snap(){ $D 'date -u +%T; uptime; for i in eth3 eth4; do ip -s -s link show $i; done
+  ask-flowtable status 2>&1
+  cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | tr "\n" " "; echo; dmesg 2>/dev/null | grep -ciE "BUG:|WARNING:|Oops|hung task|soft lockup"' > $1 2>&1; }
+else
+  snap(){ $D 'date -u +%T; uptime; for i in eth3 eth4; do ip -s -s link show $i; done; sudo ask-check 2>&1 | tail -2
   echo "fe_hit_records=$(sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats | grep -c "pkt_count=[1-9]") fe_records=$(sudo cat /sys/kernel/debug/fman_pcd/0/fe_ehash_stats | grep -c pkt_count)"
   echo "sync_timeouts=$(cat /sys/module/fsl_dpaa_fman/parameters/ehash_sync_timeouts) wedgecap=$(systemctl is-active wedgecap)"
   cat /sys/class/thermal/thermal_zone*/temp | tr "\n" " "; echo; sudo dmesg | grep -ciE "BUG:|WARNING:|Oops|hung task|soft lockup"' > $1 2>&1; }
+fi
 alive(){ $D true || { st "trexrun $DUT: DUT unreachable $* (WEDGE?); stopped, see /config/wedgecap on $DIP"; exit 3; }; }
 # row <rep> <size> <flows> <metric> <limit%> <rate_p> <tx_pps> <rx_pps> <drop%> <trial_s> <iters> <elapsed_s>
 row(){ python3 - "$@" >> $CSV <<'EOF'
@@ -50,13 +62,13 @@ for rep in $REPS; do for size in ${SIZES:-64 512 1518}; do for flows in ${FLOWS:
     fetch $J $O/ 2>/dev/null
     v=$(python3 -c "import json,sys; r=json.load(open(sys.argv[1]))['results']
 print(r['rate_p'], r['tx_pps'], r['rx_pps'], r['drop_rate_percentage'], r['total_iterations'], int(r['Elapsed Time']))" $O/$(basename $J) 2>/dev/null)
-    if [ -n "$v" ]; then set -- $v; row $rep $size $flows $n $p $1 $2 $3 $4 30 $5 $6 $DUT $IMG $BOOT; res="$res $n=$(awk -v x=$3 'BEGIN{printf "%.3f", x/1e6}')"
+    if [ -n "$v" ]; then set -- $v; row "$rep" "$size" "$flows" "$n" "$p" "$1" "$2" "$3" "$4" 30 "$5" "$6" "$DUT" "$IMG" "$BOOT"; res="$res $n=$(awk -v x=$3 'BEGIN{printf "%.3f", x/1e6}')"
     else res="$res $n=fail"; fi
     alive "after $c $n"
   done
   $T "cd /opt/trex && sudo python3 ask2_fixed.py $size $flows 100% 30 2>&1 | grep -vE 'Deprecation|cipher='" > $O/$DUT-$c-MRR.txt
   v=$(awk '/^size/{for(i=1;i<=NF;i++){split($i,a,"="); k[a[1]]=a[2]}; d=k["drop"]; sub("%","",d); print k["total_tx"]/30, k["total_rx"]/30, d}' $O/$DUT-$c-MRR.txt)
-  if [ -n "$v" ]; then set -- $v; row $rep $size $flows MRR 100 100 $1 $2 $3 30 1 30 $DUT $IMG $BOOT; res="$res MRR=$(awk -v x=$2 'BEGIN{printf "%.3f", x/1e6}')"; fi
+  if [ -n "$v" ]; then set -- $v; row "$rep" "$size" "$flows" MRR 100 100 "$1" "$2" "$3" 30 1 30 "$DUT" "$IMG" "$BOOT"; res="$res MRR=$(awk -v x=$2 'BEGIN{printf "%.3f", x/1e6}')"; fi
   snap $O/$DUT-$c-dut-after.txt; alive "after $c MRR"
   st "trexrun $DUT $c rx Mpps (both dirs):$res"
 done; done; done

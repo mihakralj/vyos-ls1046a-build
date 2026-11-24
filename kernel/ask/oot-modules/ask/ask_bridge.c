@@ -1250,6 +1250,10 @@ static int ask_bridge_role_prechange(struct net_device *dev,
 					   netdev_name(info->upper_dev), rc);
 				return notifier_from_errno(rc);
 			}
+			/* If a later notifier vetoes the join (no CHANGEUPPER),
+			 * wake bridge work promptly to restore suspended G4. */
+			if (drop_g4)
+				ask_bridge_kick();
 		}
 		return NOTIFY_OK;
 	}

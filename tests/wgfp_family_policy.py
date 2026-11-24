@@ -45,6 +45,7 @@ static struct fman_port *dpaa_get_rx_fman_port(struct net_device *d)
 { if (!d->dpaa) return NULL; ports[d->port_id].id = d->port_id; return &ports[d->port_id]; }
 static u8 fman_port_get_id(struct fman_port *p) { return p->id; }
 static unsigned long ask_hw_port_l2[4];
+static unsigned long ask_hw_port_l2_only[4];
 static bool test_bit(unsigned int n, const unsigned long *b) { return b[n / 64] >> (n % 64) & 1; }
 static u8 ask_hw_port_family[64];
 static u8 ask_hw_port_family_get(u8 id) { return id < 64 ? ask_hw_port_family[id] : 0; }
@@ -71,9 +72,12 @@ int main(void)
 	CHECK(!dpaa_wgfp_family_ok(&lo, AF_INET));	/* not a DPAA port */
 	CHECK(!dpaa_wgfp_family_ok(NULL, AF_INET));
 	CHECK(!dpaa_wgfp_family_ok(&eth4, 0));		/* unknown family */
-	ask_hw_port_l2[0] |= 1ul << 0x11;		/* L2 (bridge) port: no routed WGFP */
+	ask_hw_port_l2[0] |= 1ul << 0x11;		/* G5b mixed-profile bridge IRB: routed WGFP allowed */
+	CHECK(dpaa_wgfp_family_ok(&eth4, AF_INET));
+	ask_hw_port_l2_only[0] |= 1ul << 0x11;		/* pure L2_DA port: no routed WGFP */
 	CHECK(!dpaa_wgfp_family_ok(&eth4, AF_INET));
 	ask_hw_port_l2[0] = 0;
+	ask_hw_port_l2_only[0] = 0;
 	policy_fenced = true;				/* policy revocation fence blocks WGFP */
 	CHECK(!dpaa_wgfp_family_ok(&eth4, AF_INET) && !dpaa_wgfp_family_ok(&eth4, AF_INET6));
 	policy_fenced = false;
@@ -119,9 +123,12 @@ def test_policy_wired_everywhere():
     assert learn.index("dpaa_wgfp_family_ok(") < learn.index("thoff = nhoff")
     assert "!dpaa_wgfp_family_ok(phys_dev, AF_INET)" in extract(fp, "static struct wgfp_tmpl *wgfp_tmpl4(")
     assert "!dpaa_wgfp_family_ok(phys_dev, AF_INET6)" in extract(fp, "static struct wgfp_tmpl *wgfp_tmpl6(")
+    age_chunk = extract(fp, "static bool wgfp_age_run_chunk(struct wgfp_age_job *job, unsigned int n,\n")
     age = extract(fp, "static void wgfp_age_fn(struct work_struct *w)\n{\n")
-    assert "family = dpaa_wgfp_family_ok(dev, job[i].t.family);" in age
-    assert re.search(r"if \(!family\) \{\s*fl->del = true;", age)
+    assert "wgfp_age_run_chunk(" in age
+    assert "fl->age_gen = nat_age_gen;" in age
+    assert "family = dpaa_wgfp_family_ok(dev, job[i].t.family);" in age_chunk
+    assert re.search(r"if \(!family\) \{\s*fl->del = true;", age_chunk)
     add = extract(WGFP.read_text(), "int dpaa_wgfp_flow_add(struct net_device *in, const struct dpaa_wgfp_tuple *t,")
     assert add.index("dpaa_wgfp_family_ok(in, t->family)") < add.index("wgfp_fm_port(")
     ready = extract(ASKHW.read_text(), "void ask_hw_set_ready(bool ready)\n{\n")

@@ -61,19 +61,28 @@ def test_stage_b_wiring_in_fastpath():
     rflow_hook = _between(fp, "static unsigned int wgfp_rflow_hook(", "\n/* After every other POST_ROUTING")
     rx_fwd = _between(fp, "static bool wgfp_rx_forward(", "\n/*\n * P6 in the P3 sink")
     peer_frame = _between(fp, "static int wgfp_peer_frame(", "\nstatic const struct dpaa_wgfp_ops")
+    age_chunk = _between(fp, "static bool wgfp_age_run_chunk(", "\n/* Withdraw records")
     age_fn = _between(fp, "static void wgfp_age_fn(", "\n/* Teardown:")
+    flow_work = _between(fp, "static void wgfp_flow_work_fn(", "\nstatic int wgfp_quiesce_flows_locked_loop(")
     rx_tail = _between(fp, "bool wg_fastpath_rx_tail(", "\n/* P6 stack hand-off")
 
-    ct_admit = _between(fp, "static bool wgfp_ct_admitted(", "\n/* Under wgfp_flows_lock")
-    assert "IP_CT_TCP_FLAG_BE_LIBERAL" in ct_admit
+    ct_admit = _between(fp, "static bool wgfp_ct_admitted(", "\n/* Disable strict TCP window")
+    ct_liberal = _between(fp, "static void wgfp_ct_set_liberal(", "\n/* Under wgfp_flows_lock")
+    assert "IP_CT_TCP_FLAG_BE_LIBERAL" not in ct_admit
+    assert "IP_CT_TCP_FLAG_BE_LIBERAL" in ct_liberal
+    assert "TCP_CONNTRACK_ESTABLISHED" in ct_liberal
+    assert "wgfp_ct_set_liberal(" in flow_work
+    assert "wgfp_ct_set_liberal(" in rflow_hook
     assert "IPS_SEQ_ADJUST" in ct_admit
     assert "nf_ct_zone_equal_any(" in ct_admit
     assert "wgfp_ct_admitted(" in learn
     assert "fl->nat = nat;" in learn
     assert "wgfp_nat_len_ok(" in peer_frame
     assert "&fl->nat" in peer_frame
-    assert "wgfp_ct_nat_matches(" in age_fn
-    assert "cmpxchg(&ct->timeout" in age_fn
+    assert "wgfp_ct_nat_matches(" in age_chunk
+    assert "cmpxchg(&ct->timeout" in age_chunk
+    assert "age_gen" in age_fn
+    assert "wgfp_age_run_chunk(" in age_fn
     assert "kcalloc(WGFP_BATCH" in age_fn
     assert "r->nat = nat;" in rflow_hook
     assert "wgfp_nat_len_ok(" in rx_fwd

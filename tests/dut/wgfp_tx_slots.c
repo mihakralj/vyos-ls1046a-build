@@ -66,6 +66,8 @@ typedef int64_t ktime_t;
 #define smp_store_release(p, v) (*(p) = (v))
 #define smp_mb__before_atomic() do { } while (0)
 #define smp_mb__after_atomic() do { } while (0)
+#define smp_wmb() do { } while (0)
+#define smp_rmb() do { } while (0)
 #define IS_ENABLED(x) 0
 #define ASSERT_RTNL() do { assert(rtnl_held); } while (0)
 #define cpu_relax() do { } while (0)

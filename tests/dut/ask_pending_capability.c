@@ -117,7 +117,7 @@ static void *kzalloc(size_t n, int flags) { return calloc(1, n); }
 static void kfree(void *p) { free(p); }
 
 struct ask_flow_key {
-	u8 l3_proto, l4_proto, port_id, vlan_edit_flags, nat_flags;
+	u8 l3_proto, l4_proto, port_id, vlan_edit_flags, nat_flags, table_idx;
 	__be16 vlan_push_tci, vlan_push_tpid;
 	u8 next_hop_mac[ETH_ALEN], egress_mac[ETH_ALEN];
 	u32 nh_ifindex;
@@ -137,7 +137,8 @@ static u8 ask_hw_port_family[64];
 static u64 ask_hw_family_seq = 1;
 static u64 ask_hw_family_changed[64][2];
 static bool ask_hw_family_seq_exhausted;
-static unsigned long ask_hw_port_l2[4];
+static unsigned long ask_hw_port_l2_only[4];
+static u8 ask_hw_get_udp_class(u8 port) { (void)port; return 0; }
 struct fman { int unused; };
 struct ask_hw_port {
 	bool in_use, offload_engaged, module_pinned, fe_retained;
@@ -383,6 +384,16 @@ static void ask_flow_flush_matching(int (*collect)(struct ask_flow *, void *),
 				    const char *what)
 {
 	atomic_store(&live_pppoe, false);
+}
+
+static bool netif_is_bridge_master(const struct net_device *dev)
+{
+	(void)dev;
+	return false;
+}
+static void ask_devchg_queue_bridge_lowers(struct net_device *br)
+{
+	(void)br;
 }
 
 #include "pending_flush.h"
