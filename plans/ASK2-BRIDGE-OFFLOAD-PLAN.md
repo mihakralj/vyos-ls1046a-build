@@ -1,6 +1,6 @@
 # ASK2 bridge offload: current status and remaining work
 
-**2026-10-19 · dpaa1 · Status: working path exists; remaining work is scoped and explicit.**
+**2026-11-25 · dpaa1 · Status: B6/B7a/B7b, G4 multi-table dispatch (`F-323`), G5a/G5b mixed-profile IRB (`F-324` + `irb_mixed_profile=1`), and `F-325` bridge-leave IPv6 ND fix are cold-boot silicon-verified on `.185`; QinQ, PPPoE-session bridging, multicast/MDB, and B7b paired parity remain open.**
 
 This document is written to be read by an independent reviewer without any
 previous context. It separates the bridge functionality that is already present
@@ -77,14 +77,13 @@ roles remain in software. This is the safe contract for the current silicon path
 
 | Stage | Required outcome | Dependency / gate |
 |---|---|---|
-| Current-image repeat | Learned/static/move/age/visibility plus B7a rows and software controls | No reimplementation of archived acceptance notes; verify on current image with the hardened harnesses (§5.1) |
-| B7b | Access↔trunk tag pop/push and translation if required | L2-only emitter, no TTL, preserve B7a and routed/NAT regressions |
-| Multi-table dispatch | Multiple class-specific tables on one ingress port | Correct precedence, owner, miss, flush and resource design |
-| IRB | Route through bridge using kernel-selected member and nexthop | Multi-table coexistence gate |
-| Routed + bridged same port | Both classes in hardware with independent lifetimes | Multi-table gate and class isolation |
-| QinQ / 802.1ad | Stacked-tag membership and rewrite semantics | Shared VLAN work; unsupported depths remain software |
+| Current-image repeat | Learned/static/move/age/visibility plus B7a rows and software controls | `bridge` (`18.2/18.0` bidir, `+4.5%`/`+5.4%` vs DUT2) and `bridge-9k` (`18.9/18.8` bidir, `+0.7%`/`+1.2%` vs DUT2) cold-boot verified on `2026.11.24-1847-rolling`; B2/capacity debugfs repeats remain open |
+| B7b | Access↔trunk tag pop/push and translation | Cold-boot silicon + regression gate passed 2026-10-20 (`.155`/`0326`, `1e845e2d`); paired parity vs DUT2 remains open |
+| Multi-table dispatch (G4) | Multiple class-specific tables on one ingress port | **Cold-boot verified 2026-11-24** (`F-323`, `.185`, `6.18.65-1-vyos`): top-down secondary KG schemes (`31` down), CCOBASE rows `1..3` in existing 256 B `scaffold_gro` (0 extra MURAM), byte-exact `pcd-snapshot` S1→S0 |
+| IRB & routed + bridged same port (G5a/G5b) | Route through bridge and bridge untagged/VLAN frames on one port with independent lifetimes | **Cold-boot verified 2026-11-24** (`F-324` + `ask.ko irb_mixed_profile=1`, `F-325` `fman_memac` allmulti fix on `2026.11.24-1847-rolling`): IPv4 IRB `16.48 Gbps` bidir, IPv6 IRB `14.31 Gbps` bidir, untagged L2 `17.25 Gbps` bidir, VLAN-200 L2 `18.20 Gbps` bidir, `NETDEV_CHANGEADDR` in-place MAC update, bridge-leave IPv6 ND 0% loss |
+| QinQ / 802.1ad | Stacked-tag membership and rewrite semantics | Shared VLAN work (G12); unsupported depths remain software |
 | PPPoE bridging | Session frames forwarded without short-frame freeze | Cold-boot non-IP de-risk and session separation first |
-| Multicast | MDB-owned replication | Separate multicast gate; not implied by unicast acceptance |
+| Multicast | MDB-owned replication | Separate multicast gate (G6); not implied by unicast acceptance |
 
 ### 5.1 Harness verdicts (fixed 2026-10-16)
 

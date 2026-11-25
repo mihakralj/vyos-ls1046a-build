@@ -4127,8 +4127,11 @@ static int ask_flow_v6_frag_flush_sync(void)
 
 	if (READ_ONCE(ask_ipv6_hw_frag))
 		return -EINVAL;
-	/* Patch 155: revoke SW flowtable entries before ask_flow_lifecycle_lock
-	 * (preserving conntrack/NAT) so subsequent packets traverse ip6_forward. */
+	/* Patch 155: fence SW flowtable admission and drain in-flight adds so
+	 * live IPv6 traffic cannot re-admit flows inside the settle loop
+	 * (-EBUSY) before ask_flow_lifecycle_lock withdraws HW records. */
+	nf_flow_table_fence_begin();
+	synchronize_rcu();
 	ft_rc = nf_flow_table_revoke_match(&init_net, ask_v6_frag_sw_match,
 					   NULL, true, &ft_unres);
 	mutex_lock(&ask_flow_lifecycle_lock);
@@ -4137,6 +4140,7 @@ static int ask_flow_v6_frag_flush_sync(void)
 				      &ask_v6_frag_withdraw_unresolved,
 				      ASK_FE_CAP_V6_FRAG);
 	mutex_unlock(&ask_flow_lifecycle_lock);
+	nf_flow_table_fence_end();
 	if (!rc && (ft_rc || ft_unres))
 		rc = ft_rc ? ft_rc : -EBUSY;
 	return rc;
@@ -7134,6 +7138,11 @@ int ask_flow_port_withdraw(u8 hw_port_id, int ifindex)
 	bool identity_lost = false;
 	int ft_rc = 0, rc;
 
+	/* Fence SW flowtable admission and drain in-flight adds across revoke
+	 * and HW flush so live traffic on this or a peer port cannot re-admit
+	 * matching flows inside patch 155's settle loop (-EBUSY). */
+	nf_flow_table_fence_begin();
+	synchronize_rcu();
 	if (ifindex > 0)
 		ft_rc = nf_flow_table_revoke_match(&init_net,
 						   ask_port_withdraw_sw_match,
@@ -7148,6 +7157,7 @@ int ask_flow_port_withdraw(u8 hw_port_id, int ifindex)
 	ask_port_withdraw_pid = 0xff;
 	ask_port_withdraw_ifindex = 0;
 	mutex_unlock(&ask_flow_lifecycle_lock);
+	nf_flow_table_fence_end();
 
 	if (rc)
 		return rc;

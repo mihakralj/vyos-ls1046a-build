@@ -88,7 +88,6 @@ B1=fd99:77::112
 B2=fd99:77::113
 IPERF_PORT=5277
 PCD=/sys/kernel/debug/fman_pcd/0
-SNAP_FILE=/tmp/ask2-bridge-baseline.json
 
 LEASE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/testrig-ask2-bridge"
 LEASE="$LEASE_ROOT/lease"
@@ -202,6 +201,7 @@ TOKEN=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 BOOT=$(d 'cat /proc/sys/kernel/random/boot_id')
 [[ $BOOT =~ ^[0-9a-f-]{36}$ ]] || die "cannot read DUT boot_id"
 BR="br-mx-${TOKEN:0:8}"
+SNAP_FILE="/tmp/ask2-bridge-${TOKEN}.json"
 
 HAVE_LEASE=0
 CREATED_BR=0
@@ -211,8 +211,13 @@ STARTED_SRV=0
 SET_OFFLOAD=0
 ORIG_OFFLOAD=""
 JUMBO_UP=0
+HAVE_PCD_TOOL=0
 HAVE_PCD_SNAP=0
+PCD_SNAP_FAILED=0
+BASE_MURAM=""
 BASE_KERR=0
+
+muram_used(){ d "sudo awk '/^used/{print \$2}' $PCD/muram_budget 2>/dev/null" || true; }
 
 write_lease(){
   local tmp
@@ -258,7 +263,7 @@ verify_bridge_quiesced(){
 }
 
 cleanup(){
-  local orig_rc=$? clean_rc=0 boot_now kerr_now
+  local orig_rc=$? clean_rc=0 boot_now kerr_now muram_now
   set +e
   if [ "$STARTED_SRV" = 1 ]; then
     g2 "pkill -f '^iperf3 -s -p $IPERF_PORT'" 2>/dev/null || true
@@ -279,6 +284,16 @@ cleanup(){
     d "echo $ORIG_OFFLOAD | sudo tee /sys/module/ask/parameters/bridge_offload >/dev/null" || clean_rc=1
     SET_OFFLOAD=0
   fi
+  # Verify active-phase pcd-snapshot diff BEFORE testrig-ask2-9k.sh down
+  # re-engages 0x10/0x11 (which can legitimately swap fmbm_rccb offsets).
+  if [ "$HAVE_PCD_SNAP" = 1 ]; then
+    verify_bridge_quiesced || clean_rc=1
+    if ! d "sudo /usr/local/bin/pcd-snapshot diff $SNAP_FILE" >/dev/null; then
+      echo "ERROR: pcd-snapshot diff failed after bridge teardown" >&2
+      clean_rc=1
+    fi
+    HAVE_PCD_SNAP=0
+  fi
   if [ "$JUMBO_UP" = 1 ]; then
     if "$HERE/testrig-ask2-9k.sh" down; then
       JUMBO_UP=0
@@ -287,14 +302,19 @@ cleanup(){
       clean_rc=1
     fi
   fi
+  if [ "$HAVE_PCD_TOOL" = 1 ]; then
+    d "sudo rm -f -- \"$SNAP_FILE\"" >/dev/null 2>&1 || true
+  fi
   if [ "$HAVE_LEASE" = 1 ]; then
     boot_now=$(d 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || echo "")
     [ "$boot_now" = "$BOOT" ] || { echo "ERROR: DUT rebooted during bridge run" >&2; clean_rc=1; }
     [ "$(dut_mtus 2>/dev/null || echo err)" = "1500 1500" ] || { echo "ERROR: DUT MTUs not restored to 1500" >&2; clean_rc=1; }
     verify_bridge_quiesced || clean_rc=1
-    if [ "$HAVE_PCD_SNAP" = 1 ]; then
-      if ! d "sudo /usr/local/bin/pcd-snapshot diff $SNAP_FILE" >/dev/null; then
-        echo "ERROR: pcd-snapshot diff failed after bridge teardown" >&2
+    [ "$PCD_SNAP_FAILED" = 0 ] || clean_rc=1
+    if [ -n "$BASE_MURAM" ]; then
+      muram_now=$(muram_used)
+      if [ "$muram_now" != "$BASE_MURAM" ]; then
+        echo "ERROR: MURAM used drifted ($BASE_MURAM -> ${muram_now:-err})" >&2
         clean_rc=1
       fi
     fi
@@ -306,7 +326,7 @@ cleanup(){
     if [ "$clean_rc" -eq 0 ]; then
       rm -f -- "$LEASE"
       HAVE_LEASE=0
-      say "teardown verified clean (pcd-snapshot reversible, 0 leftover records); lease released"
+      say "teardown verified clean (pcd-snapshot reversible, MURAM stable, 0 leftover records); lease released"
     else
       echo "ERROR: teardown verification failed; retaining lease $LEASE for manual recovery" >&2
     fi
@@ -321,12 +341,13 @@ say "lease $TOKEN taken (DUT boot $BOOT, bridge $BR)"
 
 mkdir -p "$RUN/json-bridge"
 BASE_KERR=$(kernel_err_count)
+BASE_MURAM=$(muram_used)
+[[ $BASE_MURAM =~ ^[0-9]+$ ]] || BASE_MURAM=""
 ORIG_OFFLOAD=$(d 'cat /sys/module/ask/parameters/bridge_offload')
 case "$ORIG_OFFLOAD" in Y|y|1) ORIG_OFFLOAD=1 ;; N|n|0) ORIG_OFFLOAD=0 ;; *) ORIG_OFFLOAD=1 ;; esac
 
 if d "test -x /usr/local/bin/pcd-snapshot"; then
-  d "sudo /usr/local/bin/pcd-snapshot capture -o $SNAP_FILE >/dev/null"
-  HAVE_PCD_SNAP=1
+  HAVE_PCD_TOOL=1
 fi
 
 SET_OFFLOAD=1
@@ -363,6 +384,15 @@ for m in "${MTU_LIST[@]}"; do
     write_lease
     [ "$(dut_mtus)" = "9000 9000" ] || die "DUT MTUs not 9000 after testrig-ask2-9k.sh up: $(dut_mtus)"
     armed_check || die "fe_arm not armed after testrig-ask2-9k.sh up"
+  fi
+
+  # Capture per-phase PCD baseline after any MTU transition (before bridge join)
+  # so bridge join->leave is verified byte-exact without false diffs from
+  # testrig-ask2-9k.sh's disengage/re-engage MURAM freelist swaps.
+  HAVE_PCD_SNAP=0
+  if [ "$HAVE_PCD_TOOL" = 1 ]; then
+    d "sudo /usr/local/bin/pcd-snapshot capture -o \"$SNAP_FILE\" >/dev/null"
+    HAVE_PCD_SNAP=1
   fi
 
   say "creating non-destructive bridge $BR (eth3+eth4, MTU $m, bridge_offload=$BRIDGE_OFFLOAD)"
@@ -423,6 +453,14 @@ PY
   say "tearing down bridge $BR after MTU $m phase"
   teardown_bridge || die "failed to tear down $BR after MTU $m"
   verify_bridge_quiesced || die "bridge FE state not clean after MTU $m teardown"
+  if [ "$HAVE_PCD_SNAP" = 1 ]; then
+    if ! d "sudo /usr/local/bin/pcd-snapshot diff \"$SNAP_FILE\"" >/dev/null; then
+      PCD_SNAP_FAILED=1
+      HAVE_PCD_SNAP=0
+      die "pcd-snapshot diff failed after MTU $m bridge teardown"
+    fi
+    HAVE_PCD_SNAP=0
+  fi
 
   if [ "$m" = 9000 ]; then
     say "restoring MTU 1500 via testrig-ask2-9k.sh down"

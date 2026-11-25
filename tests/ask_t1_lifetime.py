@@ -78,10 +78,23 @@ def test_t1f_synchronous_port_quiesce_before_disengage():
     assert "int ask_bridge_dev_quiesce(u8 hw_port_id, int ifindex)" in br
     assert "int ask_flow_port_withdraw(u8 hw_port_id, int ifindex)" in fo
 
-    # ask_flow_port_withdraw revokes SW flowtable BEFORE ask_flow_lifecycle_lock
+    # ask_flow_port_withdraw fences SW flowtable admission + synchronize_rcu()
+    # across revoke_match and ask_flow_lifecycle_lock flush so live traffic
+    # cannot re-admit flows inside patch 155's settle loop (-EBUSY).
     pw = _between(fo, "int ask_flow_port_withdraw(", "\nbool ask_flow_has_port_orphan(")
-    assert "nf_flow_table_revoke_match(" in pw
+    for token in (
+        "nf_flow_table_fence_begin();",
+        "synchronize_rcu();",
+        "nf_flow_table_revoke_match(",
+        "mutex_lock(&ask_flow_lifecycle_lock);",
+        "mutex_unlock(&ask_flow_lifecycle_lock);",
+        "nf_flow_table_fence_end();",
+    ):
+        assert token in pw, token
+    assert pw.index("nf_flow_table_fence_begin();") < pw.index("synchronize_rcu();")
+    assert pw.index("synchronize_rcu();") < pw.index("nf_flow_table_revoke_match(")
     assert pw.index("nf_flow_table_revoke_match(") < pw.index("mutex_lock(&ask_flow_lifecycle_lock);")
+    assert pw.index("mutex_unlock(&ask_flow_lifecycle_lock);") < pw.index("nf_flow_table_fence_end();")
 
     # ask_hw_offload_disengage_admin and ask_hw_offload_role_prepare withdraw before disengage
     admin = _between(hw, "int ask_hw_offload_disengage_admin(", "\nEXPORT_SYMBOL_GPL(ask_hw_offload_disengage_admin);")
@@ -110,11 +123,50 @@ def test_p3_ipv6_frag_default_killswitch_mutex_and_wgfp_policy_revoke():
     # Vendor NXP ASK parity: default ipv6_hw_frag = true (opt-out =0 for RFC 8200)
     assert "static bool ask_ipv6_hw_frag = true;" in fo
 
-    # Patch 155 SW revocation before ask_flow_lifecycle_lock in ask_flow_v6_frag_flush_sync
+    # Patch 155 SW revocation fenced with nf_flow_table_fence_begin/end after
+    # the early ask_ipv6_hw_frag check and across ask_flow_lifecycle_lock.
     v6_flush = _between(fo, "static int ask_flow_v6_frag_flush_sync(void)\n{", "\n/* T-M6-SP4:")
-    assert "nf_flow_table_revoke_match(" in v6_flush
+    for token in (
+        "if (READ_ONCE(ask_ipv6_hw_frag))",
+        "nf_flow_table_fence_begin();",
+        "synchronize_rcu();",
+        "nf_flow_table_revoke_match(",
+        "mutex_lock(&ask_flow_lifecycle_lock);",
+        "mutex_unlock(&ask_flow_lifecycle_lock);",
+        "nf_flow_table_fence_end();",
+    ):
+        assert token in v6_flush, token
+    assert v6_flush.index("return -EINVAL;") < v6_flush.index("nf_flow_table_fence_begin();")
+    assert v6_flush.index("nf_flow_table_fence_begin();") < v6_flush.index("synchronize_rcu();")
+    assert v6_flush.index("synchronize_rcu();") < v6_flush.index("nf_flow_table_revoke_match(")
     assert v6_flush.index("nf_flow_table_revoke_match(") < v6_flush.index("mutex_lock(&ask_flow_lifecycle_lock);")
+    assert v6_flush.index("mutex_unlock(&ask_flow_lifecycle_lock);") < v6_flush.index("nf_flow_table_fence_end();")
 
     # ask_flow_policy_revoke also revokes WGFP flows/rflows/obs
     pol = _between(fo, "int ask_flow_policy_revoke(void)", "\nEXPORT_SYMBOL_GPL(ask_flow_policy_revoke);")
     assert "dpaa_wgfp_policy_revoke()" in pol
+
+
+def test_bridge_runner_per_phase_pcd_snapshot_and_muram_check():
+    br_sh = (ROOT / "bin/testrig-ask2-bridge.sh").read_text()
+
+    # Token-scoped snapshot path and separate tool-availability flag
+    assert 'SNAP_FILE="/tmp/ask2-bridge-${TOKEN}.json"' in br_sh
+    assert "HAVE_PCD_TOOL=" in br_sh
+    assert "BASE_MURAM=" in br_sh
+
+    # In cleanup(): active phase pcd-snapshot diff MUST run BEFORE testrig-ask2-9k.sh down
+    # (otherwise 9k down re-engages 0x10/0x11 and can swap fmbm_rccb offsets).
+    cln = _between(br_sh, "cleanup(){", "\ntrap cleanup EXIT")
+    assert 'if [ "$HAVE_PCD_SNAP" = 1 ]; then' in cln
+    assert 'if [ "$JUMBO_UP" = 1 ]; then' in cln
+    assert cln.index('if [ "$HAVE_PCD_SNAP" = 1 ]; then') < cln.index('if [ "$JUMBO_UP" = 1 ]; then')
+    assert 'rm -f -- \\"$SNAP_FILE\\"' in cln or 'rm -f -- "$SNAP_FILE"' in cln
+    assert "BASE_MURAM" in cln
+    assert '[ "$PCD_SNAP_FAILED" = 0 ] || clean_rc=1' in cln
+
+    # In main MTU loop: snapshot is captured per phase AFTER 9k up and diffed BEFORE 9k down
+    loop = br_sh[br_sh.index('for m in "${MTU_LIST[@]}"; do'):]
+    assert loop.index('"$HERE/testrig-ask2-9k.sh" up') < loop.index("pcd-snapshot capture")
+    assert loop.index("pcd-snapshot diff") < loop.index('"$HERE/testrig-ask2-9k.sh" down')
+    assert "PCD_SNAP_FAILED=1" in loop
