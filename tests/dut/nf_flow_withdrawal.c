@@ -393,6 +393,14 @@ static bool ask_flow_gen_is_current(struct ask_flow_table *t, u64 cookie,
 	assert(generation == old_owner.generation);
 	return false; /* retained, tombstoned owner */
 }
+enum ask_fallback_reason {
+	ASK_FALLBACK_ADMISSION_GATE = 0,
+	ASK_FALLBACK_POLICY_FENCED,
+};
+static void ask_fallback_inc(enum ask_fallback_reason reason)
+{
+	(void)reason;
+}
 #include "ask_retained_body.h"
 
 static int ask_early_delay_guard(struct flow_cls_offload *f)
