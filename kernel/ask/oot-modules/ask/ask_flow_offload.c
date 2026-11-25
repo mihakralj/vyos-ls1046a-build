@@ -43,6 +43,7 @@
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
+#include <net/sch_generic.h>
 #include <linux/if_arp.h>		/* ARPHRD_PPP: T-M6-SP4 session-down flush */
 #include <linux/if_pppox.h>		/* PPPOE_SES_HLEN: decap MTU bound */
 #include <linux/inetdevice.h>
@@ -3095,6 +3096,7 @@ static bool ask_pppoe_path_current(const struct ask_flow_key *key)
 	int i;
 
 	if (!info.session_ifindex || !info.ifindex || !info.sid ||
+	    ask_hw_dev_has_soft_qdisc(info.session_ifindex) ||
 	    !ask_pppoe_session_is_current(key->pppoe_session_epoch) ||
 	    !ask_pppoe_port_armed(info.ifindex, key->l3_proto))
 		return false;
@@ -7490,10 +7492,156 @@ static void ask_flow_offload_stats_cb(struct net_device *dev,
 		ask_port_stats_get(dev->ifindex, hw);
 }
 
+static int ask_flow_offload_egress_change(struct net_device *dev,
+					  enum dpaa_egress_event ev, u32 fqid)
+{
+	return ask_hw_egress_ceetm_event(dev, (int)ev, fqid);
+}
+
+/*
+ * G10 software-qdisc bypass guard: runs once a second under RTNL to detect
+ * non-offload software egress qdiscs (cake, fq_codel root, non-offload htb,
+ * tbf, netem, etc.) or egress tcx/clsact filters on DPAA ports and stacked
+ * VLAN vifs. Flows egressing such a device are kept in software (and existing
+ * HW records are retired) so ASK2 never silently bypasses an operator's qdisc.
+ */
+static bool ask_tc_qdisc_is_soft(struct net_device *dev)
+{
+	struct Qdisc *q;
+	unsigned int i;
+
+	ASSERT_RTNL();
+	if (!dev)
+		return false;
+#ifdef CONFIG_NET_XGRESS
+	if (rcu_access_pointer(dev->tcx_egress))
+		return true;
+#endif
+	q = rtnl_dereference(dev->qdisc);
+	if (!q || (q->flags & TCQ_F_BUILTIN))
+		return false;
+	if ((q->flags & TCQ_F_MQROOT) && q->handle == 0) {
+		for (i = 0; i < dev->num_tx_queues; i++) {
+			struct Qdisc *cq;
+
+			cq = rtnl_dereference(netdev_get_tx_queue(dev, i)->qdisc_sleeping);
+			if (cq && !(cq->flags & TCQ_F_BUILTIN) && cq->handle != 0)
+				return true;
+		}
+		return false;
+	}
+	if ((!strcmp(q->ops->id, "pfifo_fast") ||
+	     !strcmp(q->ops->id, "fq_codel")) && q->handle == 0)
+		return false;
+	if (!strcmp(q->ops->id, "htb") && (q->flags & TCQ_F_OFFLOADED) &&
+	    dpaa_ceetm_is_active(dev)) {
+		/* An offloaded HTB root is safe only if no user-configured
+		 * software child qdisc (non-zero handle) sits on its leaves. */
+		for (i = 0; i < dev->num_tx_queues; i++) {
+			struct Qdisc *cq;
+
+			cq = rtnl_dereference(netdev_get_tx_queue(dev, i)->qdisc_sleeping);
+			if (cq && !(cq->flags & TCQ_F_BUILTIN) && cq->handle != 0)
+				return true;
+		}
+		return false;
+	}
+	return true;
+}
+
+static bool ask_tc_qdisc_stopped;
+static bool ask_tc_qdisc_withdraw_retry;
+static void ask_tc_qdisc_workfn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(ask_tc_qdisc_work, ask_tc_qdisc_workfn);
+
+static bool ask_tc_qdisc_withdraw_dev(struct net_device *dev)
+{
+	int brc, frc;
+
+	brc = ask_bridge_dev_quiesce(0xff, dev->ifindex);
+	frc = ask_flow_port_withdraw(0xff, dev->ifindex);
+	if (brc || frc) {
+		ask_pr_warn("flow_offload: G10 soft-qdisc withdraw on %s incomplete (bridge=%d flow=%d); will retry\n",
+			    netdev_name(dev), brc, frc);
+		return false;
+	}
+	return true;
+}
+
+static void ask_tc_qdisc_workfn(struct work_struct *work)
+{
+	struct net_device *dev;
+	bool need_retry = false;
+	bool retry_pass = xchg(&ask_tc_qdisc_withdraw_retry, false);
+	u8 pid;
+
+	if (READ_ONCE(ask_tc_qdisc_stopped))
+		return;
+
+	rtnl_lock();
+	if (!READ_ONCE(ask_tc_qdisc_stopped)) {
+		for_each_netdev(&init_net, dev) {
+			struct net_device *phys = is_vlan_dev(dev) ?
+						  vlan_dev_real_dev(dev) : dev;
+			bool is_dpaa = phys && !ask_hw_dev_port(phys, &pid);
+			bool is_br = netif_is_bridge_master(dev) ||
+				     (is_vlan_dev(dev) && phys &&
+				      netif_is_bridge_master(phys));
+			bool is_ppp = (dev->type == ARPHRD_PPP);
+			bool soft, changed;
+
+			if (!is_dpaa && !is_br && !is_ppp)
+				continue;
+			soft = ask_tc_qdisc_is_soft(dev);
+			if (!soft && is_dpaa) {
+				struct net_device *master = netdev_master_upper_dev_get(phys);
+
+				if (master && netif_is_bridge_master(master) &&
+				    ask_tc_qdisc_is_soft(master))
+					soft = true;
+			}
+			changed = ask_hw_set_dev_soft_qdisc(dev->ifindex, soft);
+			if (changed) {
+				ask_pr_info("flow_offload: G10 %s %s software egress qdisc; flows egressing it %s\n",
+					    netdev_name(dev),
+					    soft ? "runs" : "no longer runs",
+					    soft ? "stay in software" : "may offload again");
+			}
+			if (soft && (changed || retry_pass)) {
+				if (is_ppp) {
+					ask_flow_pppoe_flush();
+				} else if (is_br) {
+					struct net_device *br = netif_is_bridge_master(dev) ? dev : phys;
+					struct net_device *lower;
+					struct list_head *iter;
+
+					if (!ask_tc_qdisc_withdraw_dev(dev))
+						need_retry = true;
+					netdev_for_each_lower_dev(br, lower, iter) {
+						if (!ask_hw_dev_port(lower, &pid) &&
+						    !ask_tc_qdisc_withdraw_dev(lower))
+							need_retry = true;
+					}
+				} else if (!ask_tc_qdisc_withdraw_dev(dev)) {
+					need_retry = true;
+				}
+			}
+		}
+	}
+	rtnl_unlock();
+
+	if (need_retry)
+		WRITE_ONCE(ask_tc_qdisc_withdraw_retry, true);
+
+	if (!READ_ONCE(ask_tc_qdisc_stopped))
+		queue_delayed_work(system_unbound_wq, &ask_tc_qdisc_work, HZ);
+}
+
 static const struct dpaa_flow_offload_ops ask_flow_offload_ops = {
 	.owner          = THIS_MODULE,
 	.setup_tc_block = ask_flow_offload_setup_tc_block,
 	.offload_stats  = ask_flow_offload_stats_cb,
+	.egress_change  = ask_flow_offload_egress_change,
 };
 
 static bool ask_flow_offload_registered;
@@ -7562,6 +7710,10 @@ int ask_flow_offload_init(void)
 	WRITE_ONCE(ask_stats_scan_stopped, false);
 	queue_delayed_work(system_unbound_wq, &ask_stats_scan_work, HZ);
 
+	/* G10: 1-Hz software-qdisc bypass guard. */
+	WRITE_ONCE(ask_tc_qdisc_stopped, false);
+	queue_delayed_work(system_unbound_wq, &ask_tc_qdisc_work, HZ);
+
 	/* T-M6-SP4: PPPoE session-down flush. */
 	spin_lock_bh(&ask_flow_pending_lock);
 	ask_pppoe_events_live = true;
@@ -7606,6 +7758,10 @@ void ask_flow_offload_exit(void)
 	 */
 	WRITE_ONCE(ask_stats_scan_stopped, true);
 	cancel_delayed_work_sync(&ask_stats_scan_work);
+
+	/* G10: stop the software-qdisc bypass guard before unregistering. */
+	WRITE_ONCE(ask_tc_qdisc_stopped, true);
+	cancel_delayed_work_sync(&ask_tc_qdisc_work);
 
 	/*
 	 * PR14z9: stop the active poller before unregistering the

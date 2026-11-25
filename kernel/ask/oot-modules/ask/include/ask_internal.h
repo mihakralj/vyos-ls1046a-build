@@ -140,8 +140,8 @@ struct net_device *ask_hw_port_netdev(u8 hw_port_id);	/* rtnl held */
 int  ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id);
 int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
 int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
-		      u16 vid, u64 fe_token, bool add);
-void ask_hw_l2_fq_put(u32 fqid);
+		      u16 vid, u64 fe_token, int out_ifindex, bool add);
+void ask_hw_l2_fq_put(u32 fqid, int out_ifindex);
 int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 fe_token,
 			   u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
@@ -406,6 +406,7 @@ struct ask_hw_flow_cookie {
         struct fman              *fm;           /* ingress port's FMan */
         u8                        port_id;      /* ingress BMI hwport id */
         int                       sink_ifindex;
+        int                       sink_slot;    /* G10: noconf_tx slot index (-1 if unknown) */
         u32                       sink_fqid;
 };
 
@@ -519,6 +520,9 @@ int  ask_hw_flow_insert(const struct ask_flow_key *key,
 int  ask_hw_flow_remove(u32 hw_flow_id);
 int  ask_hw_flow_get_sink_fqid(u32 hw_flow_id, u32 *fqid);
 int  ask_hw_flow_query_stats(u32 hw_flow_id, u64 *packets, u64 *bytes);
+int  ask_hw_egress_ceetm_event(struct net_device *dev, int ev, u32 fqid);
+bool ask_hw_dev_has_soft_qdisc(u32 ifindex);
+bool ask_hw_set_dev_soft_qdisc(u32 ifindex, bool soft);
 
 /* ------------------------------------------------------------------------- */
 /* ask_genl_attr.c — nla_policy tables shared across nested attribute sets    */

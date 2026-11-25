@@ -51,6 +51,7 @@
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
 #include <linux/fsl/fman_pcd.h>
+#include <linux/fsl/dpaa_flow_offload.h>
 #include <linux/fsl/dpaa_wgfp.h>      /* WireGuard fast path family policy */
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
@@ -726,19 +727,152 @@ struct ask_hw_pcd {
 		u32     nflow;
 		u32     flow_fqid[ASK_HW_FLOW_FQS];
 		u32     users[ASK_HW_FLOW_FQS];
+		/* G10: CEETM shared egress LFQID (0xF00xxx) and refcounts. */
+		u32     ceetm_fqid;
+		u32     ceetm_users;
+		u32     ceetm_l2_users;
+		bool    ceetm_transitioning;
 		bool    unregistered;
 		bool    retained;
 		bool    module_pinned;
 	}               noconf_tx[ASK_HW_NOCONF_SLOTS];
 
+	/* G10: per-ifindex CEETM transition fence tracked independently of
+	 * whether noconf_tx[slot] has been populated yet (guards cold ports). */
+	u32             ceetm_trans_ifindex[ASK_HW_NOCONF_SLOTS * 2];
+	u8              ceetm_trans_depth[ASK_HW_NOCONF_SLOTS * 2];
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
 
+#define ASK_CEETM_LFQID_MASK	0xF00000U
+static inline bool ask_is_ceetm_fqid(u32 fqid)
+{
+	return (fqid & ASK_CEETM_LFQID_MASK) == ASK_CEETM_LFQID_MASK;
+}
+
+static bool ask_hw_ifindex_ceetm_transitioning_locked(const struct ask_hw_pcd *h,
+						      u32 ifindex)
+{
+	unsigned int i;
+
+	if (!h || !ifindex)
+		return false;
+	lockdep_assert_held(&h->lock);
+	for (i = 0; i < ARRAY_SIZE(h->ceetm_trans_ifindex); i++) {
+		if (h->ceetm_trans_ifindex[i] == ifindex &&
+		    h->ceetm_trans_depth[i] > 0)
+			return true;
+	}
+	return false;
+}
+
+static void ask_hw_ceetm_trans_set_locked(struct ask_hw_pcd *h, u32 ifindex,
+					  bool entering)
+{
+	unsigned int i;
+	int free_idx = -1;
+
+	if (!h || !ifindex)
+		return;
+	lockdep_assert_held(&h->lock);
+	for (i = 0; i < ARRAY_SIZE(h->ceetm_trans_ifindex); i++) {
+		if (h->ceetm_trans_ifindex[i] == ifindex) {
+			if (entering) {
+				if (h->ceetm_trans_depth[i] < U8_MAX)
+					h->ceetm_trans_depth[i]++;
+			} else if (h->ceetm_trans_depth[i] > 0) {
+				h->ceetm_trans_depth[i]--;
+				if (h->ceetm_trans_depth[i] == 0)
+					h->ceetm_trans_ifindex[i] = 0;
+			}
+			return;
+		}
+		if (free_idx < 0 && h->ceetm_trans_ifindex[i] == 0)
+			free_idx = (int)i;
+	}
+	if (entering && free_idx >= 0) {
+		h->ceetm_trans_ifindex[free_idx] = ifindex;
+		h->ceetm_trans_depth[free_idx] = 1;
+	}
+}
+
+/* G10 software-qdisc bypass guard: tracks ifindexes currently running a
+ * non-offload software egress qdisc (cake, fq_codel root, non-offload htb,
+ * tbf, netem) or egress tcx/clsact filter so ASK2 fails closed to SW. */
+#define ASK_SOFT_QDISC_MAX	32
+static DEFINE_SPINLOCK(ask_soft_qdisc_lock);
+static u32 ask_soft_qdisc_ifindexes[ASK_SOFT_QDISC_MAX];
+static unsigned int ask_soft_qdisc_cnt;
+static bool ask_soft_qdisc_overflow;
+
+bool ask_hw_dev_has_soft_qdisc(u32 ifindex)
+{
+	unsigned long flags;
+	unsigned int i;
+	bool found = false;
+
+	if (!ifindex)
+		return false;
+	spin_lock_irqsave(&ask_soft_qdisc_lock, flags);
+	if (unlikely(ask_soft_qdisc_overflow)) {
+		spin_unlock_irqrestore(&ask_soft_qdisc_lock, flags);
+		return true;
+	}
+	for (i = 0; i < ask_soft_qdisc_cnt; i++) {
+		if (ask_soft_qdisc_ifindexes[i] == ifindex) {
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&ask_soft_qdisc_lock, flags);
+	return found;
+}
+
+bool ask_hw_set_dev_soft_qdisc(u32 ifindex, bool soft)
+{
+	unsigned long flags;
+	unsigned int i;
+	bool changed = false;
+
+	if (!ifindex)
+		return false;
+	spin_lock_irqsave(&ask_soft_qdisc_lock, flags);
+	for (i = 0; i < ask_soft_qdisc_cnt; i++) {
+		if (ask_soft_qdisc_ifindexes[i] == ifindex) {
+			if (!soft) {
+				ask_soft_qdisc_ifindexes[i] =
+					ask_soft_qdisc_ifindexes[--ask_soft_qdisc_cnt];
+				if (ask_soft_qdisc_cnt < ASK_SOFT_QDISC_MAX)
+					ask_soft_qdisc_overflow = false;
+				changed = true;
+			}
+			spin_unlock_irqrestore(&ask_soft_qdisc_lock, flags);
+			return changed;
+		}
+	}
+	if (soft) {
+		if (ask_soft_qdisc_cnt < ASK_SOFT_QDISC_MAX) {
+			ask_soft_qdisc_ifindexes[ask_soft_qdisc_cnt++] = ifindex;
+			changed = true;
+		} else if (!ask_soft_qdisc_overflow) {
+			ask_soft_qdisc_overflow = true;
+			changed = true;
+			ask_pr_warn("hw: G10 soft-qdisc guard table full (%u); failing closed to SW\n",
+				    ASK_SOFT_QDISC_MAX);
+		}
+	}
+	spin_unlock_irqrestore(&ask_soft_qdisc_lock, flags);
+	return changed;
+}
+
 static u32 ask_hw_noconf_slot_users_locked(const struct ask_hw_pcd *h,
 					   unsigned int slot)
 {
-	u32 total = h->noconf_tx[slot].legacy_users + h->noconf_tx[slot].l2_users;
+	u32 total = h->noconf_tx[slot].legacy_users +
+		    h->noconf_tx[slot].l2_users +
+		    h->noconf_tx[slot].ceetm_users +
+		    h->noconf_tx[slot].ceetm_l2_users;
 	unsigned int j, n = smp_load_acquire(&h->noconf_tx[slot].nflow);
 
 	for (j = 0; j < n; j++)
@@ -2680,18 +2814,53 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
 	phys = is_vlan_dev(dev) ? vlan_dev_real_dev(dev) : dev;
 	phys_ifindex = phys->ifindex;
 
+	/* G10 software-qdisc bypass guard: never offload past a non-offload
+	 * software egress qdisc (cake, fq_codel root, non-offload htb, etc.)
+	 * or egress tcx/clsact filter on either the VLAN vif or physical port. */
+	if (!allow_alloc &&
+	    (ask_hw_dev_has_soft_qdisc(ifindex) ||
+	     ask_hw_dev_has_soft_qdisc(phys_ifindex))) {
+		dev_put(dev);
+		return -EOPNOTSUPP;
+	}
+
 	slot = phys_ifindex % ASK_HW_NOCONF_SLOTS;
 	if (h) {
 		mutex_lock(&h->lock);
 		if (h->noconf_tx[slot].fqid &&
 		    h->noconf_tx[slot].ifindex == phys_ifindex) {
+			u32 ceetm_fq = 0;
+			int ceetm_rc;
+
 			if (h->noconf_tx[slot].unregistered ||
 			    h->noconf_tx[slot].retained) {
 				mutex_unlock(&h->lock);
 				dev_put(dev);
 				return -ENODEV;
 			}
-			*fqid = h->noconf_tx[slot].fqid;
+			if (h->noconf_tx[slot].ceetm_transitioning ||
+			    ask_hw_ifindex_ceetm_transitioning_locked(h, phys_ifindex)) {
+				mutex_unlock(&h->lock);
+				dev_put(dev);
+				return -EAGAIN;
+			}
+			/* G10: when CEETM HTB offload owns this port's sub-portal,
+			 * conventional WQ6 FQs stop dequeuing; target the active
+			 * leaf's no-confirm CEETM hw_lfq (0xF00xxx) or fail closed. */
+			ceetm_rc = dpaa_ceetm_offload_egress_fqid(phys, 0,
+								  &ceetm_fq);
+			if (ceetm_rc < 0) {
+				mutex_unlock(&h->lock);
+				dev_put(dev);
+				return ceetm_rc;
+			}
+			if (ceetm_rc > 0 && ceetm_fq) {
+				h->noconf_tx[slot].ceetm_fqid = ceetm_fq;
+				*fqid = ceetm_fq;
+			} else {
+				h->noconf_tx[slot].ceetm_fqid = 0;
+				*fqid = h->noconf_tx[slot].fqid;
+			}
 			if (slotp)
 				*slotp = slot;
 			mutex_unlock(&h->lock);
@@ -2703,6 +2872,11 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
 			mutex_unlock(&h->lock);
 			dev_put(dev);
 			return -ENODEV;
+		}
+		if (ask_hw_ifindex_ceetm_transitioning_locked(h, phys_ifindex)) {
+			mutex_unlock(&h->lock);
+			dev_put(dev);
+			return -EAGAIN;
 		}
 		mutex_unlock(&h->lock);
 	}
@@ -2755,6 +2929,10 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
 			h->noconf_tx[slot].dev = phys;
 			h->noconf_tx[slot].ifindex = phys_ifindex;
 			h->noconf_tx[slot].fqid = *fqid;
+			/* Mirror any in-flight CEETM transition that started
+			 * while this cold slot was still unpopulated. */
+			h->noconf_tx[slot].ceetm_transitioning =
+				ask_hw_ifindex_ceetm_transitioning_locked(h, phys_ifindex);
 			if (slotp)
 				*slotp = slot;
 		} else if (h->noconf_tx[slot].ifindex != phys_ifindex) {
@@ -2942,6 +3120,12 @@ static u32 ask_hw_flow_fq_get(struct ask_hw_pcd *h, int slot, u32 legacy)
 	unsigned int i, best = 0;
 
 	lockdep_assert_held(&h->lock);
+	/* G10: CEETM LFQIDs route directly to the shaped CEETM CQ; never
+	 * substitute conventional WQ6 flow_fqid[] entries while CEETM is live. */
+	if (ask_is_ceetm_fqid(legacy)) {
+		h->noconf_tx[slot].ceetm_users++;
+		return legacy;
+	}
 	if (!n || (min_mtu && (!dev || READ_ONCE(dev->mtu) <= min_mtu))) {
 		h->noconf_tx[slot].legacy_users++;
 		return legacy;
@@ -2954,11 +3138,26 @@ static u32 ask_hw_flow_fq_get(struct ask_hw_pcd *h, int slot, u32 legacy)
 }
 
 /* Drop the flow count ask_hw_flow_fq_get() took for @fqid. h->lock held. */
-static void ask_hw_flow_fq_put(struct ask_hw_pcd *h, u32 fqid)
+static void ask_hw_flow_fq_put(struct ask_hw_pcd *h, int slot, u32 fqid)
 {
 	unsigned int i, j, n;
 
 	lockdep_assert_held(&h->lock);
+	if (ask_is_ceetm_fqid(fqid)) {
+		if (slot >= 0 && slot < ASK_HW_NOCONF_SLOTS) {
+			if (!WARN_ON_ONCE(!h->noconf_tx[slot].ceetm_users))
+				h->noconf_tx[slot].ceetm_users--;
+			return;
+		}
+		for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+			if (h->noconf_tx[i].ceetm_fqid == fqid &&
+			    h->noconf_tx[i].ceetm_users) {
+				h->noconf_tx[i].ceetm_users--;
+				return;
+			}
+		}
+		return;
+	}
 	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
 		if (h->noconf_tx[i].fqid == fqid) {
 			if (!WARN_ON_ONCE(!h->noconf_tx[i].legacy_users))
@@ -2977,30 +3176,83 @@ static void ask_hw_flow_fq_put(struct ask_hw_pcd *h, u32 fqid)
 }
 
 /* Account an L2 bridge record against a live noconf_tx slot. h->lock held. */
-static int ask_hw_l2_fq_get_locked(struct ask_hw_pcd *h, u32 fqid)
+static int ask_hw_l2_fq_get_locked(struct ask_hw_pcd *h, u32 fqid,
+				   int out_ifindex)
 {
 	unsigned int i;
 
 	lockdep_assert_held(&h->lock);
+	if (ask_is_ceetm_fqid(fqid)) {
+		for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+			if (out_ifindex > 0 &&
+			    h->noconf_tx[i].ifindex != (u32)out_ifindex)
+				continue;
+			if (h->noconf_tx[i].ceetm_fqid != fqid)
+				continue;
+			if (h->noconf_tx[i].unregistered ||
+			    h->noconf_tx[i].retained ||
+			    h->noconf_tx[i].ceetm_transitioning ||
+			    ask_hw_ifindex_ceetm_transitioning_locked(h, h->noconf_tx[i].ifindex) ||
+			    ask_hw_dev_has_soft_qdisc(h->noconf_tx[i].ifindex))
+				return -EAGAIN;
+			h->noconf_tx[i].ceetm_l2_users++;
+			return 0;
+		}
+		return -ENODEV;
+	}
 	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		if (out_ifindex > 0 &&
+		    h->noconf_tx[i].ifindex != (u32)out_ifindex)
+			continue;
 		if (h->noconf_tx[i].fqid != fqid)
 			continue;
 		if (h->noconf_tx[i].unregistered || h->noconf_tx[i].retained)
 			return -ENODEV;
+		if (h->noconf_tx[i].ceetm_transitioning ||
+		    ask_hw_ifindex_ceetm_transitioning_locked(h, h->noconf_tx[i].ifindex) ||
+		    h->noconf_tx[i].ceetm_fqid ||
+		    (h->noconf_tx[i].dev &&
+		     dpaa_ceetm_is_active(h->noconf_tx[i].dev)))
+			return -EAGAIN;
+		if (ask_hw_dev_has_soft_qdisc(h->noconf_tx[i].ifindex))
+			return -EOPNOTSUPP;
 		h->noconf_tx[i].l2_users++;
 		return 0;
 	}
 	return -ENODEV;
 }
 
-static void ask_hw_l2_fq_put_locked(struct ask_hw_pcd *h, u32 fqid)
+static void ask_hw_l2_fq_put_locked(struct ask_hw_pcd *h, u32 fqid,
+				    int out_ifindex)
 {
 	unsigned int i;
 
 	lockdep_assert_held(&h->lock);
 	if (!fqid)
 		return;
+	if (ask_is_ceetm_fqid(fqid)) {
+		if (out_ifindex > 0) {
+			for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+				if (h->noconf_tx[i].ifindex != (u32)out_ifindex)
+					continue;
+				if (!WARN_ON_ONCE(!h->noconf_tx[i].ceetm_l2_users))
+					h->noconf_tx[i].ceetm_l2_users--;
+				return;
+			}
+		}
+		for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+			if (h->noconf_tx[i].ceetm_fqid == fqid &&
+			    h->noconf_tx[i].ceetm_l2_users) {
+				h->noconf_tx[i].ceetm_l2_users--;
+				return;
+			}
+		}
+		return;
+	}
 	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		if (out_ifindex > 0 &&
+		    h->noconf_tx[i].ifindex != (u32)out_ifindex)
+			continue;
 		if (h->noconf_tx[i].fqid != fqid)
 			continue;
 		if (!WARN_ON_ONCE(!h->noconf_tx[i].l2_users))
@@ -3009,14 +3261,14 @@ static void ask_hw_l2_fq_put_locked(struct ask_hw_pcd *h, u32 fqid)
 	}
 }
 
-void ask_hw_l2_fq_put(u32 fqid)
+void ask_hw_l2_fq_put(u32 fqid, int out_ifindex)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 
 	if (!h || !fqid)
 		return;
 	mutex_lock(&h->lock);
-	ask_hw_l2_fq_put_locked(h, fqid);
+	ask_hw_l2_fq_put_locked(h, fqid, out_ifindex);
 	mutex_unlock(&h->lock);
 }
 
@@ -3027,20 +3279,118 @@ bool ask_hw_tx_fqid_live_locked(struct ask_hw_pcd *guard, u32 tx_fqid)
 	if (!guard || !tx_fqid)
 		return false;
 	lockdep_assert_held(&guard->lock);
+	if (ask_is_ceetm_fqid(tx_fqid)) {
+		for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+			if (guard->noconf_tx[i].ceetm_fqid != tx_fqid)
+				continue;
+			return !guard->noconf_tx[i].unregistered &&
+			       !guard->noconf_tx[i].retained &&
+			       !guard->noconf_tx[i].ceetm_transitioning &&
+			       !ask_hw_ifindex_ceetm_transitioning_locked(guard, guard->noconf_tx[i].ifindex) &&
+			       !ask_hw_dev_has_soft_qdisc(guard->noconf_tx[i].ifindex);
+		}
+		return false;
+	}
 	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+		bool wq_ok;
+
 		if (!guard->noconf_tx[i].fqid)
 			continue;
+		wq_ok = !guard->noconf_tx[i].unregistered &&
+			!guard->noconf_tx[i].retained &&
+			!guard->noconf_tx[i].ceetm_transitioning &&
+			!ask_hw_ifindex_ceetm_transitioning_locked(guard, guard->noconf_tx[i].ifindex) &&
+			!guard->noconf_tx[i].ceetm_fqid &&
+			!ask_hw_dev_has_soft_qdisc(guard->noconf_tx[i].ifindex) &&
+			(!guard->noconf_tx[i].dev ||
+			 !dpaa_ceetm_is_active(guard->noconf_tx[i].dev));
 		if (guard->noconf_tx[i].fqid == tx_fqid)
-			return !guard->noconf_tx[i].unregistered &&
-			       !guard->noconf_tx[i].retained;
+			return wq_ok;
 		n = smp_load_acquire(&guard->noconf_tx[i].nflow);
 		for (j = 0; j < n; j++) {
 			if (guard->noconf_tx[i].flow_fqid[j] == tx_fqid)
-				return !guard->noconf_tx[i].unregistered &&
-				       !guard->noconf_tx[i].retained;
+				return wq_ok;
 		}
 	}
 	return false;
+}
+
+/*
+ * G10: synchronous CEETM egress mode/class transition callback invoked by
+ * dpaa_ceetm.c under RTNL + sleepable dpaa_fo_srcu.
+ *   PRE_CHANGE: fence new egress admission on @dev (including cold ports
+ *     whose noconf_tx slot is not yet populated) and withdraw all routed and
+ *     bridge HW records targeting @dev.
+ *   POST_CHANGE: refresh cached CEETM hw_lfq FQID and lift the fence.
+ */
+int ask_hw_egress_ceetm_event(struct net_device *dev, int ev, u32 fqid)
+{
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
+	unsigned int i;
+	int slot = -1, brc = 0, frc = 0;
+
+	if (!dev)
+		return 0;
+
+	if (h) {
+		mutex_lock(&h->lock);
+		for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+			if (h->noconf_tx[i].dev == dev ||
+			    (h->noconf_tx[i].fqid &&
+			     h->noconf_tx[i].ifindex == (u32)dev->ifindex)) {
+				slot = (int)i;
+				break;
+			}
+		}
+		if (ev == DPAA_EGRESS_CEETM_PRE_CHANGE) {
+			ask_hw_ceetm_trans_set_locked(h, dev->ifindex, true);
+			if (slot >= 0)
+				h->noconf_tx[slot].ceetm_transitioning = true;
+		}
+		mutex_unlock(&h->lock);
+	}
+
+	if (ev == DPAA_EGRESS_CEETM_PRE_CHANGE) {
+		brc = ask_bridge_dev_quiesce(0xff, dev->ifindex);
+		frc = ask_flow_port_withdraw(0xff, dev->ifindex);
+		if (brc || frc)
+			ask_pr_warn("hw: G10 CEETM pre-change quiesce on %s incomplete (bridge=%d flow=%d)\n",
+				    netdev_name(dev), brc, frc);
+		return brc ? brc : frc;
+	}
+
+	if (ev == DPAA_EGRESS_CEETM_POST_CHANGE && h) {
+		u32 cur_fq = fqid;
+
+		if (!cur_fq) {
+			u32 probed = 0;
+
+			if (dpaa_ceetm_offload_egress_fqid(dev, 0, &probed) > 0)
+				cur_fq = probed;
+		}
+		mutex_lock(&h->lock);
+		ask_hw_ceetm_trans_set_locked(h, dev->ifindex, false);
+		/* Re-resolve slot in case prewarm populated it during transition. */
+		slot = -1;
+		for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
+			if (h->noconf_tx[i].dev == dev ||
+			    (h->noconf_tx[i].fqid &&
+			     h->noconf_tx[i].ifindex == (u32)dev->ifindex)) {
+				slot = (int)i;
+				break;
+			}
+		}
+		if (slot >= 0) {
+			h->noconf_tx[slot].ceetm_fqid = cur_fq;
+			h->noconf_tx[slot].ceetm_transitioning =
+				ask_hw_ifindex_ceetm_transitioning_locked(h, dev->ifindex);
+		}
+		mutex_unlock(&h->lock);
+		ask_pr_info("hw: G10 CEETM post-change on %s (hw_lfqid=0x%x)\n",
+			    netdev_name(dev), cur_fq);
+	}
+
+	return 0;
 }
 
 /* Resolve @hw_port_id's L2_DA table row (0 for pure L2_DA, 1..3 for G5b
@@ -3367,7 +3717,7 @@ int ask_hw_l2_class_detach(u8 hw_port_id)
  * disengage and class detach.
  */
 int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
-		     u16 vid, u64 fe_token, bool add)
+		     u16 vid, u64 fe_token, int out_ifindex, bool add)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_get();
 	struct fman_pcd_fe_flow_action a;
@@ -3394,11 +3744,11 @@ int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
 		     -EAGAIN : -ENODEV;
 	} else if (add) {
 		a.table_idx = table_idx;
-		rc = ask_hw_l2_fq_get_locked(h, fqid);
+		rc = ask_hw_l2_fq_get_locked(h, fqid, out_ifindex);
 		if (!rc) {
 			rc = fman_pcd_fe_flow_add(h->fman, hw_port_id, &a);
 			if (rc)
-				ask_hw_l2_fq_put_locked(h, fqid);
+				ask_hw_l2_fq_put_locked(h, fqid, out_ifindex);
 		}
 	} else {
 		rc = fman_pcd_fe_class_flow_del_identified(h->fman, hw_port_id,
@@ -3407,7 +3757,7 @@ int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
 							   FMAN_PCD_FE_OWNER_ASK,
 							   fe_token);
 		if (!rc || rc == -ENOENT)
-			ask_hw_l2_fq_put_locked(h, fqid);
+			ask_hw_l2_fq_put_locked(h, fqid, out_ifindex);
 	}
 	mutex_unlock(&h->lock);
 	return rc;
@@ -3619,6 +3969,27 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 		rc = -ENODEV;
 		goto out_unlock;
 	}
+	if (h->noconf_tx[oif_slot].ceetm_transitioning ||
+	    ask_hw_ifindex_ceetm_transitioning_locked(h, h->noconf_tx[oif_slot].ifindex)) {
+		rc = -EAGAIN;
+		goto out_unlock;
+	}
+	if (ask_hw_dev_has_soft_qdisc(oif) ||
+	    ask_hw_dev_has_soft_qdisc(h->noconf_tx[oif_slot].ifindex)) {
+		rc = -EOPNOTSUPP;
+		goto out_unlock;
+	}
+	if (ask_is_ceetm_fqid(tx_fqid)) {
+		if (h->noconf_tx[oif_slot].ceetm_fqid != tx_fqid) {
+			rc = -EAGAIN;
+			goto out_unlock;
+		}
+	} else if (h->noconf_tx[oif_slot].ceetm_fqid ||
+		   (h->noconf_tx[oif_slot].dev &&
+		    dpaa_ceetm_is_active(h->noconf_tx[oif_slot].dev))) {
+		rc = -EAGAIN;
+		goto out_unlock;
+	}
 
 	p = ask_hw_port_slot_get(h, port_id);
 	if (!p) {
@@ -3636,11 +4007,12 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 	ck.fm           = h->fman;
 	ck.port_id      = port_id;
 	ck.sink_ifindex = (int)oif;
+	ck.sink_slot    = oif_slot;
 	ck.sink_fqid    = tx_fqid;
 
 	cookie = ask_hw_cookie_alloc(h, &ck);
 	if (!cookie) {
-		ask_hw_flow_fq_put(h, tx_fqid);
+		ask_hw_flow_fq_put(h, oif_slot, tx_fqid);
 		rc = -ENOMEM;
 		goto out_unlock;
 	}
@@ -3678,7 +4050,7 @@ int ask_hw_flow_remove(u32 hw_flow_id)
 	 * (Fork-B) manages its own flow deletion via ask_fe_flow_remove()
 	 * in ask_flow_offload.c. */
 
-	ask_hw_flow_fq_put(h, ck->sink_fqid);
+	ask_hw_flow_fq_put(h, ck->sink_slot, ck->sink_fqid);
 	ask_hw_cookie_free(h, hw_flow_id);
 
 	mutex_unlock(&h->lock);
@@ -3729,6 +4101,10 @@ static int ask_hw_netdev_event(struct notifier_block *nb, unsigned long event,
 
 	if (event != NETDEV_UNREGISTER || !h || !dev)
 		return NOTIFY_DONE;
+
+	/* G10: always release any soft-qdisc slot held by an unregistering
+	 * netdev (physical port, VLAN vif, bridge SVI, or PPPoE session). */
+	ask_hw_set_dev_soft_qdisc(dev->ifindex, false);
 
 	/* Withdraw flows referencing an unregistering VLAN vif stacked on a
 	 * DPAA port or on a bridge master (G5b VLAN-aware IRB SVI br0.<vid>). */

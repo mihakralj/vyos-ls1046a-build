@@ -33,11 +33,14 @@
 
 #include "qman_priv.h"
 
-/* LS1046A CEETM0 hard-coded resource ranges (single FMan -> DCP0) */
+/* LS1046A CEETM0 hard-coded resource ranges (single FMan -> DCP0).
+ * Verified on LS1046A QMan 3.2.1 silicon (0a01,03,02,01): 32 channels
+ * (0x00..0x1f), 4096 LFQIDs (0xF00000..0xF00FFF), 8 LNIs, 16 sub-portals.
+ */
 #define CEETM_LFQID_BASE	0xF00000
-#define CEETM_LFQID_COUNT	0x400
-#define CEETM_LFQID_LSB_MASK	0x0003FF
-#define CEETM_NR_CHANNELS	8
+#define CEETM_LFQID_COUNT	0x1000
+#define CEETM_LFQID_LSB_MASK	0x000FFF
+#define CEETM_NR_CHANNELS	32
 #define CEETM_NR_LNIS		8
 #define CEETM_NR_SPS		16
 
@@ -185,11 +188,11 @@ static int ceetm_cq_peek_pop_xsfdrread(struct qm_ceetm_cq *cq, u8 ct,
 	struct qm_mcc_ceetm_cq_peek_pop_xsfdrread q = {0};
 
 	/*
-	 * NOTE: matching the silicon-proven SDK exactly, the cqid field of this
-	 * command is written in native (little-endian on LS1046A) order, not
-	 * byte-swapped like the other CEETM commands.
+	 * QMan management commands are big-endian on the wire (matches
+	 * Mono/NXP 103-qbman-ceetm-lfq-unwind.patch). The legacy SDK's
+	 * unswapped write corrupted cqid on little-endian ARM64.
 	 */
-	q.cqid = cpu_to_le16((cq->parent->idx << 4) | cq->idx);
+	q.cqid = cpu_to_be16((cq->parent->idx << 4) | cq->idx);
 	q.ct = ct;
 	q.dcpid = cq->parent->dcp_idx;
 	return qman_ceetm_mc_exec(QM_CEETM_VERB_CQ_PEEK_POP_XFDRREAD, &q,
@@ -898,6 +901,29 @@ int qman_ceetm_cq_release(struct qm_ceetm_cq *cq)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(qman_ceetm_cq_release);
+
+int qman_ceetm_cq_pop(struct qm_ceetm_cq *cq, struct qm_fd *fd)
+{
+	struct qm_mcr_ceetm_cq_peek_pop_xsfdrread ppxr;
+	int ret;
+
+	if (!cq || !fd)
+		return -EINVAL;
+
+	ret = ceetm_cq_peek_pop_xsfdrread(cq, 1, &ppxr);
+	if (ret)
+		return ret;
+
+	/* The last frame in a CQ can set BOTH valid (0x1) and empty (0x2). */
+	if (ppxr.stat & 0x1) {
+		*fd = ppxr.fd;
+		return 1;
+	}
+	if (ppxr.stat & 0x2)
+		return 0;
+	return -EAGAIN;
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_cq_pop);
 
 int qman_ceetm_drain_cq(struct qm_ceetm_cq *cq)
 {

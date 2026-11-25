@@ -113,12 +113,31 @@ struct ask_hw_pcd {
 	struct {
 		u32 ifindex;
 		u32 fqid;
+		u32 ceetm_fqid;
+		bool ceetm_transitioning;
 		bool unregistered;
 		bool retained;
 		int dev_tracker;
 		struct net_device *dev;
 	} noconf_tx[ASK_HW_NOCONF_SLOTS];
 };
+static bool ask_hw_ifindex_ceetm_transitioning_locked(const struct ask_hw_pcd *h,
+						      u32 ifindex)
+{
+	(void)h; (void)ifindex;
+	return false;
+}
+static bool ask_hw_dev_has_soft_qdisc(u32 ifindex)
+{
+	(void)ifindex;
+	return false;
+}
+static int dpaa_ceetm_offload_egress_fqid(struct net_device *dev, u32 classid,
+					  u32 *out_fqid)
+{
+	(void)dev; (void)classid; (void)out_fqid;
+	return -ENOENT;
+}
 static void netdev_hold(struct net_device *dev, int *tracker, int gfp)
 {
 	(void)dev; (void)tracker; (void)gfp;

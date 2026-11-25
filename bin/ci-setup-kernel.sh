@@ -3171,6 +3171,9 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # F-326: sleepable SRCU for dpaa_setup_tc_flow_block() (fixes PROVE_LOCKING Invalid wait context).
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_326.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-f326-dpaa-srcu.py" "$(pwd)" 2>&1
+    # F-327: G10 Phase 1 CEETM + ASK2 coexistence hooks (SRCU egress notify, CQ pop, MTU budget).
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_327.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-g10-ceetm-ask.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_prepared_disarm,fman_arm_table 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-keygen-window.py" "$(pwd)" 2>&1

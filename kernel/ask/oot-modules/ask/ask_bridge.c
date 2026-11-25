@@ -611,7 +611,7 @@ static int ask_bridge_rec_del(struct ask_bridge_rec *r)
 		return -EBUSY;
 	if (!r->dead) {
 		rc = ask_hw_l2_record(r->port, r->key, r->fqid, r->act, r->vid,
-				      r->fe_token, false);
+				      r->fe_token, r->out_ifindex, false);
 		if (rc == -EAGAIN)
 			return rc;
 		if (rc) {
@@ -623,7 +623,7 @@ static int ask_bridge_rec_del(struct ask_bridge_rec *r)
 			return rc;
 		}
 	} else if (!r->unsettled && r->fqid) {
-		ask_hw_l2_fq_put(r->fqid);
+		ask_hw_l2_fq_put(r->fqid, r->out_ifindex);
 	}
 	list_del(&r->node);
 	ask_bridge_n_recs--;
@@ -766,7 +766,8 @@ static void ask_bridge_admit_key(struct net_device *br, struct net_device *in,
 		pr_warn_ratelimited("ask: bridge: module unavailable; record stays in software\n");
 		return;
 	}
-	rc = ask_hw_l2_record(iport, key, fqid, act, vid, r->fe_token, true);
+	rc = ask_hw_l2_record(iport, key, fqid, act, vid, r->fe_token,
+			      out_ifindex, true);
 	if (rc) {
 		pr_warn_ratelimited("ask: bridge: add %pM>%pM tci 0x%04x act %u on port 0x%02x failed: %d\n",
 				    sa, key + ASK_BRIDGE_K_DA,
