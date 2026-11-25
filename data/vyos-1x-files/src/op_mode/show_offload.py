@@ -36,6 +36,7 @@
 import argparse
 import json
 import socket
+import time
 from ipaddress import ip_address
 
 from tabulate import tabulate
@@ -90,11 +91,29 @@ def _fmt_ip(val):
         raw = bytes(val)
     else:
         return str(val)
-    if len(raw) >= 16 and any(raw[4:16]):
-        return str(ip_address(raw[:16]))
-    if len(raw) >= 4:
-        return str(ip_address(raw[:4]))
+    if len(raw) == 16:
+        return str(ip_address(raw))
+    if len(raw) == 4:
+        return str(ip_address(raw))
     return raw.hex()
+
+
+# NAT/PAT rewrite bitmask matching include/uapi/linux/ask/ask.h.
+_ASK_NATF_SNAT = 1 << 0
+_ASK_NATF_DNAT = 1 << 1
+_ASK_NATF_SPAT = 1 << 2
+_ASK_NATF_DPAT = 1 << 3
+
+_FALLBACK_LABELS = (
+    ('admission-gate', 'admission-gate'),
+    ('policy-fenced', 'policy-fenced'),
+    ('unsupported-proto', 'unsupported-proto'),
+    ('unsupported-action', 'unsupported-action'),
+    ('neigh-unresolved', 'neigh-unresolved'),
+    ('port-unengaged', 'port-unengaged'),
+    ('max-flows', 'max-flows'),
+    ('hw-error', 'hw-error'),
+)
 
 
 def _fmt_endpoint(val, port):
@@ -104,6 +123,72 @@ def _fmt_endpoint(val, port):
     if port is None:
         port = '-'
     return f'[{ip}]:{port}' if ':' in ip else f'{ip}:{port}'
+
+
+def _fmt_nat(flow: dict) -> str:
+    """Render translated NAT/PAT endpoints from ASK_FLOW_ATTR_NAT_*."""
+    flags = _get(flow, 'nat-flags', default=0) or 0
+    if not flags:
+        return '-'
+    parts = []
+    if flags & (_ASK_NATF_SNAT | _ASK_NATF_SPAT):
+        nsip = _get(flow, 'nat-src-ip') if (flags & _ASK_NATF_SNAT) else None
+        nspt = _get(flow, 'nat-sport') if (flags & _ASK_NATF_SPAT) else None
+        if nsip is not None and nspt is not None:
+            parts.append(f'snat {_fmt_endpoint(nsip, nspt)}')
+        elif nsip is not None:
+            parts.append(f'snat {_fmt_ip(nsip)}')
+        elif nspt is not None:
+            parts.append(f'spat :{nspt}')
+    if flags & (_ASK_NATF_DNAT | _ASK_NATF_DPAT):
+        ndip = _get(flow, 'nat-dst-ip') if (flags & _ASK_NATF_DNAT) else None
+        ndpt = _get(flow, 'nat-dport') if (flags & _ASK_NATF_DPAT) else None
+        if ndip is not None and ndpt is not None:
+            parts.append(f'dnat {_fmt_endpoint(ndip, ndpt)}')
+        elif ndip is not None:
+            parts.append(f'dnat {_fmt_ip(ndip)}')
+        elif ndpt is not None:
+            parts.append(f'dpat :{ndpt}')
+    return ', '.join(parts) if parts else f'0x{int(flags):x}'
+
+
+def _fmt_age(first_seen_ns, now_ns: int) -> str:
+    """Format host-observed flow age from CLOCK_MONOTONIC nanoseconds."""
+    if not first_seen_ns:
+        return '-'
+    sec = max(0, (now_ns - int(first_seen_ns)) // 1_000_000_000)
+    if sec < 60:
+        return f'{sec}s'
+    if sec < 3600:
+        return f'{sec // 60}m{sec % 60:02d}s'
+    return f'{sec // 3600}h{(sec % 3600) // 60:02d}m'
+
+
+def _fetch_info() -> dict:
+    """Run ynl get-info and return the unwrapped info dict (or {} if absent)."""
+    rc, out = rc_cmd(f'{YNL} --family {SPEC_FAMILY} --do get-info --output-json')
+    if rc != 0 or not out.strip():
+        return {}
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return {}
+    if isinstance(data, dict) and isinstance(data.get('info'), dict):
+        return data['info']
+    return data if isinstance(data, dict) else {}
+
+
+def _fmt_fallbacks(info: dict):
+    """Return formatted non-zero software fallback breakdown, or None."""
+    fb = _get(info, 'fallback')
+    if not isinstance(fb, dict):
+        return None
+    parts = []
+    for key, label in _FALLBACK_LABELS:
+        val = _get(fb, key, default=0) or 0
+        if val:
+            parts.append(f'{label}={val}')
+    return ', '.join(parts) if parts else 'none'
 
 
 def _armed_hw_ports():
@@ -218,6 +303,16 @@ def show_config():
     if any('*' in r[2] for r in rows):
         print('\n* configured but not currently engaged in silicon '
               '(e.g. link down or interface assigned to VPP).')
+    info = _fetch_info()
+    if info:
+        n_flows = _get(info, 'num-flows')
+        m_flows = _get(info, 'max-flows')
+        if n_flows is not None and m_flows is not None:
+            limit = 'unlimited' if m_flows == 0 else str(m_flows)
+            print(f'\nActive offloaded flow directions: {n_flows} / {limit}')
+        fb_str = _fmt_fallbacks(info)
+        if fb_str is not None:
+            print(f'Software fallbacks (since load): {fb_str}')
     return 0
 
 
@@ -233,6 +328,7 @@ def show_flow():
     following the kernel's hash-random rhashtable iteration order.
     """
     flows = _fetch_flows()
+    now_ns = time.monotonic_ns()
     rows = []
     port_agg = {}
     for f in flows:
@@ -252,6 +348,8 @@ def show_flow():
         rows.append((sort_key, [
             f'{family}/{proto}',
             f'{source} → {destination}',
+            _fmt_nat(f),
+            _fmt_age(_get(f, 'first-seen-ns'), now_ns),
             _get(f, 'packets', default=0),
             _get(f, 'bytes', default=0),
         ]))
@@ -265,17 +363,23 @@ def show_flow():
 
     if not rows:
         print('No flows tracked by ASK offload')
+        fb_str = _fmt_fallbacks(_fetch_info())
+        if fb_str and fb_str != 'none':
+            print(f'Software fallbacks (since load): {fb_str}')
         return 0
 
     rows.sort(key=lambda r: r[0])
     data = [r[1] for r in rows]
-    headers = ['Protocol', 'Flow', 'Packets', 'Bytes']
+    headers = ['Protocol', 'Flow', 'NAT', 'Age', 'Packets', 'Bytes']
     print(f'ASK offload flows ({len(data)} total):\n')
     print(tabulate(data, headers=headers, tablefmt='simple'))
     for pid in sorted(port_agg):
         apkts, abytes = port_agg[pid]
         print(f'\nVLAN port {pid:#04x} hardware aggregate '
               f'(since first flow on port): {apkts} packets / {abytes} bytes')
+    fb_str = _fmt_fallbacks(_fetch_info())
+    if fb_str and fb_str != 'none':
+        print(f'\nSoftware fallbacks (since load): {fb_str}')
     return 0
 
 

@@ -76,6 +76,52 @@ attribute-sets:
         type: u8
       - name: unresolved-flows
         type: u32
+      - name: fallback
+        type: nest
+        nested-attributes: fallback
+        doc: |
+          Per-cause monotonic counters of flows declined from hardware offload
+          (software fallback).
+  -
+    name: fallback
+    name-prefix: ask-fallback-attr-
+    attributes:
+      - name: admission-gate
+        type: u64
+        doc: |
+          Declined while waiting for offload_delay_ms or S6 volume threshold.
+      - name: policy-fenced
+        type: u64
+        doc: |
+          Declined due to policy revocation fence, stale epoch, or retained owner.
+      - name: unsupported-proto
+        type: u64
+        doc: |
+          Declined because L3/L4 protocol match is unsupported in hardware.
+      - name: unsupported-action
+        type: u64
+        doc: |
+          Declined due to unsupported flow action, disabled NAT/VLAN/PPPoE gate,
+          or unresolved ingress VLAN VID.
+      - name: neigh-unresolved
+        type: u64
+        doc: |
+          Declined or deferred because next-hop ARP/ND is unresolved or
+          destination MAC is multicast/invalid.
+      - name: port-unengaged
+        type: u64
+        doc: |
+          Declined because ingress/egress port is not engaged, family is
+          disabled, or pipeline is busy.
+      - name: max-flows
+        type: u64
+        doc: |
+          Declined because ask.max_flows admission ceiling was reached.
+      - name: hw-error
+        type: u64
+        doc: |
+          Declined due to hardware preflight/install error, pending queue full,
+          or memory allocation failure.
   -
     name: muram
     name-prefix: ask-muram-attr-
@@ -134,6 +180,33 @@ attribute-sets:
         doc: |
           VLAN CC flows only: HW-forwarded byte delta on the flow's port
           since the first VLAN flow was installed there.
+      - name: first-seen-ns
+        type: u64
+        doc: |
+          Host-observed monotonic ktime_get_ns() timestamp when the flow was
+          inserted into the ASK table (not a silicon hardware timestamp).
+      - name: nat-flags
+        type: u8
+        doc: |
+          ASK_NATF_* bitmask (SNAT=1, DNAT=2, SPAT=4, DPAT=8); omitted when 0.
+      - name: nat-src-ip
+        type: binary
+        doc: |
+          Translated source IP (4 B IPv4 or 16 B IPv6); present when SNAT set.
+      - name: nat-dst-ip
+        type: binary
+        doc: |
+          Translated destination IP (4 B IPv4 or 16 B IPv6); present when DNAT set.
+      - name: nat-sport
+        type: u16
+        byte-order: big-endian
+        doc: |
+          Translated L4 source port; present when SPAT set.
+      - name: nat-dport
+        type: u16
+        byte-order: big-endian
+        doc: |
+          Translated L4 destination port; present when DPAT set.
   -
     name: sa
     name-prefix: ask-sa-attr-
@@ -221,6 +294,15 @@ operations:
             - last-seen-ns
             - hw-flow-id
             - offloaded
+            - port-id
+            - agg-packets
+            - agg-bytes
+            - first-seen-ns
+            - nat-flags
+            - nat-src-ip
+            - nat-dst-ip
+            - nat-sport
+            - nat-dport
     -
       name: get-flow
       attribute-set: flow
@@ -245,6 +327,15 @@ operations:
             - last-seen-ns
             - hw-flow-id
             - offloaded
+            - port-id
+            - agg-packets
+            - agg-bytes
+            - first-seen-ns
+            - nat-flags
+            - nat-src-ip
+            - nat-dst-ip
+            - nat-sport
+            - nat-dport
     -
       name: dump-sas
       attribute-set: sa

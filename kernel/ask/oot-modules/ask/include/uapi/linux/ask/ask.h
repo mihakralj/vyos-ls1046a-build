@@ -108,10 +108,28 @@ enum ask_info_attr {
     ASK_INFO_ATTR_POLICY_EPOCH,     /* u64 monotonic policy/revocation epoch */
     ASK_INFO_ATTR_REVOKE_STATE,     /* u8 enum ask_revoke_state */
     ASK_INFO_ATTR_UNRESOLVED_FLOWS, /* u32 unsettled HW/orphan count */
+    ASK_INFO_ATTR_FALLBACK,         /* nested ask_fallback_attr */
 
     __ASK_INFO_ATTR_MAX,
 };
 #define ASK_INFO_ATTR_MAX (__ASK_INFO_ATTR_MAX - 1)
+
+/* ASK_INFO_ATTR_FALLBACK nested attributes (per-cause SW fallback counts) */
+enum ask_fallback_attr {
+    ASK_FALLBACK_ATTR_UNSPEC,
+
+    ASK_FALLBACK_ATTR_ADMISSION_GATE,     /* u64: offload_delay_ms / S6 volume */
+    ASK_FALLBACK_ATTR_POLICY_FENCED,      /* u64: revocation fence / stale epoch */
+    ASK_FALLBACK_ATTR_UNSUPPORTED_PROTO,  /* u64: non-TCP/UDP or non-IPv4/IPv6 */
+    ASK_FALLBACK_ATTR_UNSUPPORTED_ACTION, /* u64: unsupported action / kill switch */
+    ASK_FALLBACK_ATTR_NEIGH_UNRESOLVED,   /* u64: unresolved ARP/ND or bad MAC */
+    ASK_FALLBACK_ATTR_PORT_UNENGAGED,     /* u64: port unengaged / family disabled */
+    ASK_FALLBACK_ATTR_MAX_FLOWS,          /* u64: ask.max_flows ceiling reached */
+    ASK_FALLBACK_ATTR_HW_ERROR,           /* u64: preflight/HW/FE error / OOM */
+
+    __ASK_FALLBACK_ATTR_MAX,
+};
+#define ASK_FALLBACK_ATTR_MAX (__ASK_FALLBACK_ATTR_MAX - 1)
 
 /* Policy revocation completion state (ASK_INFO_ATTR_REVOKE_STATE, §3.1.1). */
 enum ask_revoke_state {
@@ -157,10 +175,22 @@ enum ask_flow_attr {
 				 * packet delta on the flow's port since the
 				 * first VLAN flow was installed there */
     ASK_FLOW_ATTR_AGG_BYTES,    /* u64, ditto in bytes */
+    ASK_FLOW_ATTR_FIRST_SEEN_NS,/* u64, host ktime_get_ns() at flow insert */
+    ASK_FLOW_ATTR_NAT_FLAGS,    /* u8, ASK_NATF_* bitmask; omitted when 0 */
+    ASK_FLOW_ATTR_NAT_SRC_IP,   /* binary, 4 or 16 B; present when SNAT set */
+    ASK_FLOW_ATTR_NAT_DST_IP,   /* binary, 4 or 16 B; present when DNAT set */
+    ASK_FLOW_ATTR_NAT_SPORT,    /* u16 NBO; present when SPAT set */
+    ASK_FLOW_ATTR_NAT_DPORT,    /* u16 NBO; present when DPAT set */
 
     __ASK_FLOW_ATTR_MAX,
 };
 #define ASK_FLOW_ATTR_MAX (__ASK_FLOW_ATTR_MAX - 1)
+
+/* NAT/PAT rewrite bitmask (ASK_FLOW_ATTR_NAT_FLAGS) */
+#define ASK_NATF_SNAT           (1u << 0)
+#define ASK_NATF_DNAT           (1u << 1)
+#define ASK_NATF_SPAT           (1u << 2)
+#define ASK_NATF_DPAT           (1u << 3)
 
 /* ASK_ATTR_SA nested attributes */
 enum ask_sa_attr {

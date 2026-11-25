@@ -167,6 +167,7 @@ static void test_init_flow(struct ask_flow *f, u64 cookie,
 	 * id would be meaningless), and the happy-path tests pin that attr.
 	 */
 	f->hw_backed    = 1;
+	f->first_seen_ns = 0x1122334455667788ULL;
 	u64_stats_init(&f->stats.syncp);
 	f->stats.packets      = packets;
 	f->stats.bytes        = bytes;
@@ -212,6 +213,24 @@ static void ask_genl_test_info_fill_happy_path(struct kunit *test)
 	KUNIT_EXPECT_NOT_NULL(test, attrs[ASK_INFO_ATTR_POLICY_EPOCH]);
 	KUNIT_EXPECT_NOT_NULL(test, attrs[ASK_INFO_ATTR_REVOKE_STATE]);
 	KUNIT_EXPECT_NOT_NULL(test, attrs[ASK_INFO_ATTR_UNRESOLVED_FLOWS]);
+	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_INFO_ATTR_FALLBACK]);
+
+	{
+		struct nlattr *fb[ASK_FALLBACK_ATTR_MAX + 1];
+
+		rc = nla_parse_nested(fb, ASK_FALLBACK_ATTR_MAX,
+				      attrs[ASK_INFO_ATTR_FALLBACK],
+				      ask_fallback_policy, NULL);
+		KUNIT_EXPECT_EQ(test, rc, 0);
+		KUNIT_EXPECT_NOT_NULL(test, fb[ASK_FALLBACK_ATTR_ADMISSION_GATE]);
+		KUNIT_EXPECT_NOT_NULL(test, fb[ASK_FALLBACK_ATTR_POLICY_FENCED]);
+		KUNIT_EXPECT_NOT_NULL(test, fb[ASK_FALLBACK_ATTR_UNSUPPORTED_PROTO]);
+		KUNIT_EXPECT_NOT_NULL(test, fb[ASK_FALLBACK_ATTR_UNSUPPORTED_ACTION]);
+		KUNIT_EXPECT_NOT_NULL(test, fb[ASK_FALLBACK_ATTR_NEIGH_UNRESOLVED]);
+		KUNIT_EXPECT_NOT_NULL(test, fb[ASK_FALLBACK_ATTR_PORT_UNENGAGED]);
+		KUNIT_EXPECT_NOT_NULL(test, fb[ASK_FALLBACK_ATTR_MAX_FLOWS]);
+		KUNIT_EXPECT_NOT_NULL(test, fb[ASK_FALLBACK_ATTR_HW_ERROR]);
+	}
 
 	/* Shipping capability contract (2026-08-26): routed IPv4+IPv6 and
 	 * NAT/PAT are implemented and always advertised. VLAN is also
@@ -334,6 +353,8 @@ static void ask_genl_test_fill_one_flow_happy_path(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_FLOW_ATTR_PACKETS]);
 	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_FLOW_ATTR_BYTES]);
 	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_FLOW_ATTR_LAST_SEEN_NS]);
+	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_FLOW_ATTR_FIRST_SEEN_NS]);
+	KUNIT_EXPECT_NULL(test, attrs[ASK_FLOW_ATTR_NAT_FLAGS]);
 
 	KUNIT_EXPECT_EQ(test, nla_get_u64(attrs[ASK_FLOW_ATTR_ID]),
 			0xCAFEF00DULL);
@@ -347,6 +368,89 @@ static void ask_genl_test_fill_one_flow_happy_path(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			nla_get_u64(attrs[ASK_FLOW_ATTR_LAST_SEEN_NS]),
 			0xABCDEF0123456789ULL);
+	KUNIT_EXPECT_EQ(test,
+			nla_get_u64(attrs[ASK_FLOW_ATTR_FIRST_SEEN_NS]),
+			0x1122334455667788ULL);
+
+	test_free_skb(skb);
+}
+
+static void ask_genl_test_fill_one_flow_nat(struct kunit *test)
+{
+	struct sk_buff *skb = test_alloc_skb(test, NLMSG_DEFAULT_SIZE);
+	struct nlattr *attrs[ASK_FLOW_ATTR_MAX + 1];
+	struct ask_flow f;
+	static const u8 nat_src_v4[4] = { 10, 99, 2, 185 };
+	static const u8 nat_dst_v4[4] = { 10, 99, 1, 10 };
+	int rc;
+
+	test_init_flow(&f, 0xBEEF0001ULL, 7u, 6u, 50ULL, 5000ULL, 9999ULL);
+	f.key.l3_proto = ASK_FLOW_L3_IPV4;
+	f.key.l4_proto = IPPROTO_TCP;
+	f.key.nat_flags = ASK_NATF_SNAT | ASK_NATF_DNAT |
+			  ASK_NATF_SPAT | ASK_NATF_DPAT;
+	memcpy(f.key.nat_src_ip, nat_src_v4, 4);
+	memcpy(f.key.nat_dst_ip, nat_dst_v4, 4);
+	f.key.nat_sport = htons(41234);
+	f.key.nat_dport = htons(8080);
+
+	rc = ask_genl_fill_one_flow(skb, &f);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	rc = nla_parse(attrs, ASK_FLOW_ATTR_MAX, (struct nlattr *)skb->data,
+		       skb->len, ask_flow_policy, NULL);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_FLOW_ATTR_NAT_FLAGS]);
+	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_FLOW_ATTR_NAT_SRC_IP]);
+	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_FLOW_ATTR_NAT_DST_IP]);
+	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_FLOW_ATTR_NAT_SPORT]);
+	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_FLOW_ATTR_NAT_DPORT]);
+
+	KUNIT_EXPECT_EQ(test, nla_get_u8(attrs[ASK_FLOW_ATTR_NAT_FLAGS]),
+			(u8)(ASK_NATF_SNAT | ASK_NATF_DNAT |
+			     ASK_NATF_SPAT | ASK_NATF_DPAT));
+	KUNIT_EXPECT_EQ(test, nla_len(attrs[ASK_FLOW_ATTR_NAT_SRC_IP]), 4);
+	KUNIT_EXPECT_EQ(test, memcmp(nla_data(attrs[ASK_FLOW_ATTR_NAT_SRC_IP]),
+				     nat_src_v4, 4), 0);
+	KUNIT_EXPECT_EQ(test, nla_len(attrs[ASK_FLOW_ATTR_NAT_DST_IP]), 4);
+	KUNIT_EXPECT_EQ(test, memcmp(nla_data(attrs[ASK_FLOW_ATTR_NAT_DST_IP]),
+				     nat_dst_v4, 4), 0);
+	KUNIT_EXPECT_EQ(test, nla_get_be16(attrs[ASK_FLOW_ATTR_NAT_SPORT]),
+			htons(41234));
+	KUNIT_EXPECT_EQ(test, nla_get_be16(attrs[ASK_FLOW_ATTR_NAT_DPORT]),
+			htons(8080));
+
+	test_free_skb(skb);
+}
+
+static void ask_genl_test_info_fallback_increment(struct kunit *test)
+{
+	struct sk_buff *skb = test_alloc_skb(test, NLMSG_DEFAULT_SIZE);
+	struct nlattr *info_nest, *attrs[ASK_INFO_ATTR_MAX + 1];
+	struct nlattr *fb[ASK_FALLBACK_ATTR_MAX + 1];
+	struct ask_fallback_stats before;
+	int rc;
+
+	ask_fallback_snapshot(&before);
+	ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
+
+	rc = ask_genl_get_info_fill(skb);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	info_nest = (struct nlattr *)skb->data;
+	rc = nla_parse_nested(attrs, ASK_INFO_ATTR_MAX, info_nest,
+			      ask_info_policy, NULL);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	KUNIT_ASSERT_NOT_NULL(test, attrs[ASK_INFO_ATTR_FALLBACK]);
+
+	rc = nla_parse_nested(fb, ASK_FALLBACK_ATTR_MAX,
+			      attrs[ASK_INFO_ATTR_FALLBACK],
+			      ask_fallback_policy, NULL);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	KUNIT_EXPECT_EQ(test,
+			nla_get_u64(fb[ASK_FALLBACK_ATTR_UNSUPPORTED_ACTION]),
+			before.unsupported_action + 1);
 
 	test_free_skb(skb);
 }
@@ -643,7 +747,9 @@ static struct kunit_case ask_genl_test_cases[] = {
 	KUNIT_CASE(ask_genl_test_info_fill_genl_version),
 	KUNIT_CASE(ask_genl_test_info_fill_driver_version_str),
 	KUNIT_CASE(ask_genl_test_info_fill_emsgsize),
+	KUNIT_CASE(ask_genl_test_info_fallback_increment),
 	KUNIT_CASE(ask_genl_test_fill_one_flow_happy_path),
+	KUNIT_CASE(ask_genl_test_fill_one_flow_nat),
 	KUNIT_CASE(ask_genl_test_fill_one_flow_with_stats),
 	KUNIT_CASE(ask_genl_test_fill_one_flow_emsgsize),
 	KUNIT_CASE(ask_genl_test_dump_cb_skip_first_n),

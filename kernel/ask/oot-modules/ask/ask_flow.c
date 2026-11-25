@@ -419,6 +419,7 @@ return -EINVAL;
 
 if (ask_max_flows && (u32)atomic_read(&t->num_flows) >= ask_max_flows) {
 atomic_inc(&ask_flow_overflow);
+ask_fallback_inc(ASK_FALLBACK_MAX_FLOWS);
 pr_info_ratelimited("ask: flow: admission budget %u reached, cookie=0x%llx stays in software\n",
     ask_max_flows, cookie);
 return -ENOSPC;
@@ -467,6 +468,7 @@ f->key          = *key;
 f->oif          = oif;
 f->action_flags = action_flags;
 f->dir          = (u8)dir;
+f->first_seen_ns = ktime_get_ns();
 u64_stats_init(&f->stats.syncp);
 
 /*
@@ -530,6 +532,7 @@ hw_inserted = true;
 pr_info_ratelimited("ask: flow: hw_insert OK cookie=0x%llx oif=%u hw_id=0x%08x\n",
     cookie, oif, hw_id);
 } else if (rc == -ENODEV || rc == -EOPNOTSUPP) {
+f->hw_fallback_rc = rc;
 hw_id = (u32)atomic_inc_return(&t->fake_hw_id_seq);
 pr_info_ratelimited("ask: flow: hw_insert=%d (SW-fallback) cookie=0x%llx oif=%u l3=%u l4=%u sport=%u dport=%u\n",
     rc, cookie, oif, key->l3_proto, key->l4_proto,
@@ -582,11 +585,13 @@ pr_info_ratelimited("ask: flow: hw_insert=%d (SW-fallback) cookie=0x%llx oif=%u 
 		kfree(f);
 		return -EAGAIN;
 	} else {
-ask_pr_warn("flow: hw_insert(cookie=0x%llx) hard fail %d\n",
-    cookie, rc);
-kfree(f);
-return rc;
-}
+		if (rc == -ENOSPC)
+			ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
+		ask_pr_warn("flow: hw_insert(cookie=0x%llx) hard fail %d\n",
+			    cookie, rc);
+		kfree(f);
+		return rc;
+	}
 f->hw_flow_id = hw_id;
 f->hw_backed  = hw_inserted;
 f->generation = generation;

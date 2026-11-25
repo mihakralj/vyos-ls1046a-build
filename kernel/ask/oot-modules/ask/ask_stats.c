@@ -27,11 +27,37 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/percpu.h>
 #include <linux/xarray.h>
 #include <linux/netdevice.h>
 #include "include/ask_internal.h"
+
+/* Per-cause slow-path software-fallback counters (Phase 1.1 telemetry). */
+static atomic64_t ask_fallback_cnt[ASK_FALLBACK_REASON_NR];
+
+void ask_fallback_inc(enum ask_fallback_reason reason)
+{
+	if ((unsigned int)reason < ASK_FALLBACK_REASON_NR)
+		atomic64_inc(&ask_fallback_cnt[reason]);
+}
+EXPORT_SYMBOL_GPL(ask_fallback_inc);
+
+void ask_fallback_snapshot(struct ask_fallback_stats *out)
+{
+	if (!out)
+		return;
+	out->admission_gate     = (u64)atomic64_read(&ask_fallback_cnt[ASK_FALLBACK_ADMISSION_GATE]);
+	out->policy_fenced      = (u64)atomic64_read(&ask_fallback_cnt[ASK_FALLBACK_POLICY_FENCED]);
+	out->unsupported_proto  = (u64)atomic64_read(&ask_fallback_cnt[ASK_FALLBACK_UNSUPPORTED_PROTO]);
+	out->unsupported_action = (u64)atomic64_read(&ask_fallback_cnt[ASK_FALLBACK_UNSUPPORTED_ACTION]);
+	out->neigh_unresolved   = (u64)atomic64_read(&ask_fallback_cnt[ASK_FALLBACK_NEIGH_UNRESOLVED]);
+	out->port_unengaged     = (u64)atomic64_read(&ask_fallback_cnt[ASK_FALLBACK_PORT_UNENGAGED]);
+	out->max_flows          = (u64)atomic64_read(&ask_fallback_cnt[ASK_FALLBACK_MAX_FLOWS]);
+	out->hw_error           = (u64)atomic64_read(&ask_fallback_cnt[ASK_FALLBACK_HW_ERROR]);
+}
+EXPORT_SYMBOL_GPL(ask_fallback_snapshot);
 
 struct ask_port_ctr {
 	u64 rx_packets;
@@ -164,6 +190,10 @@ void ask_port_stats_get(int ifindex, struct rtnl_link_stats64 *hw)
 
 int ask_stats_init(void)
 {
+	int i;
+
+	for (i = 0; i < ASK_FALLBACK_REASON_NR; i++)
+		atomic64_set(&ask_fallback_cnt[i], 0);
 	xa_init(&ask_port_stats_xa);
 	ask_pr_dbg("stats: per-port offload counters initialised\n");
 	return 0;

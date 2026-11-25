@@ -1283,6 +1283,7 @@ static int ask_flow_fe_owner_status(struct ask_flow_table *t, u64 cookie,
 {
 	struct ask_flow *fl;
 	bool matches, hw_backed;
+	int fallback_rc = -EOPNOTSUPP;
 
 	if (!ask_flow_gen_is_current(t, cookie, generation))
 		return -ESTALE;
@@ -1291,10 +1292,12 @@ static int ask_flow_fe_owner_status(struct ask_flow_table *t, u64 cookie,
 	matches = fl && fl->generation == generation &&
 		  fl->fe_token == fe_token && fe_token;
 	hw_backed = matches && fl->hw_backed;
+	if (matches && !hw_backed && fl->hw_fallback_rc)
+		fallback_rc = fl->hw_fallback_rc;
 	rcu_read_unlock();
 	if (!matches)
 		return -ESTALE;
-	return hw_backed ? 0 : -EOPNOTSUPP;
+	return hw_backed ? 0 : fallback_rc;
 }
 
 static int ask_flow_withdraw_owned(struct ask_flow_table *t, u64 cookie,
@@ -4754,29 +4757,39 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
 	if (!t) {
+		ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
 		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (no default table) cookie=0x%lx\n",
 				    f->cookie);
 		return -EOPNOTSUPP;
 	}
 
 	rc = ask_flow_retained_owner(t, f);
-	if (rc)
+	if (rc) {
+		ask_fallback_inc(ASK_FALLBACK_POLICY_FENCED);
 		return rc;
+	}
 
 	/* software until offload_delay_ms and the S6 volume; nf_flowtable retries */
-	if (ask_offload_too_young(f->cookie) || ask_offload_too_small(f->cookie))
+	if (ask_offload_too_young(f->cookie) || ask_offload_too_small(f->cookie)) {
+		ask_fallback_inc(ASK_FALLBACK_ADMISSION_GATE);
 		return -EAGAIN;
+	}
 
 	rc = ask_hw_flow_policy_snapshot(&family_policy_seq);
-	if (rc)
+	if (rc) {
+		ask_fallback_inc(ASK_FALLBACK_POLICY_FENCED);
 		return rc;
+	}
 	rc = ask_policy_epoch_snapshot(&policy_epoch);
-	if (rc)
+	if (rc) {
+		ask_fallback_inc(ASK_FALLBACK_POLICY_FENCED);
 		return rc;
+	}
 	pppoe_session_epoch = ask_pppoe_session_snapshot();
 	pppoe = ask_flow_cookie_pppoe(f->cookie, &pppoe_info);
 	if (pppoe < 0 || (pppoe > 0 && !ask_pppoe_nb_ok) ||
 	    (pppoe > 0 && !ask_pppoe_session_is_current(pppoe_session_epoch))) {
+		ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE flow not offloaded (T-M6-SP4 %s) - SW fallback cookie=0x%lx\n",
 				    pppoe < 0 ? "unsupported" :
 				    "session notifier unavailable or changed",
@@ -4786,6 +4799,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 	rc = ask_parse_match(f, &key);
 	if (rc) {
+		ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_PROTO);
 		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_match=%d) cookie=0x%lx\n",
 				    rc, f->cookie);
 		return rc;
@@ -4796,6 +4810,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		key.pppoe_session = pppoe_info;
 		key.pppoe_session_epoch = pppoe_session_epoch;
 		if (!ask_pppoe_path_current(&key)) {
+			ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 			pr_info_ratelimited("ask: flow_offload: PPPoE session path changed or is unavailable cookie=0x%lx\n",
 					    f->cookie);
 			return -EOPNOTSUPP;
@@ -4936,6 +4951,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 	rc = ask_parse_action(f, &key, &action_flags, &oif, &egress_dev);
 	if (rc) {
+		ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
 				    rc, f->cookie);
 		return rc;
@@ -4972,6 +4988,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		    push != !!pppoe_info.vid ||
 		    (push && (ntohs(key.vlan_push_tci) & VLAN_VID_MASK) !=
 			     pppoe_info.vid)) {
+			ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 			pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE encap mismatch (push sid %u, tuple sid %u, flags 0x%x) - SW fallback cookie=0x%lx\n",
 					    key.pppoe_push_sid, pppoe_info.sid,
 					    key.vlan_edit_flags, f->cookie);
@@ -4979,6 +4996,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		}
 		key.vlan_ingress_vid = 0;
 	} else if (key.vlan_edit_flags & ASK_VLANF_PPPOE_INSERT) {
+		ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE insert without encap tuple - SW fallback flags=0x%x cookie=0x%lx\n",
 				    key.vlan_edit_flags, f->cookie);
 		return -EOPNOTSUPP;
@@ -4988,6 +5006,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	if (pppoe == ASK_PPPOE_DECAP &&
 	    ((key.vlan_edit_flags & ASK_VLANF_PUSH) ||
 	     !!(key.vlan_edit_flags & ASK_VLANF_POP) != !!pppoe_info.vid)) {
+		ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE decap with VLAN edit - SW fallback flags=0x%x cookie=0x%lx\n",
 				    key.vlan_edit_flags, f->cookie);
 		return -EOPNOTSUPP;
@@ -5031,6 +5050,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 				ask_resolve_ingress_vlan_vid(key.iif, peer_v4);
 		}
 		if (!key.vlan_ingress_vid) {
+			ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 			pr_info_ratelimited("ask: VLAN POP unresolved ingress VID cookie=0x%lx iif=%u peer=%pI4; software fallback\n",
 					    f->cookie, key.iif, &peer_v4);
 			return -EOPNOTSUPP;
@@ -5108,6 +5128,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			}
 		}
 		if (direct_mac && is_zero_ether_addr(direct_dst_mac)) {
+			ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
 			pr_info_ratelimited("ask: flow_offload: DIRECT tuple has no resolved destination MAC cookie=0x%lx — SW fallback\n",
 					    f->cookie);
 			return -EAGAIN;
@@ -5319,6 +5340,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 */
 	generation = ask_flow_gen_next(t, (u64)f->cookie);
 	if (generation == 0) {
+		ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
 		pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx gen-alloc failed — SW fallback\n",
 				    f->cookie);
 		return -EOPNOTSUPP;
@@ -5441,8 +5463,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		ether_addr_copy(key.egress_mac, pppoe_info.src_mac);
 	} else if (direct_mac) {
 		if (!is_zero_ether_addr(key.next_hop_mac) &&
-		    !ether_addr_equal(key.next_hop_mac, direct_dst_mac))
+		    !ether_addr_equal(key.next_hop_mac, direct_dst_mac)) {
+			ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
 			return -EAGAIN;
+		}
 		ether_addr_copy(key.next_hop_mac, direct_dst_mac);
 		if (!is_zero_ether_addr(direct_src_mac))
 			ether_addr_copy(key.egress_mac, direct_src_mac);
@@ -5455,8 +5479,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 * on the wire.  Return -EAGAIN so the kernel SW fastpath handles
 	 * the flow (SW forwarding correctly handles multicast/broadcast).
 	 */
-	if (is_multicast_ether_addr(key.next_hop_mac))
+	if (is_multicast_ether_addr(key.next_hop_mac)) {
+		ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
 		return -EAGAIN;
+	}
 
 	/* T-M6-1 first v6 insert iteration: if NDISC is unresolved, trigger a
 	 * neighbour probe and fall back to software. The legacy pending queue
@@ -5474,6 +5500,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			neigh_event_send(n, NULL);
 			neigh_release(n);
 		}
+		ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
 		pr_info_ratelimited("ask: flow_offload: T-M6-1 v6 neigh unresolved cookie=0x%lx dst=%pI6c dev=%s — SW fallback\n",
 				    f->cookie, &dst_ip6,
 				    netdev_name(egress_dev));
@@ -5630,6 +5657,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 				prc = ask_hw_port_bind(pid, __dir, bind_dev);
 				if (prc) {
+					ask_fallback_inc(ASK_FALLBACK_PORT_UNENGAGED);
 					if (prc == -EBUSY)
 						ask_pr_dbg("flow_offload: REPLACE %s pid=%u dir=%u: pipeline busy, SW fallback\n",
 							   netdev_name(bind_dev),
@@ -5658,15 +5686,30 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 		if (pppoe > 0 &&
 		    (!ask_pppoe_session_is_current(pppoe_session_epoch) ||
-		     !ask_pppoe_port_armed(pppoe_info.ifindex, key.l3_proto)))
+		     !ask_pppoe_port_armed(pppoe_info.ifindex, key.l3_proto))) {
+			ask_fallback_inc(ASK_FALLBACK_PORT_UNENGAGED);
 			return -EOPNOTSUPP;
-		if (!ask_hw_flow_policy_current(&key))
+		}
+		if (!ask_hw_flow_policy_current(&key)) {
+			if (key.l4_proto != IPPROTO_TCP &&
+			    key.l4_proto != IPPROTO_UDP)
+				ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_PROTO);
+			else if (ask_hw_flow_family_ok(key.port_id, &key))
+				ask_fallback_inc(ASK_FALLBACK_PORT_UNENGAGED);
+			else
+				ask_fallback_inc(ASK_FALLBACK_POLICY_FENCED);
 			return -ESTALE;
-		if (!ask_policy_epoch_is_current(policy_epoch) ||
-		    (!defer_nh && key.nh_ifindex &&
-		     !ask_neigh_epoch_current(key.nh_ifindex, key.l3_proto,
-					      key.nh_ip, neigh_epoch)))
+		}
+		if (!ask_policy_epoch_is_current(policy_epoch)) {
+			ask_fallback_inc(ASK_FALLBACK_POLICY_FENCED);
 			return -EAGAIN;
+		}
+		if (!defer_nh && key.nh_ifindex &&
+		    !ask_neigh_epoch_current(key.nh_ifindex, key.l3_proto,
+					     key.nh_ip, neigh_epoch)) {
+			ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
+			return -EAGAIN;
+		}
 
 		/*
 		 * Next hop unresolved: park the cookie, but only now that the
@@ -5687,6 +5730,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 							   policy_epoch);
 
 			if (qrc == 0) {
+				ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
 				pr_info_ratelimited("ask: flow_offload: PR14z10 defer cookie=0x%lx oif=%u eg_if=%d in_if=%d dst=%pI4 (neigh unresolved, ARP probed)\n",
 						    f->cookie, oif,
 						    egress_dev->ifindex,
@@ -5694,6 +5738,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 						    &dst_ip);
 				return 0;
 			}
+			ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
 			pr_info_ratelimited("ask: flow_offload: PR14z2 queue full (%d) — declining HW offload, kernel SW flowtable retains cookie=0x%lx\n",
 					    qrc, f->cookie);
 			return -EOPNOTSUPP;
@@ -5715,6 +5760,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		return 0;
 	}
 	if (rc) {
+		if (rc == -EAGAIN)
+			ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
+		else if (rc != -ENOSPC)
+			ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
 		pr_info_ratelimited("ask: flow_offload: REPLACE flow_insert=%d cookie=0x%lx oif=%u nh=%pM em=%pM\n",
 				    rc, f->cookie, oif,
 				    key.next_hop_mac, key.egress_mac);
@@ -5735,6 +5784,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		int rrc = ask_flow_remove_owned_identified(t, (u64)f->cookie,
 							 generation, fe_token);
 
+		if (rc != -ESTALE)
+			ask_fallback_inc(rc == -ENODEV ?
+					 ASK_FALLBACK_PORT_UNENGAGED :
+					 ASK_FALLBACK_UNSUPPORTED_ACTION);
 		if (rrc && rrc != -ENOENT && rrc != -ESTALE) {
 			ask_pr_warn("flow_offload: REPLACE owner cleanup=%d cookie=0x%lx\n",
 				    rrc, f->cookie);
@@ -5751,6 +5804,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 						  rc != -EAGAIN,
 						  "REPLACE rollback", NULL);
 
+		ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
 		ask_pr_warn("flow_offload: REPLACE rollback cookie=0x%lx fe_flow_insert=%d\n",
 			    f->cookie, rc);
 		if (rrc && rrc != -ENOENT && rrc != -ESTALE) {
@@ -5799,6 +5853,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			return -EINPROGRESS;
 		}
 		ask_flow_gen_release(t, (u64)f->cookie, generation);
+		ask_fallback_inc(ask_policy_epoch_is_current(policy_epoch) ?
+				 ASK_FALLBACK_NEIGH_UNRESOLVED :
+				 ASK_FALLBACK_POLICY_FENCED);
 		return -EAGAIN;
 	}
 
@@ -6475,8 +6532,10 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 		    !ask_flow_cookie_unsettled(ask_flow_default_table(),
 					       f->cookie))
 			return -EOPNOTSUPP;	/* S8: non-ingress echo */
-		if (ask_flow_replace_deferred_unlocked(cb_priv, f))
+		if (ask_flow_replace_deferred_unlocked(cb_priv, f)) {
+			ask_fallback_inc(ASK_FALLBACK_ADMISSION_GATE);
 			return -EAGAIN;	/* S7: never-installed, too young */
+		}
 		mutex_lock(&ask_flow_lifecycle_lock);
 		rc = ask_flow_owned_replace(cb_priv, dev, f);
 		mutex_unlock(&ask_flow_lifecycle_lock);

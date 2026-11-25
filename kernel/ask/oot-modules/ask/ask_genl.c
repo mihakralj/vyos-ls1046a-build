@@ -299,6 +299,35 @@ goto nla_put_failure;
 	if (nla_put_u32(skb, ASK_INFO_ATTR_UNRESOLVED_FLOWS, unresolved_flows))
 		goto nla_put_failure;
 }
+{
+	struct ask_fallback_stats fb;
+	struct nlattr *fb_nest;
+
+	ask_fallback_snapshot(&fb);
+	fb_nest = nla_nest_start(skb, ASK_INFO_ATTR_FALLBACK);
+	if (!fb_nest)
+		goto nla_put_failure;
+	if (nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_ADMISSION_GATE,
+			      fb.admission_gate, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_POLICY_FENCED,
+			      fb.policy_fenced, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_UNSUPPORTED_PROTO,
+			      fb.unsupported_proto, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_UNSUPPORTED_ACTION,
+			      fb.unsupported_action, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_NEIGH_UNRESOLVED,
+			      fb.neigh_unresolved, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_PORT_UNENGAGED,
+			      fb.port_unengaged, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_MAX_FLOWS,
+			      fb.max_flows, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_HW_ERROR,
+			      fb.hw_error, ASK_FALLBACK_ATTR_UNSPEC)) {
+		nla_nest_cancel(skb, fb_nest);
+		goto nla_put_failure;
+	}
+	nla_nest_end(skb, fb_nest);
+}
 
 nla_nest_end(skb, nest);
 return 0;
@@ -651,6 +680,31 @@ goto nla_put_failure;
 if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_LAST_SEEN_NS, last_seen_ns,
       ASK_FLOW_ATTR_UNSPEC))
 goto nla_put_failure;
+if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_FIRST_SEEN_NS, f->first_seen_ns,
+      ASK_FLOW_ATTR_UNSPEC))
+goto nla_put_failure;
+
+/*
+ * Phase 1.1 telemetry: emit NAT/PAT rewrite metadata carried on the stored
+ * flow (original 5-tuple remains in src-ip/dst-ip/sport/dport; translated
+ * values are conditional on ASK_NATF_* bits so non-NAT dumps stay compact).
+ */
+if (f->key.nat_flags) {
+	if (nla_put_u8(skb, ASK_FLOW_ATTR_NAT_FLAGS, f->key.nat_flags))
+		goto nla_put_failure;
+	if ((f->key.nat_flags & ASK_NATF_SNAT) &&
+	    nla_put(skb, ASK_FLOW_ATTR_NAT_SRC_IP, iplen, f->key.nat_src_ip))
+		goto nla_put_failure;
+	if ((f->key.nat_flags & ASK_NATF_DNAT) &&
+	    nla_put(skb, ASK_FLOW_ATTR_NAT_DST_IP, iplen, f->key.nat_dst_ip))
+		goto nla_put_failure;
+	if ((f->key.nat_flags & ASK_NATF_SPAT) &&
+	    nla_put_be16(skb, ASK_FLOW_ATTR_NAT_SPORT, f->key.nat_sport))
+		goto nla_put_failure;
+	if ((f->key.nat_flags & ASK_NATF_DPAT) &&
+	    nla_put_be16(skb, ASK_FLOW_ATTR_NAT_DPORT, f->key.nat_dport))
+		goto nla_put_failure;
+}
 
 /*
  * VLAN CC-path flows have no per-key silicon counters, so their per-flow

@@ -23,6 +23,7 @@
 #include <linux/xarray.h>        /* PR14j cookie indirection table */
 #include <linux/fsl/fman_pcd.h>    /* enum fman_pcd_fe_profile (T-M6-2 B3a) */
 #include <net/netlink.h>
+#include <uapi/linux/ask/ask.h>
 
 #define ASK_DRV_NAME            "ask"
 #define ASK_DRV_VERSION_STR     "2.1.0"
@@ -523,6 +524,7 @@ int  ask_hw_flow_query_stats(u32 hw_flow_id, u64 *packets, u64 *bytes);
 /* ask_genl_attr.c — nla_policy tables shared across nested attribute sets    */
 /* ------------------------------------------------------------------------- */
 extern const struct nla_policy ask_top_policy[];
+extern const struct nla_policy ask_fallback_policy[];
 extern const struct nla_policy ask_info_policy[];
 extern const struct nla_policy ask_muram_policy[];
 extern const struct nla_policy ask_flow_policy[];
@@ -630,11 +632,7 @@ u8  egress_mac[ETH_ALEN];   /* src MAC = peer port's own MAC */
  * parameters in the FE opcode chain. ask_flow_rht_params hashes by cookie,
  * so widening this struct does not perturb flow lookup.
  */
-u8     nat_flags;
-#define ASK_NATF_SNAT	BIT(0)
-#define ASK_NATF_DNAT	BIT(1)
-#define ASK_NATF_SPAT	BIT(2)
-#define ASK_NATF_DPAT	BIT(3)
+u8     nat_flags; /* ASK_NATF_* bits from <uapi/linux/ask/ask.h> */
 	u8     nat_src_ip[16];
 	u8     nat_dst_ip[16];
 	__be16 nat_sport;
@@ -937,12 +935,14 @@ u8  dir;
  * rcu_read_lock() alongside @hw_flow_id.
  */
 bool hw_backed;
+int hw_fallback_rc; /* -ENODEV / -EOPNOTSUPP when !hw_backed; immutable */
 /*
  * T-M6-A3: the ownership generation this flow was published under. Set once
  * at insert, immutable, read under rcu_read_lock alongside hw_flow_id. A
  * DESTROY/worker carrying an older generation must not act on this flow.
  */
 u64 generation;
+u64 first_seen_ns; /* host ktime_get_ns() at flow insert; immutable */
 struct ask_flow_stats stats;
 /*
  * T-M8-3: baseline of the silicon FE ehash record's cumulative
@@ -1406,6 +1406,32 @@ void ask_op_exit(void);
 /* (board patch 0171).                                                        */
 /* ------------------------------------------------------------------------- */
 struct rtnl_link_stats64;
+
+enum ask_fallback_reason {
+	ASK_FALLBACK_ADMISSION_GATE = 0,
+	ASK_FALLBACK_POLICY_FENCED,
+	ASK_FALLBACK_UNSUPPORTED_PROTO,
+	ASK_FALLBACK_UNSUPPORTED_ACTION,
+	ASK_FALLBACK_NEIGH_UNRESOLVED,
+	ASK_FALLBACK_PORT_UNENGAGED,
+	ASK_FALLBACK_MAX_FLOWS,
+	ASK_FALLBACK_HW_ERROR,
+	ASK_FALLBACK_REASON_NR,
+};
+
+struct ask_fallback_stats {
+	u64 admission_gate;
+	u64 policy_fenced;
+	u64 unsupported_proto;
+	u64 unsupported_action;
+	u64 neigh_unresolved;
+	u64 port_unengaged;
+	u64 max_flows;
+	u64 hw_error;
+};
+
+void ask_fallback_inc(enum ask_fallback_reason reason);
+void ask_fallback_snapshot(struct ask_fallback_stats *out);
 
 int  ask_stats_init(void);
 void ask_stats_exit(void);

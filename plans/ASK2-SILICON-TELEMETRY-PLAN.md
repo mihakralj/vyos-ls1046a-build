@@ -1,6 +1,6 @@
 # ASK2 silicon-native telemetry plan (IPFIX flow accounting and sFlow sampling)
 
-**Status:** Analysis and design only (2026-11-07). No code, patch, or image change is proposed here as already implemented. The IPFIX half is feasible and mostly pre-built. Silicon sFlow *packet* sampling is **blocked**: microcode 210.10.1 has a per-flow frame replicator (`REPLICATE_PKT`, opcode 0x02, used by the vendor ASK for multicast), but nothing in FMan selects one packet in N. What the silicon can do is per-flow mirroring, where every packet of a chosen flow is copied (§3, §5). Corrected 2026-11-07; earlier text, and `ASK2-MASTER-PLAN.md` until the same date, said no replicator exists. Nothing in this plan authorises datapath changes without the gates in §7.
+**Status:** Phase 0 Q2 closed (**NO** — silicon sFlow packet sampling out of scope); Phase 1.1 YNL telemetry schema + fallback counters + VyOS CLI implemented in source (awaiting CI ISO + cold-boot gate); Phase 1.2 Option A `nf_conntrack_acct=1` kernel path live-verified on cold-booted DUT1 (`2026.11.25-0736-rolling`); Phase 1.3 stats scaling (`F-312`/`F-314`/`F-315`/`720ccfb5`) and §4.4 genl security hardening (`20784423`) already shipped. Silicon sFlow *packet* sampling is **out of scope**: microcode 210.10.1 has a per-flow frame replicator (`REPLICATE_PKT`, opcode 0x02, used by the vendor ASK for multicast), but nothing in FMan selects one packet in N. What the silicon can do is per-flow mirroring, where every packet of a chosen flow is copied (§3, §5). Nothing in this plan authorises datapath changes without the gates in §7.
 
 ## Goal
 
@@ -36,13 +36,12 @@ The proposal text contains assumptions that do not hold on this platform. They a
 | Component | Evidence |
 |---|---|
 | Silicon per-flow counters | `packet_count@+256`, `packet_bytes@+264` written unconditionally into 320 B records (T-M8-3, board `.185`, 2026-08-22) |
-| Kernel getter | `fman_pcd_fe_flow_get_stats_identified()` (F-228, owner + `fe_token` identified, `pcd->fe_lock`, per-key bucket walk F-264) |
-| Delta plumbing | `ask_fe_flow_refresh_hw_stats()` → `ask_flow_set_hw_stats()` → `flow_stats_update()` (patch `0145` made this load-bearing for `nf_ct_acct`) |
-| Accounting into netdev stats | Patch `0171` `dpaa_netdev_offload_stats` hook; known to under-report on the lab DUT during a 2026-10-07 soak |
-| YNL surface | `kernel/ask/uapi/ask.yaml:84-127`: `id`, `l3-proto`, `l4-proto`, `src-ip`, `dst-ip`, `sport`, `dport`, `iif`, `oif`, `packets`, `bytes`, `last-seen-ns`, `hw-flow-id`, `offloaded`, `port-id`, VLAN `agg-*` |
-| `get-flow` | Flat `ASK_FLOW_ATTR_ID` accepted since commit `056b1d64`; unknown id → `-ENOENT` |
-| NAT tuple on the stored flow | `include/ask_internal.h:590-605`: `nat_flags`, `nat_src_ip`, `nat_dst_ip`, `nat_sport`, `nat_dport`; deliberately **not** in the FE comparison key and **not** in YNL |
-| Downstream accounting tool | VyOS `system flow-accounting` uses pmacct (`nfacctd`/`sfacctd`); pmacct exists in the VyOS apt repo (`bin/ci-setup-vyos-build.sh:277`) |
+| Kernel getter & batched scan | `fman_pcd_fe_flow_get_stats_identified()` (F-228, owner + `fe_token`, `fe_stats_lock` F-312, CRC-64 F-314) + `fman_pcd_fe_stats_scan()` single-pass batched scan (F-315 / `720ccfb5`) |
+| Delta plumbing | `ask_fe_flow_refresh_hw_stats()` → `ask_flow_set_hw_stats()` → `flow_stats_update()` (patch `0145` made this load-bearing for `nf_ct_acct`; cold-boot live-verified 2026-11-25 on `.185`) |
+| Accounting into netdev stats | Patch `0171` `dpaa_netdev_offload_stats` hook + per-CPU `ask_stats.c` counters |
+| YNL surface & CLI | `kernel/ask/uapi/ask.yaml` + `ask_genl.c` + `show_offload.py` / `show_ask_offload.py`: `id`, 5-tuple, `iif`/`oif`, `packets`/`bytes`, `last-seen-ns`, `first-seen-ns`, `nat-flags`/`nat-src-ip`/`nat-dst-ip`/`nat-sport`/`nat-dport`, `hw-flow-id`, `offloaded`, `port-id`, VLAN `agg-*`, plus nested `ASK_INFO_ATTR_FALLBACK` (8 per-cause fallback counters) |
+| `get-flow` & genl hardening | Flat `ASK_FLOW_ATTR_ID` (`056b1d64`); per-op strict `genl_ops` policies with `GENL_ADMIN_PERM` and `.netnsok = false` (`20784423`) |
+| Downstream accounting tool | VyOS `system flow-accounting` uses pmacct (`nfacctd`/`sfacctd`); pmacct exists in the VyOS apt repo (`bin/ci-setup-vyos-build.sh:277`) but is not pre-installed in the current rolling ISO |
 
 ### Known defects in the current stats path
 
@@ -68,7 +67,12 @@ Checklist, in this order:
 2. Vendor board `.70` (root@192.168.1.70, latest vendor ASK): `ask-check`, `/proc/fqid_stats/pcd`, `cdx` capabilities. Vendor CDX samples on the CPU (`ASK2-VENDOR-PARITY.md:47`); check whether it ever replicates for sampling.
 3. Vendor source: `cdx_ehash.c`, `cdx_flows.c`, any `mirror` or `sample` symbol under `specs/reference/nxp-ask-fmc/`.
 
-**Gate result:** if Q2 is no (the expected outcome; the policer only meters, §1 item 4), silicon sFlow packet sampling is **out of scope** for this platform. Per-flow mirroring (§5) is still possible, but it copies every packet of each mirrored flow, so it is a flow-sampling or debug tool with CPU cost proportional to the mirrored traffic, not an sFlow agent. If Q2 is yes, design packet sampling on top of it.
+**Gate result (CLOSED 2026-11-25 — Q2 = NO):** Confirmed against `arch/fman-microcode-210-programming-reference.md`:
+- §7.1 lists the complete 210.10.1 FE type table (`HM` `0x01`, `ENQ` `0x02`, `EXIT` `0x03`, `MUX` `0x04`, `TRANSITION` `0x05`, `EXT_HASH` `0x06`) — no modulo or 1-in-N packet selector.
+- §8.1 lists all Header Manipulation opcodes (`0x00`, `0x01`, `0x02`, `0x0B`, `0x0C`, `0x0D`, `0x0E`, `0x16+`) — rewrite/insert/remove only.
+- §9 confirms FMPL (`0x01AC0000`) is RFC 4115 token-bucket rate metering/colouring only, and §13 confirms custom microcode opcodes and the FE-VM ISA are absent.
+
+Silicon sFlow *packet* sampling is formally **out of scope** for this platform. Per-flow mirroring (§5) remains an optional future debug/flow-sampling track if an explicit operator need arises.
 
 ## 4. Phase 1 — IPFIX flow accounting (feasible, read-only)
 
@@ -91,14 +95,14 @@ Two data-source options, in cost order:
 
 ### 4.2 Work items
 
-| # | Item | Files | Effort | Risk |
+| # | Item | Files | Status | Risk |
 |---|---|---|---|---|
-| 1.1 | Extend YNL flow attrs: `nat-flags`, `nat-src-ip`, `nat-dst-ip`, `nat-sport`, `nat-dport`, `first-seen-ns`, `fallback-reason` (never-offloaded cause) | `kernel/ask/uapi/ask.yaml`, `ask_genl.c`, `ask_genl_attr.c` | 2–4 d | Low (schema only, no datapath) |
-| 1.2 | Validate the pmacct/nfacctd path against `dump-flows` (Option A decision) | test rig, no code | 2–3 d | Low |
-| 1.3 | Stats-path scaling: cache the record DMA address/handle at insert for an O(1) read, batch all flows per epoch under one lock acquisition or lock-free reads, and add a per-poll budget | `ask_flow_offload.c`, `ask_flow.c`, `ask_internal.h` | 1–2 w | **Medium** — touches the shipped stats path and the F-291 owner model |
-| 1.4 | Exporter MVP (Option B) incl. template lifecycle, restart-safe collector behaviour, HA failover re-baseline | new `ask-ipfixd` source tree | 2–4 w (6–10 w hardened) | Medium |
-| 1.5 | Packaging, service unit, CLI (`set system flow-accounting` extension or dedicated node), arm64 CI, docs | `data/vyos-1x-NNN`, build scripts | 1–2 w | Low–medium (vyos-1x pinned to `91bf0ef51`, T3871) |
-| 1.6 | Board validation matrix (§7) | lab DUT | 1–2 w | Medium |
+| 1.1 | Extend YNL flow attrs (`first-seen-ns`, `nat-flags`, `nat-src-ip`, `nat-dst-ip`, `nat-sport`, `nat-dport`) + per-cause SW-fallback counters (`ASK_INFO_ATTR_FALLBACK`, 8 causes) + VyOS CLI rendering (`show offload flow`, `show offload config`, `show interfaces ... offload ask flows`) | `kernel/ask/uapi/ask.yaml`, `ask.h`, `ask_genl.c`, `ask_genl_attr.c`, `ask_stats.c`, `ask_flow.c`, `ask_flow_offload.c`, `ask_test_genl.c`, `show_offload.py`, `show_ask_offload.py`, `tests/ask_telemetry.py` | **Implemented in source (2026-11-25)** — ARM64 `W=1` build + host tests PASS; awaiting CI ISO + cold-boot gate | Low (read-only w.r.t. silicon) |
+| 1.2 | Validate Option A (`nf_conntrack_acct=1` / pmacct) against `dump-flows` | live DUT1 (`2026.11.25-0736-rolling`) | **Kernel half verified 2026-11-25:** mid-flow at 6 s of a 200 Mbit/s `[HW_OFFLOAD]` TCP flow, `conntrack -L` (`nf_conntrack_acct=1`) recorded `70,620 pkts / 106,128,173 B` (initial SW warmup `~26.1 MB` + F-228 silicon deltas `53,144 pkts / 80,053,552 B` matching `ynl dump-flows` on the same instant). Caveats: (a) `pmacct`/`nfacctd`/`uacctd`/`hsflowd` are not packaged in the current rolling ISO; (b) `FLOW_CLS_DESTROY` teardown does not pull a final pre-delete silicon delta, so short flows can miss the last `<3-4 s` tail before FIN. | Low |
+| 1.3 | Stats-path scaling (separate lock, CRC-64, batched scan, single-pass cache) | `ask_flow_offload.c`, `ask_flow.c`, `ask_internal.h` | **Shipped** (`F-312` `fe_stats_lock`, `F-314` table CRC-64, `F-315` `fman_pcd_fe_stats_scan()`, `720ccfb5` 3 s cache — board-measured to 131k flows) | Done |
+| 1.4 | Exporter MVP (Option B) incl. template lifecycle, restart-safe collector behaviour, HA failover re-baseline | new `ask-ipfixd` source tree (or package `pmacct` for Option A) | Deferred until operator names a collector target | Medium |
+| 1.5 | Packaging, service unit, CLI (`set system flow-accounting` extension or dedicated node), arm64 CI, docs | `data/vyos-1x-NNN`, build scripts | Deferred with 1.4 | Low–medium |
+| 1.6 | Board validation matrix (§7 Phase 1-A on next CI ISO; 1-C/1-D if 1.4 built) | lab DUT | Pending next CI ISO for Phase 1-A | Low |
 
 **Total:** 5–8 engineer-weeks for a production-grade exporter; 2–3 weeks if Option A holds.
 
@@ -113,7 +117,7 @@ Two data-source options, in cost order:
 
 ### 4.4 Security and privilege
 
-The `ask` genl ops currently use `GENL_UNS_ADMIN_PERM` with `.netnsok=true` (2026-10-16 review). The exporter therefore needs `CAP_NET_ADMIN` in the initial netns. Either the planned genl hardening (`GENL_ADMIN_PERM` and `netnsok=false`) lands first, or the daemon runs as a root-owned service with no user-namespace access. Do not add a world-readable debugfs/sysfs counter dump as a shortcut.
+**Shipped (`20784423`, verified by `tests/ask_genl_ops_policy.py`):** `ask_genl.c` uses full per-op `struct genl_ops` policies with `GENL_ADMIN_PERM` on every command and `.netnsok = false`. Any exporter or CLI caller therefore requires `CAP_NET_ADMIN` in `init_net`. Do not add a world-readable debugfs/sysfs counter dump as a shortcut.
 
 ## 5. Phase 2 — per-flow mirroring with `REPLICATE_PKT` (optional)
 
