@@ -149,6 +149,8 @@ def check_sources() -> None:
             ".egress_change  = ask_flow_offload_egress_change",
             "ask_tc_qdisc_work",
             "ask_tc_qdisc_is_soft(",
+            "!q->enqueue",
+            '"noqueue"',
             "TCQ_F_OFFLOADED",
             "dpaa_ceetm_is_active(",
         ],

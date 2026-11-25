@@ -7518,20 +7518,25 @@ static bool ask_tc_qdisc_is_soft(struct net_device *dev)
 		return true;
 #endif
 	q = rtnl_dereference(dev->qdisc);
-	if (!q || (q->flags & TCQ_F_BUILTIN))
+	/* Linux noqueue_qdisc_ops clears q->enqueue=NULL without setting
+	 * TCQ_F_BUILTIN (used by VLAN vifs, PPPoE, and bridges by default). */
+	if (!q || !q->enqueue || (q->flags & TCQ_F_BUILTIN) ||
+	    !strcmp(q->ops->id, "noqueue"))
 		return false;
 	if ((q->flags & TCQ_F_MQROOT) && q->handle == 0) {
 		for (i = 0; i < dev->num_tx_queues; i++) {
 			struct Qdisc *cq;
 
 			cq = rtnl_dereference(netdev_get_tx_queue(dev, i)->qdisc_sleeping);
-			if (cq && !(cq->flags & TCQ_F_BUILTIN) && cq->handle != 0)
+			if (cq && cq->enqueue && !(cq->flags & TCQ_F_BUILTIN) &&
+			    cq->handle != 0)
 				return true;
 		}
 		return false;
 	}
 	if ((!strcmp(q->ops->id, "pfifo_fast") ||
-	     !strcmp(q->ops->id, "fq_codel")) && q->handle == 0)
+	     !strcmp(q->ops->id, "fq_codel") ||
+	     !strcmp(q->ops->id, "fq")) && q->handle == 0)
 		return false;
 	if (!strcmp(q->ops->id, "htb") && (q->flags & TCQ_F_OFFLOADED) &&
 	    dpaa_ceetm_is_active(dev)) {
@@ -7541,7 +7546,8 @@ static bool ask_tc_qdisc_is_soft(struct net_device *dev)
 			struct Qdisc *cq;
 
 			cq = rtnl_dereference(netdev_get_tx_queue(dev, i)->qdisc_sleeping);
-			if (cq && !(cq->flags & TCQ_F_BUILTIN) && cq->handle != 0)
+			if (cq && cq->enqueue && !(cq->flags & TCQ_F_BUILTIN) &&
+			    cq->handle != 0)
 				return true;
 		}
 		return false;
