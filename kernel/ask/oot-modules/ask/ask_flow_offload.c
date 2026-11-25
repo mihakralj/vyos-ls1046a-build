@@ -3731,6 +3731,33 @@ static u16 ask_flow_cookie_mtu(unsigned long cookie)
 	return t->mtu;
 }
 
+/* G10 Phase 2: read conntrack mark for symmetric SW/HW CEETM class steering. */
+static u32 ask_flow_cookie_mark(unsigned long cookie)
+{
+#if IS_ENABLED(CONFIG_NF_CONNTRACK_MARK)
+	const struct flow_offload_tuple *t;
+	const struct flow_offload_tuple_rhash *rh;
+	const struct flow_offload *flow;
+	const struct nf_conn *ct;
+
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return 0;
+	t = (const struct flow_offload_tuple *)cookie;
+	if (t->dir >= FLOW_OFFLOAD_DIR_MAX)
+		return 0;
+	rh = container_of(t, struct flow_offload_tuple_rhash, tuple);
+	flow = container_of(rh, struct flow_offload, tuplehash[t->dir]);
+	if (!virt_addr_valid(flow))
+		return 0;
+	ct = READ_ONCE(flow->ct);
+	if (!ct || !virt_addr_valid(ct))
+		return 0;
+	return READ_ONCE(ct->mark);
+#else
+	return 0;
+#endif
+}
+
 /*
  * T-M6-SP4: on a PPPoE session going down, schedule withdrawal of all
  * PPPoE flow records. The kernel does not find them through the PPP netdev
@@ -5628,6 +5655,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 					if (emtu && emtu < in_mtu)
 						key.egress_mtu = emtu;
 				}
+				key.ceetm_classid = ask_flow_cookie_mark(f->cookie);
 
 				/*
 				 * Race-free first-arrival latch:

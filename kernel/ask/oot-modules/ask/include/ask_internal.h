@@ -711,6 +711,9 @@ u8     nat_flags; /* ASK_NATF_* bits from <uapi/linux/ask/ask.h> */
 	u64    pppoe_session_epoch;
 	/* Software-only family policy snapshot; never serialized into the FE key. */
 	u64    family_policy_seq;
+	/* G10 Phase 2: conntrack mark / HTB classid for CEETM multi-class egress
+	 * steering; software-only metadata, never serialized into the FE key. */
+	u32    ceetm_classid;
 } __packed;
 
 /*

@@ -1,6 +1,6 @@
 # ASK2 QoS, CEETM Egress Shaping, and Policer Coexistence Plan (G10 / T-M6-QOS)
 
-**Status:** Scoping complete (2026-11-25, `dpaa1` @ `ba131d12`). No implementation code changed yet. All findings cross-checked against shipped kernel source (`qman_ceetm.c`, `dpaa_ceetm.{c,h}`, `0104`, `0111`, `0112`, `F-199`, `F-316`, `F-319`, `F-322`), `ask.ko`, `arch/qman-ceetm.md`, `arch/fman-microcode-210-programming-reference.md`, vendor `/mnt/builds/ASK/cdx/`, and live DUT1 (`.185`) + live vendor reference board DUT2 (`.106`).
+**Status:** Phase 0 + Phase 1 **cold-boot silicon-verified PASS** (`2026.11.25-1958-rolling`, `4ec2fb73`, CI `45690319479` on DUT1 `.185`); `noqueue` SW-qdisc guard bug fixed (`043d0bb3`); **Phase 2 implemented and host/build/review-verified** (awaiting CI ISO + cold-boot silicon gate). All findings cross-checked against shipped kernel source (`qman_ceetm.c`, `dpaa_ceetm.{c,h}`, `F-327`), `ask.ko`, `arch/qman-ceetm.md`, `arch/fman-microcode-210-programming-reference.md`, vendor `/mnt/builds/ASK/cdx/`, and live DUT1 (`.185`) + live vendor reference board DUT2 (`.106`).
 
 ## 1. Executive summary
 
@@ -140,39 +140,25 @@ A port with a non-offloaded software egress qdisc (`cake`, non-offload `htb`, `t
 
 Every phase requires failing-first host checks, independent review before silicon code lands, a CI image, and cold-boot verification on `.185` (never flood-test the ingress policer).
 
-### Phase 0 — Silicon facts & non-destructive baseline probe (1 day, no datapath changes)
-1. **Resolve channel/LFQID discrepancy (`8` vs `32` channels, `1024` vs `4096` LFQIDs):**
-   - Inspect QMan IP revision (`QMAN_IP_REV`) and non-destructively query CEETM channel 8..31 (`QM_CEETM_VERB_CLASS_SCHEDULER_QUERY`) on cold-booted DUT1 and compare with DUT2 (`fsl,ceetm-channel-range = <0 0x20>`).
-   - Record the verified hardware limit in `arch/qman-ceetm.md`, `qman_ceetm.c`, and Qdrant.
-2. **Baseline CEETM-only check on DUT1 (ASK disengaged on `eth4`):**
-   - Confirm `0111`+`0112` `tc qdisc add dev eth4 root handle 1: htb offload default 10` still shapes software traffic cleanly on `6.18.65-1-vyos` (establishing the un-offloaded control before changing any code).
+### Phase 0 — Silicon facts & non-destructive baseline probe — **DONE (2026-11-25)**
+1. **Resolved channel/LFQID capacity (`32` channels, `4096` LFQIDs):**
+   - Verified on QMan Rev 3.2.1 (`0x03020100`): `qman_ceetm.c` (`0111`) updated to 32 channels / 4096 LFQIDs matching DT `fsl,ceetm-channel-range = <0 0x20>` and `fsl,ceetm-lfqid-range = <0x00f00000 0x1000>`.
 
-### Phase 1 — Safety fixes + Shared SW/HW Single-Class CEETM Shaper + SW-qdisc Guard
-**Deliverables:**
-- Fix `qman_ceetm_drain_cq()` to release popped FDs (`bpid == 0xff` vs real BMan pool) and fail-closed/quarantine on drain error.
-- Switch `dpaa_ceetm.c` CCGR from 1 MiB byte-mode to **frame-mode** bounded by `F-316` RX-pool + XSFDR budget.
-- Add Two-LFQ-per-CQ (`lfq_sw` + `lfq_hw` with `0x9a000000c0000000`) in `dpaa_ceetm.c` and export `dpaa_ceetm_get_offload_fqid()` + egress-change notifier hooks.
-- Wire `ask.ko` to:
-  1. Quiesce/retire/re-admit egressing flows synchronously around CEETM create/modify/del/destroy (zero silent blackhole; abort `-EBUSY` on retained owner).
-  2. Resolve `lfq_hw` when `priv->ceetm != NULL` so HW-offloaded flows pass through the **same** CEETM CQ + channel shaper as SW traffic.
-  3. Enforce the **software-qdisc bypass guard** (keep flows in SW and bump fallback counter when egress port has `cake`, non-offload `htb`, `tbf`, `netem`, etc.).
-- **Host tests (failing-first, ASan/UBSan):** CEETM lifecycle/quarantine ordering, frame-mode CCGR budget math, Two-LFQ context_a & FD-release drain model, SW-qdisc bypass guard state machine.
+### Phase 1 — Safety fixes + Shared SW/HW Single-Class CEETM Shaper + SW-qdisc Guard — **COLD-BOOT PASS (2026-11-25, `2026.11.25-1958-rolling`, `4ec2fb73`)**
+- Implemented `F-327` (`dpaa_fo_register_egress_cb` / `dpaa_fo_notify_egress_change` + `dpaa_ceetm_is_active` / `dpaa_ceetm_offload_egress_fqid`), Two-LFQ-per-CQ (`lfq` + `hw_lfq` `0x9a000000c0000000`), frame-mode CCGR budgeting (`<= min(half RX pool, 512)`), FD-reclaiming CQ pop + `qman_ceetm_drain_ern()` + retain-on-fault quarantine, synchronous ASK2 PRE/POST quiesce, and SW-qdisc bypass guard (`ask_tc_qdisc_is_soft()`).
+- Cold-boot verified on DUT1 (`6.18.65-1-vyos`, `ask-check` `47/49 OK, 0 FAIL`):
+  - Single HW flow on `eth3` (`hw_lfqid=0xf00005`): 200M leaf = `189 Mbit/s` L4 (0 retr); 500M leaf = `473 Mbit/s` L4 (0 retr, 99.5% CPU idle).
+  - Concurrent HW + SW flows on same 500M CQ: `408+77=485`, `402+73=475`, `404+68=472 Mbit/s` (0 retr, 88,200 HW pkts in `ynl dump-flows`).
+  - Live teardown mid-500M flow: 29 ms, 0 quarantine, jumped to `9.42 Gbit/s`.
+  - Live attach mid-9.41 Gbit/s flow: throttled cleanly to `279 Mbit/s` (1,631 frame-mode CCGR tail-drops, 0 rx drops).
+  - `cake 150mbit` guard: stayed in SW (`dump-flows = []`, preflight `-95`, `144 Mbit/s`); lifted cleanly on delete.
+- Follow-up fix (`043d0bb3`): `ask_tc_qdisc_is_soft()` treats Linux `noqueue_qdisc_ops` (`q->enqueue == NULL`, e.g. VLAN/PPPoE devices) as pass-through rather than a software qdisc.
 
-**Phase 1 Cold-Boot Acceptance Gate (pre-declared tolerance: `±5%` wire rate):**
-- Measurement method: wire-level byte rate measured at receiver NIC + DUT `ethtool -S` / `qman_ceetm_cq_get_dequeue_statistics()` over 30 s steady-state intervals (accounting for L2+IFG overhead `OAL=24` vs L4 payload, matching `F-231` methodology).
-- **Controls & matrix (both IPv4 and IPv6, both directions `eth3->eth4` and `eth4->eth3`):**
-  1. Unshaped baseline (`htb offload` absent): line rate (~9.4 Gbit/s unidir, ~17 Gbit/s bidir), unchanged vs pre-G10 baseline.
-  2. Single HW-offloaded bulk flow shaped to `100M`, `500M`, `1G`, `2.5G`, `5G`: wire rate within **±5%** of target, CPU idle (`[HW_OFFLOAD]` active, `tx_confirm` delta ≈ 0), zero BMan pool starvation (`rodc == 0`), small-frame (64 B UDP) stress does not exhaust RX pool.
-  3. **Mixed HW + SW load on same shaper:** 1 HW-offloaded bulk flow + 1 SW-forced flow (e.g., port 21 excluded or ping/SSH control) sharing a `1G` class -> combined wire rate within **±5%** of `1G`, zero double-shaping, SW ping RTT bounded (no starvation).
-  4. **Dynamic rate change (`TC_HTB_NODE_MODIFY`):** `500M -> 2G -> 500M` mid-flow without dropping the TCP session or retiring the HW record.
-  5. **Software-qdisc honesty check:** install `tc qdisc replace dev eth4 root cake bandwidth 500mbit` -> existing HW flows retire cleanly to SW, traffic shapes to ~500 Mbit/s, `show offload config` increments SW-qdisc fallback counter; removing `cake` restores HW offload at line rate.
-  6. **Reversible teardown & churn:** 20× create/destroy + leaf add/del cycles under live traffic -> `pcd-snapshot diff` byte-exact, MURAM flat (`58764`), BMan pool counts exact, `CEETM_XSFDR_IN_USE` back to baseline (1), `ask-check` `47/49 OK, 0 FAIL`, 0 kernel warnings/BUGs.
-
-### Phase 2 — Multi-Class HQoS (2-level Channel→CQ + `ct->mark` Class Steering + VyOS CLI)
-- Extend `qman_ceetm.c` + `dpaa_ceetm.c` to support 2-level `LNI -> Channel (rate/ceil) -> CQ (8 strict prio + 8 WBFS weighted)` and optional CCGR WRED curves (`tc qdisc add ... red`).
-- Map `ct->mark` / `skb->priority` -> HTB classid consistently in both `dpaa_ceetm_select_queue()` (SW) and `ask_flow_offload_replace()` (HW -> class `lfq_hw`).
-- Wire VyOS `set qos policy shaper` offload option (or compatible 2-level HTB rendering with `offload`) in `vyos-1x`.
-- **Gate:** multi-class isolation (strict-priority class preempts saturated bulk class with bounded latency; two shaped classes sum to parent ceil within ±5%; exhaustion returns `-ENOSPC` cleanly with no partial state).
+### Phase 2 — Multi-Class HQoS (2-level Channel→CQ + `ct->mark` Class Steering + VyOS CLI) — **IMPLEMENTED, HOST/REVIEW-VERIFIED (awaiting CI + cold-boot gate)**
+- Extended `dpaa_ceetm.c` into 2-level `LNI -> Channel (rate/ceil) -> up to 8 strict-priority CQs 0..7` (`TC_HTB_LEAF_TO_INNER`, 2-level `TC_HTB_LEAF_ALLOC_QUEUE`, `TC_HTB_LEAF_DEL_LAST` demotion, `TC_HTB_NODE_MODIFY` on inner channels) with lockless acquire-ordered `dpaa_ceetm_find_live_slot()`, direct-range `prev_real_txqs` fallback fold, symmetric `skb->priority` / `skb->mark` (SW) and `ct->mark` (HW) classid decoding, paired PRE/POST notifications on leaf add/del/promote, and exported `dpaa_ceetm_fqid_is_live()`.
+- Wired `ask_flow_offload.c` (`ask_flow_cookie_mark()` reading `ct->mark` under `CONFIG_NF_CONNTRACK_MARK`) and `ask_hw.c` (`key->ceetm_classid` + `dpaa_ceetm_fqid_is_live()` multi-leaf concurrency).
+- Added VyOS CLI opt-in (`data/vyos-1x-061-qos-ceetm-offload.patch`: `set qos policy shaper <name> offload` on physical Ethernet ports, enforcing `<= 7` classes + default with distinct priorities `0..7` and `mark` matching class ID).
+- **Next cold-boot gate:** multi-class isolation (strict-priority CQ 0 preempts saturated CQ 7 bulk class with bounded latency; aggregate rate matches parent channel within ±5%; `ct->mark` HW + `skb->mark` SW steer identically; `set qos policy shaper ... offload` commit/delete + exhaustion `-ENOSPC`/`-EEXIST` clean).
 
 ### Phase 3 — Optional Single-Port Per-Packet DSCP→CQ (`DSCP_FQ_MAP_ENABLE`)
 - Implement FMan 210.10.1 MURAM `dscp_fqid_map` singleton (extending `F-262`'s owned FE MURAM block) driven by `tc filter add dev ethX egress protocol ip flower ip_dscp <d> action skbedit priority <M:N>`, with strict single-port ownership and retirement drain before port handoff.

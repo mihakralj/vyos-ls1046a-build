@@ -1,0 +1,183 @@
+diff --git a/interface-definitions/qos.xml.in b/interface-definitions/qos.xml.in
+index 5f3e76c..9b40226 100644
+--- a/interface-definitions/qos.xml.in
++++ b/interface-definitions/qos.xml.in
+@@ -606,6 +606,12 @@
+             <children>
+               #include <include/generic-description.xml.i>
+               #include <include/qos/bandwidth-auto.xml.i>
++              <leafNode name="offload">
++                <properties>
++                  <help>Offload HTB shaper to QMan CEETM hardware (LS1046A Ethernet ports)</help>
++                  <valueless/>
++                </properties>
++              </leafNode>
+               <tagNode name="class">
+                 <properties>
+                   <help>Class ID</help>
+diff --git a/python/vyos/qos/trafficshaper.py b/python/vyos/qos/trafficshaper.py
+index 24e2ca0..ec8fe79 100644
+--- a/python/vyos/qos/trafficshaper.py
++++ b/python/vyos/qos/trafficshaper.py
+@@ -24,8 +24,62 @@ class TrafficShaper(QoSBase):
+     _parent = 1
+     qostype = 'shaper'
+ 
++    def _resolve_rate(self, raw_rate, total_bw):
++        if raw_rate == 'auto':
++            return self._rate_convert(total_bw)
++        if str(raw_rate).endswith('%'):
++            percent = str(raw_rate).rstrip('%')
++            return max(self._rate_convert(total_bw) * int(percent) // 100, 8)
++        return self._rate_convert(raw_rate)
++
++    def _update_offload(self, config):
++        """Render QMan CEETM hardware HTB-offload qdisc without software leaf qdiscs."""
++        speed = self._rate_convert(config['bandwidth'])
++        classes = config.get('class', {})
++        default_cfg = config.get('default', {})
++
++        if not classes:
++            def_rate = self._resolve_rate(default_cfg.get('bandwidth', config['bandwidth']),
++                                          config['bandwidth'])
++            def_ceil = self._resolve_rate(default_cfg.get('ceiling', default_cfg.get('bandwidth', config['bandwidth'])),
++                                          config['bandwidth'])
++            self._cmdl(f'tc qdisc replace dev {self._interface} root handle {self._parent:x}: htb offload default 1'.split())
++            self._cmdl(f'tc class replace dev {self._interface} parent {self._parent:x}: classid {self._parent:x}:1 htb rate {def_rate} ceil {def_ceil}'.split())
++            return
++
++        class_ids = sorted(int(x) for x in classes)
++        default_minor_id = max(class_ids) + 1
++
++        self._cmdl(f'tc qdisc replace dev {self._interface} root handle {self._parent:x}: htb offload default {default_minor_id:x}'.split())
++        self._cmdl(f'tc class replace dev {self._interface} parent {self._parent:x}: classid {self._parent:x}:1 htb rate {speed} ceil {speed}'.split())
++
++        used_prios = set()
++        for cls in class_ids:
++            cls_cfg = classes[str(cls)]
++            rate = self._resolve_rate(cls_cfg['bandwidth'], config['bandwidth'])
++            ceil_rate = self._resolve_rate(cls_cfg['ceiling'], config['bandwidth']) if 'ceiling' in cls_cfg else speed
++            prio = int(cls_cfg.get('priority', 0))
++            used_prios.add(prio)
++            self._cmdl(f'tc class replace dev {self._interface} parent {self._parent:x}:1 classid {self._parent:x}:{cls:x} htb rate {rate} ceil {ceil_rate} prio {prio}'.split())
++
++        if default_cfg:
++            def_rate = self._resolve_rate(default_cfg['bandwidth'], config['bandwidth'])
++            def_ceil = self._resolve_rate(default_cfg['ceiling'], config['bandwidth']) if 'ceiling' in default_cfg else speed
++            # qos.xml.in sets <defaultValue>20</defaultValue> on shaper default
++            # priority; treat values > 7 as unset so the lowest unused CEETM
++            # strict-priority CQ (7..0) is selected automatically.
++            if 'priority' in default_cfg and int(default_cfg['priority']) <= 7:
++                def_prio = int(default_cfg['priority'])
++            else:
++                free_prios = [p for p in range(7, -1, -1) if p not in used_prios]
++                def_prio = free_prios[0] if free_prios else 7
++            self._cmdl(f'tc class replace dev {self._interface} parent {self._parent:x}:1 classid {self._parent:x}:{default_minor_id:x} htb rate {def_rate} ceil {def_ceil} prio {def_prio}'.split())
++
+     # https://man7.org/linux/man-pages/man8/tc-htb.8.html
+     def update(self, config, direction):
++        if 'offload' in config:
++            self._update_offload(config)
++            return
+         class_id_max = 0
+         if 'class' in config:
+             tmp = list(config['class'])
+diff --git a/src/conf_mode/qos.py b/src/conf_mode/qos.py
+index 94802d6..93b92a7 100644
+--- a/src/conf_mode/qos.py
++++ b/src/conf_mode/qos.py
+@@ -256,6 +256,73 @@ def _check_shaper_hfsc_rate(cls, cls_conf):
+         )
+ 
+ 
++def _verify_shaper_offload(policy, policy_config):
++    if 'bandwidth' not in policy_config:
++        raise ConfigError(f'Offloaded shaper policy "{policy}" requires "bandwidth"!')
++    _verify_default_policy_exist(policy, policy_config)
++
++    classes = policy_config.get('class', {})
++    if len(classes) + 1 > 8:
++        raise ConfigError(
++            f'Offloaded shaper policy "{policy}" supports at most 7 classes plus default (8 CEETM strict-priority CQs)!'
++        )
++
++    used_prios = {}
++    for cls, cls_conf in classes.items():
++        cls_id = int(cls)
++        if 'set_dscp' in cls_conf:
++            raise ConfigError(
++                f'Offloaded shaper policy "{policy}" class "{cls}" does not support "set-dscp"!'
++            )
++        prio = int(cls_conf.get('priority', 0))
++        if prio < 0 or prio > 7:
++            raise ConfigError(
++                f'Offloaded shaper policy "{policy}" class "{cls}" priority must be 0-7!'
++            )
++        if prio in used_prios:
++            raise ConfigError(
++                f'Offloaded shaper policy "{policy}" classes "{used_prios[prio]}" and "{cls}" share priority {prio}; CEETM requires distinct priorities 0-7!'
++            )
++        used_prios[prio] = cls
++
++        if 'ceiling' in cls_conf:
++            Warning(
++                f'Offloaded shaper "{policy}" class "{cls}" sets "ceiling"; 2-level CEETM shapes aggregate rate at the parent policy bandwidth and schedules child classes by strict priority 0-7.'
++            )
++
++        for mname, mcfg in cls_conf.get('match', {}).items():
++            if 'mark' in mcfg:
++                mark_val = int(str(mcfg['mark']), 0)
++                if mark_val == 0 or mark_val not in (cls_id, (1 << 16) | cls_id):
++                    raise ConfigError(
++                        f'Offloaded shaper policy "{policy}" class "{cls}" match "{mname}" mark {mcfg["mark"]} must equal class ID {cls_id} (or 0x{(1 << 16) | cls_id:x}); CEETM steers SW skb->mark and ASK2 HW ct->mark directly by HTB class ID!'
++                    )
++            non_mark = [k for k in mcfg.keys() if k not in ('mark', 'description')]
++            if non_mark:
++                Warning(
++                    f'Offloaded shaper "{policy}" class "{cls}" match "{mname}" uses unsupported criteria ({", ".join(non_mark)}); offloaded HTB ignores tc filters for both software and ASK2 hardware traffic (steer via skb/conntrack mark equal to class ID or skb->priority)!'
++                )
++
++    default_conf = policy_config.get('default', {})
++    if 'set_dscp' in default_conf:
++        raise ConfigError(
++            f'Offloaded shaper policy "{policy}" default class does not support "set-dscp"!'
++        )
++    # qos.xml.in assigns <defaultValue>20</defaultValue> to shaper default
++    # priority; treat '20' as unset (auto-select lowest free CQ 7..0).
++    raw_def_prio = default_conf.get('priority')
++    if raw_def_prio is not None and str(raw_def_prio) != '20':
++        def_prio = int(raw_def_prio)
++        if def_prio < 0 or def_prio > 7:
++            raise ConfigError(
++                f'Offloaded shaper policy "{policy}" default priority must be 0-7 (got {def_prio})!'
++            )
++        if def_prio in used_prios:
++            raise ConfigError(
++                f'Offloaded shaper policy "{policy}" default priority {def_prio} conflicts with class "{used_prios[def_prio]}"!'
++            )
++
++
+ def _verify_shaper_hfsc(policy, policy_config):
+     _verify_default_policy_exist(policy, policy_config)
+ 
+@@ -313,6 +380,8 @@ def verify(qos):
+                 if policy_type in ['rate_control']:
+                     if 'bandwidth' not in policy_config:
+                         raise ConfigError('Bandwidth not defined')
++                if policy_type in ['shaper'] and 'offload' in policy_config:
++                    _verify_shaper_offload(policy, policy_config)
+                 if policy_type in ['shaper_hfsc']:
+                     _verify_shaper_hfsc(policy, policy_config)
+ 
+@@ -336,6 +405,11 @@ def verify(qos):
+             tmp = shaper_type(interface).get_direction()
+             if direction not in tmp:
+                 raise ConfigError(f'Selected QoS policy on interface "{interface}" only supports "{tmp}"!')
++            if shaper_type is TrafficShaper and 'offload' in shaper_config:
++                if Section.section(interface) != 'ethernet' or '.' in interface:
++                    raise ConfigError(
++                        f'Offloaded shaper policy "{policy_name}" can only be attached to physical Ethernet interfaces (not "{interface}")!'
++                    )
+ 
+     if 'traffic_match_group' in qos:
+         for group, group_config in qos['traffic_match_group'].items():

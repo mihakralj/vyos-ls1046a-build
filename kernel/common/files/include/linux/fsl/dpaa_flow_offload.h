@@ -99,6 +99,7 @@ dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
 int dpaa_ceetm_offload_egress_fqid(struct net_device *dev, u32 classid,
 				   u32 *fqid);
 bool dpaa_ceetm_is_active(struct net_device *dev);
+bool dpaa_ceetm_fqid_is_live(struct net_device *dev, u32 fqid);
 #else
 static inline int dpaa_ceetm_offload_egress_fqid(struct net_device *dev,
 						 u32 classid, u32 *fqid)
@@ -108,6 +109,10 @@ static inline int dpaa_ceetm_offload_egress_fqid(struct net_device *dev,
 	return 0;
 }
 static inline bool dpaa_ceetm_is_active(struct net_device *dev)
+{
+	return false;
+}
+static inline bool dpaa_ceetm_fqid_is_live(struct net_device *dev, u32 fqid)
 {
 	return false;
 }

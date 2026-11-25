@@ -2071,8 +2071,8 @@ int ask_hw_offload_engage(u8 hw_port_id)
 EXPORT_SYMBOL_GPL(ask_hw_offload_engage);
 
 static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id);
-static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
-				   int *slotp);
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 classid, u32 *fqid,
+				   bool allow_alloc, int *slotp);
 
 static int ask_hw_b2_port_of(const char *ifname, u8 *port_id)
 {
@@ -2785,8 +2785,8 @@ static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
  * Only ask_hw_prewarm_egress_fq() (genuinely safe process context, no
  * flow_block_lock held) passes allow_alloc=true.
  */
-static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
-				   int *slotp)
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 classid, u32 *fqid,
+				   bool allow_alloc, int *slotp)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_inst;
 	struct net_device *dev;
@@ -2846,8 +2846,9 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
 			}
 			/* G10: when CEETM HTB offload owns this port's sub-portal,
 			 * conventional WQ6 FQs stop dequeuing; target the active
-			 * leaf's no-confirm CEETM hw_lfq (0xF00xxx) or fail closed. */
-			ceetm_rc = dpaa_ceetm_offload_egress_fqid(phys, 0,
+			 * leaf's no-confirm CEETM hw_lfq (0xF00xxx) matching
+			 * @classid (ct->mark) or defcls, or fail closed. */
+			ceetm_rc = dpaa_ceetm_offload_egress_fqid(phys, classid,
 								  &ceetm_fq);
 			if (ceetm_rc < 0) {
 				mutex_unlock(&h->lock);
@@ -2855,7 +2856,8 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid, bool allow_alloc,
 				return ceetm_rc;
 			}
 			if (ceetm_rc > 0 && ceetm_fq) {
-				h->noconf_tx[slot].ceetm_fqid = ceetm_fq;
+				if (!classid)
+					h->noconf_tx[slot].ceetm_fqid = ceetm_fq;
 				*fqid = ceetm_fq;
 			} else {
 				h->noconf_tx[slot].ceetm_fqid = 0;
@@ -3032,7 +3034,7 @@ bool ask_hw_port_is_l2(u8 hw_port_id)
 /* Cache-only egress FQ lookup: safe under rtnl (never allocates). */
 int ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid)
 {
-	return ask_hw_resolve_oif_fqid(ifindex, fqid, false, NULL);
+	return ask_hw_resolve_oif_fqid(ifindex, 0, fqid, false, NULL);
 }
 
 static DEFINE_MUTEX(ask_hw_prewarm_lock);
@@ -3150,12 +3152,15 @@ static void ask_hw_flow_fq_put(struct ask_hw_pcd *h, int slot, u32 fqid)
 			return;
 		}
 		for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
-			if (h->noconf_tx[i].ceetm_fqid == fqid &&
+			if ((h->noconf_tx[i].ceetm_fqid == fqid ||
+			     (h->noconf_tx[i].dev &&
+			      dpaa_ceetm_fqid_is_live(h->noconf_tx[i].dev, fqid))) &&
 			    h->noconf_tx[i].ceetm_users) {
 				h->noconf_tx[i].ceetm_users--;
 				return;
 			}
 		}
+		WARN_ON_ONCE(1);
 		return;
 	}
 	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
@@ -3187,7 +3192,8 @@ static int ask_hw_l2_fq_get_locked(struct ask_hw_pcd *h, u32 fqid,
 			if (out_ifindex > 0 &&
 			    h->noconf_tx[i].ifindex != (u32)out_ifindex)
 				continue;
-			if (h->noconf_tx[i].ceetm_fqid != fqid)
+			if (!h->noconf_tx[i].dev ||
+			    !dpaa_ceetm_fqid_is_live(h->noconf_tx[i].dev, fqid))
 				continue;
 			if (h->noconf_tx[i].unregistered ||
 			    h->noconf_tx[i].retained ||
@@ -3241,12 +3247,15 @@ static void ask_hw_l2_fq_put_locked(struct ask_hw_pcd *h, u32 fqid,
 			}
 		}
 		for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
-			if (h->noconf_tx[i].ceetm_fqid == fqid &&
+			if ((h->noconf_tx[i].ceetm_fqid == fqid ||
+			     (h->noconf_tx[i].dev &&
+			      dpaa_ceetm_fqid_is_live(h->noconf_tx[i].dev, fqid))) &&
 			    h->noconf_tx[i].ceetm_l2_users) {
 				h->noconf_tx[i].ceetm_l2_users--;
 				return;
 			}
 		}
+		WARN_ON_ONCE(1);
 		return;
 	}
 	for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
@@ -3281,7 +3290,9 @@ bool ask_hw_tx_fqid_live_locked(struct ask_hw_pcd *guard, u32 tx_fqid)
 	lockdep_assert_held(&guard->lock);
 	if (ask_is_ceetm_fqid(tx_fqid)) {
 		for (i = 0; i < ASK_HW_NOCONF_SLOTS; i++) {
-			if (guard->noconf_tx[i].ceetm_fqid != tx_fqid)
+			if (!guard->noconf_tx[i].dev ||
+			    !dpaa_ceetm_fqid_is_live(guard->noconf_tx[i].dev,
+						     tx_fqid))
 				continue;
 			return !guard->noconf_tx[i].unregistered &&
 			       !guard->noconf_tx[i].retained &&
@@ -3805,7 +3816,7 @@ void ask_hw_prewarm_egress_fq(u8 hw_port_id)
 		ifindex = dev->ifindex;
 	rtnl_unlock();
 
-	if (ifindex && !ask_hw_resolve_oif_fqid(ifindex, &fqid, true, &slot))
+	if (ifindex && !ask_hw_resolve_oif_fqid(ifindex, 0, &fqid, true, &slot))
 		ask_hw_prewarm_flow_fqs(hw_port_id, slot);
 }
 
@@ -3898,7 +3909,8 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 	/* Egress forward FQ must exist before we publish. CR-013: this runs
 	 * in the flow-insert hot path under flow_block_lock -- never allow
 	 * the cold-cache allocation here. */
-	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid, false, NULL);
+	rc = ask_hw_resolve_oif_fqid(oif, key->ceetm_classid, &tx_fqid,
+				     false, NULL);
 	if (rc)
 		return rc;
 
@@ -3957,7 +3969,8 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 
 	/* CR-013: same hot-path constraint as ask_hw_flow_preflight() above --
 	 * this runs under flow_block_lock, never allow the cold-cache alloc. */
-	rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid, false, &oif_slot);
+	rc = ask_hw_resolve_oif_fqid(oif, key->ceetm_classid, &tx_fqid,
+				     false, &oif_slot);
 	if (rc)
 		return rc;
 
@@ -3980,7 +3993,9 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 		goto out_unlock;
 	}
 	if (ask_is_ceetm_fqid(tx_fqid)) {
-		if (h->noconf_tx[oif_slot].ceetm_fqid != tx_fqid) {
+		if (!h->noconf_tx[oif_slot].dev ||
+		    !dpaa_ceetm_fqid_is_live(h->noconf_tx[oif_slot].dev,
+					     tx_fqid)) {
 			rc = -EAGAIN;
 			goto out_unlock;
 		}
