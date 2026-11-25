@@ -18,7 +18,7 @@ ASK2 is **not a build variant**. The `default|ask|vpp` flavor split was
 retired 2026-06-14 and the `FLAVOR` variable removed 2026-07-26; this tree
 moved from `kernel/flavors/ask/` to `kernel/ask/` at the same time. `ask.ko`
 ships in every image, dormant until
-`set interfaces ethernet eth<n> offload ask` engages it per-interface at
+`set interfaces ethernet eth<n> offload ipv4|ipv6` engages it per-interface at
 runtime. The 210-series FMan microcode (loaded by U-Boot from SPI flash on
 every shipped Mono Gateway) is unchanged — ASK2 sits on top of it without
 touching the binary.
@@ -70,8 +70,11 @@ Earlier revisions of this document described `askd`, `ask-load`, and
 `/dev/cdx_ctrl` and `/etc/cdx_*.xml` ABI-compat shims. **None of that was
 built and none of it is planned.** ASK2's control plane is the kernel module
 plus the VyOS CLI: configuration through
-`set interfaces ethernet eth<n> offload ask`, observability through
-`show interfaces ethernet eth<n> offload ask flows` (a thin `ynl` wrapper).
+`set interfaces ethernet eth<n> offload ipv4|ipv6`, observability through
+`show offload config`, `show offload flow`,
+`show interfaces ethernet eth<n> offload ask flows` (thin `ynl` wrappers), and
+the optional RFC 7011 UDP exporter `ask-ipfix-exporter`
+(`board/scripts/ask-ipfix-exporter.py`).
 The `userspace/askd/` directory is a leftover placeholder.
 
 ## KUnit debug builds (T-M8-5, 2026-08-28)
