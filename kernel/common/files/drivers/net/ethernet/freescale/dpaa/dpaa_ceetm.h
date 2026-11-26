@@ -38,6 +38,8 @@ void dpaa_fd_release(const struct net_device *net_dev,
 
 int dpaa_ceetm_setup_htb(struct net_device *net_dev, void *type_data);
 
+int dpaa_ceetm_setup_red(struct net_device *net_dev, void *type_data);
+
 int dpaa_ceetm_setup_dscp_block(struct net_device *net_dev,
 				struct flow_block_offload *f);
 
@@ -53,9 +55,19 @@ u16 dpaa_ceetm_select_queue(struct net_device *net_dev, struct sk_buff *skb,
 
 void dpaa_ceetm_update_mtu(struct dpaa_priv *priv, unsigned int mtu);
 
+ssize_t dpaa_ceetm_wbfs_hash_show(struct net_device *net_dev, char *buf);
+ssize_t dpaa_ceetm_wbfs_hash_store(struct net_device *net_dev,
+				   const char *buf, size_t count);
+
 #else /* !CONFIG_DPAA_HW_CEETM */
 
 static inline int dpaa_ceetm_setup_htb(struct net_device *net_dev,
+				       void *type_data)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int dpaa_ceetm_setup_red(struct net_device *net_dev,
 				       void *type_data)
 {
 	return -EOPNOTSUPP;

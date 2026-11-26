@@ -3180,6 +3180,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # F-329: G10 Phase 4 HWP->PLCR->downstream ingress policer coexistence + per-port slots.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_329.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-g10-phase4-policer.py" 2>&1
+    # F-330: G10 Phase 5a frame-mode CEETM WRED (TC_SETUP_QDISC_RED) + A458 plain-FQ drain.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_330.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-g10-phase5-wred.py" 2>&1
+    # F-331: G10 Phase 5b QMan CEETM WBFS group/weight API + 5-tuple hash spreading.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_331.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-g10-phase5b-wbfs.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_prepared_disarm,fman_arm_table 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-keygen-window.py" "$(pwd)" 2>&1

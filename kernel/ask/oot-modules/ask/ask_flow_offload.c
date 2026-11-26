@@ -7548,17 +7548,30 @@ static void ask_flow_offload_stats_cb(struct net_device *dev,
 }
 
 static bool ask_tc_qdisc_is_soft(struct net_device *dev);
+static bool ask_tc_qdisc_withdraw_dev(struct net_device *dev);
+static bool ask_tc_qdisc_withdraw_retry;
 
 static int ask_flow_offload_egress_change(struct net_device *dev,
 					  enum dpaa_egress_event ev, u32 fqid)
 {
-	/* G10 Phase 3: synchronously refresh soft-qdisc/clsact state BEFORE
-	 * lifting ceetm_transitioning on POST_CHANGE so removing HTB offload
-	 * while clsact egress filters remain never opens a 1 s bypass window. */
-	if (ev == DPAA_EGRESS_CEETM_POST_CHANGE && dev)
-		ask_hw_set_dev_soft_qdisc(dev->ifindex,
-					  ask_tc_qdisc_is_soft(dev));
-	return ask_hw_egress_ceetm_event(dev, (int)ev, fqid);
+	int rc;
+
+	/* G10 Phase 3 / Phase 5a: synchronously refresh soft-qdisc state BEFORE
+	 * lifting ceetm_transitioning on POST_CHANGE; if a qdisc replacement
+	 * (e.g. offloaded RED -> cake/fq_codel/red-ecn) transitioned the port
+	 * to soft_qdisc == true, withdraw existing HW flows synchronously and
+	 * arm retry on any incomplete withdrawal (P0-1 fix). */
+	if (ev == DPAA_EGRESS_CEETM_POST_CHANGE && dev) {
+		bool soft = ask_tc_qdisc_is_soft(dev);
+		bool changed = ask_hw_set_dev_soft_qdisc(dev->ifindex, soft);
+
+		if (soft && changed && !ask_tc_qdisc_withdraw_dev(dev))
+			WRITE_ONCE(ask_tc_qdisc_withdraw_retry, true);
+	}
+	rc = ask_hw_egress_ceetm_event(dev, (int)ev, fqid);
+	if (ev == DPAA_EGRESS_CEETM_PRE_CHANGE && rc)
+		WRITE_ONCE(ask_tc_qdisc_withdraw_retry, true);
+	return rc;
 }
 
 /*
@@ -7676,14 +7689,21 @@ static bool ask_tc_qdisc_is_soft(struct net_device *dev)
 		return false;
 	if (!strcmp(q->ops->id, "htb") && (q->flags & TCQ_F_OFFLOADED) &&
 	    dpaa_ceetm_is_active(dev)) {
+		/* Fail closed if a rejected leaf RED (e.g. ECN) is pending
+		 * graft before dev_queue->qdisc_sleeping is updated (P0-2). */
+		if (dpaa_ceetm_red_soft_pending(dev))
+			return true;
 		/* An offloaded HTB root is safe only if no user-configured
-		 * software child qdisc (non-zero handle) sits on its leaves. */
+		 * software child qdisc (non-zero handle) sits on its leaves;
+		 * hardware-offloaded CEETM WRED (sch_red) leaves stay HW. */
 		for (i = 0; i < dev->num_tx_queues; i++) {
 			struct Qdisc *cq;
 
 			cq = rtnl_dereference(netdev_get_tx_queue(dev, i)->qdisc_sleeping);
 			if (cq && cq->enqueue && !(cq->flags & TCQ_F_BUILTIN) &&
-			    cq->handle != 0)
+			    cq->handle != 0 &&
+			    !(cq->ops && !strcmp(cq->ops->id, "red") &&
+			      dpaa_ceetm_red_qdisc_offloaded(dev, cq->handle)))
 				return true;
 		}
 		return false;
@@ -7692,7 +7712,6 @@ static bool ask_tc_qdisc_is_soft(struct net_device *dev)
 }
 
 static bool ask_tc_qdisc_stopped;
-static bool ask_tc_qdisc_withdraw_retry;
 static void ask_tc_qdisc_workfn(struct work_struct *work);
 static DECLARE_DELAYED_WORK(ask_tc_qdisc_work, ask_tc_qdisc_workfn);
 

@@ -77,7 +77,7 @@ def check_sources() -> None:
         ASK_HW_C,
         [
             "dpaa_ceetm_fqid_is_live(",
-            "dpaa_ceetm_offload_egress_fqid(phys, classid,",
+            "dpaa_ceetm_offload_egress_fqid_hashed(",
             "key->ceetm_classid",
         ],
         "ask_hw.c",

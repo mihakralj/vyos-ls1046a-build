@@ -27,6 +27,29 @@
 #define _LINUX_FSL_DPAA_FLOW_OFFLOAD_H
 
 #include <linux/types.h>
+#include <linux/jhash.h>
+#include <linux/string.h>
+#include <linux/byteorder/generic.h>
+
+/* G10 Phase 5b: deterministic 5-tuple hash shared verbatim by SW
+ * (dpaa_ceetm_select_queue) and HW (ask_hw_flow_key_hash) so unmarked flows
+ * land on the exact same WBFS CQ across SW->HW offload handoff. */
+static inline u32 dpaa_ceetm_flow_hash_5tuple(u8 ip_ver, u8 l4_proto,
+					      const void *saddr,
+					      const void *daddr,
+					      __be16 sport, __be16 dport)
+{
+	u32 words[10] = { 0 };
+	size_t alen = (ip_ver == 6) ? 16 : 4;
+
+	if (saddr)
+		memcpy(&words[0], saddr, alen);
+	if (daddr)
+		memcpy(&words[4], daddr, alen);
+	words[8] = ((u32)ntohs(sport) << 16) | ntohs(dport);
+	words[9] = ((u32)ip_ver << 8) | l4_proto;
+	return jhash2(words, ARRAY_SIZE(words), 0x9e3779b9U);
+}
 
 struct module;
 struct net_device;
@@ -98,15 +121,28 @@ dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
 #if IS_ENABLED(CONFIG_DPAA_HW_CEETM)
 int dpaa_ceetm_offload_egress_fqid(struct net_device *dev, u32 classid,
 				   u32 *fqid);
+int dpaa_ceetm_offload_egress_fqid_hashed(struct net_device *dev, u32 classid,
+					  u32 flow_hash, u32 *fqid);
 bool dpaa_ceetm_is_active(struct net_device *dev);
 bool dpaa_ceetm_fqid_is_live(struct net_device *dev, u32 fqid);
 bool dpaa_ceetm_dscp_map_active(struct net_device *dev);
 bool dpaa_ceetm_dscp_cookie_offloaded(struct net_device *dev,
 				      unsigned long cookie);
 bool dpaa_ceetm_classid_is_live(struct net_device *dev, u32 classid);
+bool dpaa_ceetm_red_qdisc_offloaded(struct net_device *dev, u32 handle);
+bool dpaa_ceetm_red_soft_pending(struct net_device *dev);
 #else
 static inline int dpaa_ceetm_offload_egress_fqid(struct net_device *dev,
 						 u32 classid, u32 *fqid)
+{
+	if (fqid)
+		*fqid = 0;
+	return 0;
+}
+static inline int dpaa_ceetm_offload_egress_fqid_hashed(struct net_device *dev,
+							u32 classid,
+							u32 flow_hash,
+							u32 *fqid)
 {
 	if (fqid)
 		*fqid = 0;
@@ -131,6 +167,15 @@ static inline bool dpaa_ceetm_dscp_cookie_offloaded(struct net_device *dev,
 }
 static inline bool dpaa_ceetm_classid_is_live(struct net_device *dev,
 					      u32 classid)
+{
+	return false;
+}
+static inline bool dpaa_ceetm_red_qdisc_offloaded(struct net_device *dev,
+						  u32 handle)
+{
+	return false;
+}
+static inline bool dpaa_ceetm_red_soft_pending(struct net_device *dev)
 {
 	return false;
 }

@@ -132,10 +132,11 @@ static bool ask_hw_dev_has_soft_qdisc(u32 ifindex)
 	(void)ifindex;
 	return false;
 }
-static int dpaa_ceetm_offload_egress_fqid(struct net_device *dev, u32 classid,
-					  u32 *out_fqid)
+static int dpaa_ceetm_offload_egress_fqid_hashed(struct net_device *dev,
+						 u32 classid, u32 flow_hash,
+						 u32 *out_fqid)
 {
-	(void)dev; (void)classid; (void)out_fqid;
+	(void)dev; (void)classid; (void)flow_hash; (void)out_fqid;
 	return -ENOENT;
 }
 static void netdev_hold(struct net_device *dev, int *tracker, int gfp)
@@ -216,12 +217,12 @@ static int check_ask_reused_index(void)
 	reset_egress();
 	memset(&hardware, 0, sizeof(hardware));
 	lookup_dev = &virtual;
-	if (ask_hw_resolve_oif_fqid(5, 0, &after_move, false, NULL) >= 0) {
+	if (ask_hw_resolve_oif_fqid(5, 0, 0, &after_move, false, NULL) >= 0) {
 		puts("ASK cold non-DPAA control: FAILED");
 		return 1;
 	}
 	lookup_dev = &old;
-	if (ask_hw_resolve_oif_fqid(5, 0, &old_fqid, true, NULL)) {
+	if (ask_hw_resolve_oif_fqid(5, 0, 0, &old_fqid, true, NULL)) {
 		puts("ASK physical egress allocation control: FAILED");
 		return 1;
 	}
@@ -231,7 +232,7 @@ static int check_ask_reused_index(void)
 #ifdef LIFETIME_ORACLE_CONTROLS
 	memset(hardware.noconf_tx, 0, sizeof(hardware.noconf_tx));
 #endif
-	rc = ask_hw_resolve_oif_fqid(5, 0, &after_move, false, NULL);
+	rc = ask_hw_resolve_oif_fqid(5, 0, 0, &after_move, false, NULL);
 	if (!rc) {
 		printf("ASK reused ifindex: NOT CONTAINED (non-DPAA device returned FQ %u%s)\n",
 		       after_move, after_move == old_fqid ? " from old device" : "");

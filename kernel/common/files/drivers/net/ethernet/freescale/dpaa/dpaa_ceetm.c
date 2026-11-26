@@ -42,8 +42,10 @@
 #include <linux/ipv6.h>
 #include <linux/if_vlan.h>
 #include <net/dsfield.h>
+#include <net/flow_dissector.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
+#include <net/red.h>
 #include <soc/fsl/qman.h>
 #include <linux/fsl/fman_pcd.h>
 
@@ -72,6 +74,12 @@ static void dpaa_ceetm_dscp_teardown_post(struct net_device *net_dev,
 #define DPAA_CEETM_MAX_CHANS		32
 /* Strict-priority CQs per CEETM channel (0 = highest, 7 = lowest). */
 #define DPAA_CEETM_MAX_CQ_PRIO		8
+/* Grouped WBFS CQs per CEETM channel (combined Group A: CQs 8..15). */
+#define DPAA_CEETM_WBFS_START		8
+#define DPAA_CEETM_MAX_CQ_TOTAL		16
+/* Place combined 8-CQ WBFS Group A below strict CQs 0..6 and above CQ 7. */
+#define DPAA_CEETM_WBFS_PRIO_A		6
+#define DPAA_CEETM_WBFS_MASK		0xff00U
 
 /*
  * Silicon-proven LFQ dequeue-context-A values:
@@ -114,27 +122,38 @@ static void dpaa_ceetm_dscp_teardown_post(struct net_device *net_dev,
  * struct dpaa_ceetm_chan - one CEETM channel and its dual-rate shaper
  * @channel: the claimed QMan CEETM channel under the port LNI
  * @classid: HTB minor of the root-level class owning this channel (0 for def)
- * @cq_mask: bitmask of strict-priority CQ levels (0..7) currently claimed
+ * @cq_mask: bitmask of claimed CQs (bits 0..7 strict, bits 8..15 WBFS Group A)
+ * @live_cq_mask: bitmask of live (non-quarantined) CQs on this channel
  * @active_cqs: number of active leaves attached to this channel
  * @shaped: true if the channel dual-rate shaper is enabled
  * @is_inner: true once TC_HTB_LEAF_TO_INNER promoted this channel to inner
+ * @wbfs_group_cfg: true once combined WBFS Group A has been programmed on @channel
  * @quarantined: true if any CQ on this channel failed teardown/drain
  */
 struct dpaa_ceetm_chan {
 	struct qm_ceetm_channel *channel;
 	u32 classid;
-	u8 cq_mask;
+	u16 cq_mask;
+	u16 live_cq_mask;
 	u8 active_cqs;
 	bool shaped;
 	bool is_inner;
+	bool wbfs_group_cfg;
 	bool quarantined;
 };
+
+/* Frame-mode WRED constants (G10 Phase 5a; QMan CCGR Pn/SA wire bounds). */
+#define DPAA_CEETM_WRED_MAXP_UNITS	256U
+#define DPAA_CEETM_WRED_SA_MAX		127U
+#define DPAA_CEETM_RED_FRAME_OVERHEAD	(ETH_HLEN + ETH_FCS_LEN + VLAN_HLEN)
 
 /**
  * struct dpaa_ceetm_class - one CEETM class queue (CQ 0..7) and its two LFQs
  * @chan: owning CEETM channel (1-level own channel or 2-level parent channel)
- * @cq_prio: strict-priority CQ index (0..7) on @chan
- * @ccg: frame-mode class congestion group (tail-drop) at @cq_prio
+ * @cq_prio: CQ index (0..7 strict-priority, or 8..15 WBFS Group A) on @chan
+ * @is_wbfs: true if this leaf uses a grouped WBFS CQ (8..15) rather than strict
+ * @wbfs_weight: configured WBFS scheduler weight (1..248 when @is_wbfs, else 0)
+ * @ccg: frame-mode class congestion group (tail-drop / WRED) at @cq_prio
  * @cq: strict-priority class queue at @cq_prio
  * @lfq: logical frame queue for software TX (dpaa_xmit, confirmed)
  * @hw_lfq: logical frame queue for ASK2 HW FE ENQUEUE_PKT (no-confirm, EBD=1)
@@ -143,10 +162,25 @@ struct dpaa_ceetm_chan {
  * @classid: TC_H_MIN(classid) of this HTB leaf (0 for the default channel)
  * @used: published last; gates both dpaa_xmit and ASK2 offload lookups
  * @quarantined: true if teardown quiesce or CQ drain failed (retain-on-fault)
+ * @red_active: true while an offloaded frame-mode RED qdisc owns this CQ's CCG
+ * @red_displaced: true during tc qdisc replace while old RED awaits DESTROY
+ * @red_handle: active offloaded RED qdisc handle
+ * @red_displaced_handle: prior RED qdisc handle displaced by replace
+ * @red_min: requested RED min threshold in bytes
+ * @red_max: requested RED max threshold in bytes
+ * @red_prob: requested RED max_P (0..2^32-1)
+ * @red_limit: requested RED hard limit in bytes
+ * @red_displaced_min: displaced RED min threshold in bytes
+ * @red_displaced_max: displaced RED max threshold in bytes
+ * @red_displaced_prob: displaced RED max_P
+ * @red_displaced_limit: displaced RED hard limit in bytes
+ * @red_soft_pending_handle: handle of a rejected leaf RED pending graft/destroy
  */
 struct dpaa_ceetm_class {
 	struct dpaa_ceetm_chan *chan;
 	u8 cq_prio;
+	bool is_wbfs;
+	u32 wbfs_weight;
 	struct qm_ceetm_ccg *ccg;
 	struct qm_ceetm_cq *cq;
 	struct qm_ceetm_lfq *lfq;
@@ -156,6 +190,19 @@ struct dpaa_ceetm_class {
 	u32 classid;
 	bool used;
 	bool quarantined;
+	bool red_active;
+	bool red_displaced;
+	u32 red_handle;
+	u32 red_displaced_handle;
+	u32 red_min;
+	u32 red_max;
+	u32 red_prob;
+	u32 red_limit;
+	u32 red_displaced_min;
+	u32 red_displaced_max;
+	u32 red_displaced_prob;
+	u32 red_displaced_limit;
+	u32 red_soft_pending_handle;
 };
 
 /**
@@ -276,23 +323,157 @@ static int dpaa_ceetm_set_ccg_frames(struct qm_ceetm_ccg *ccg, u32 frames)
 	ccgp.td_mode = 1;	/* threshold-based tail-drop */
 	ccgp.oal = 0;
 	qm_cgr_cs_thres_set64(&ccgp.td_thres, frames, 0);
+	/* Explicitly clear WRED enables so plain tail-drop / quarantine never
+	 * retains a prior curve on this CCG. */
 	return qman_ceetm_ccg_set(ccg,
 				  QM_CCGR_WE_MODE | QM_CCGR_WE_TD_EN |
 				  QM_CCGR_WE_TD_MODE | QM_CCGR_WE_TD_THRES |
-				  QM_CCGR_WE_OAL, &ccgp);
+				  QM_CCGR_WE_OAL |
+				  QM_CCGR_WE_WR_EN_G | QM_CCGR_WE_WR_EN_Y |
+				  QM_CCGR_WE_WR_EN_R, &ccgp);
 }
 
-/* Rebalance frame-mode CCGR limits across all active (non-quarantined) CQs. */
-static void dpaa_ceetm_rebalance_ccgs(struct dpaa_priv *priv,
+static u32 dpaa_ceetm_wred_maxp(u32 probability)
+{
+	u32 maxp = (u32)(((u64)probability * DPAA_CEETM_WRED_MAXP_UNITS) >> 32);
+
+	if (maxp < 4U)
+		maxp = 4U;
+	if (maxp > DPAA_CEETM_WRED_MAXP_UNITS)
+		maxp = DPAA_CEETM_WRED_MAXP_UNITS;
+	return maxp & ~3U;
+}
+
+static u32 dpaa_ceetm_wred_min_band(u32 probability)
+{
+	return max_t(u32, 2U,
+		     DIV_ROUND_UP(dpaa_ceetm_wred_maxp(probability),
+				  DPAA_CEETM_WRED_SA_MAX));
+}
+
+/* Encode QMan CCGR WR_PARM_{G,Y,R}:
+ *   MA[24-31], Mn[19-23], SA[12-18], Sn[6-11], Pn[0-5] (big-endian wire word).
+ *   MaxTH = MA * 2^Mn, Slope = SA / 2^Sn (SA in [64..127]), MaxP = 4*(Pn+1). */
+static void dpaa_ceetm_wred_encode_parm(u32 min_frames, u32 max_frames,
+					u32 probability,
+					struct qm_cgr_wr_parm *parm)
+{
+	u32 maxp = dpaa_ceetm_wred_maxp(probability);
+	u32 pn = (maxp / 4U) - 1U;
+	u32 ma = max_frames;
+	u32 mn = 0;
+	u32 maxth, span;
+	u64 num = maxp;
+	u64 sa;
+	u32 sn = 0;
+	u32 host_word;
+
+	while (ma > 0xffU && mn < 0x1fU) {
+		ma >>= 1;
+		mn++;
+	}
+	if (ma > 0xffU)
+		ma = 0xffU;
+
+	maxth = ma << mn;
+	span = maxth > min_frames ? maxth - min_frames : 1U;
+
+	while (sn < 40U && num < 64ULL * span) {
+		num <<= 1;
+		sn++;
+	}
+	sa = div64_u64(num, span);
+	if (sa < 64ULL)
+		sa = 64ULL;
+	if (sa > DPAA_CEETM_WRED_SA_MAX)
+		sa = DPAA_CEETM_WRED_SA_MAX;
+
+	host_word = ((ma & 0xffU) << 24) |
+		    ((mn & 0x1fU) << 19) |
+		    (((u32)sa & 0x7fU) << 12) |
+		    ((sn & 0x3fU) << 6) |
+		    (pn & 0x3fU);
+	parm->word = cpu_to_be32(host_word);
+}
+
+static u32 dpaa_ceetm_red_frame_bytes(unsigned int mtu)
+{
+	return min_t(unsigned int, mtu ? mtu : ETH_DATA_LEN, ETH_DATA_LEN) +
+	       DPAA_CEETM_RED_FRAME_OVERHEAD;
+}
+
+static int dpaa_ceetm_set_ccg_wred(struct dpaa_ceetm_class *cls, u32 share,
+				   unsigned int mtu)
+{
+	struct qm_ceetm_ccg_params ccgp;
+	u32 frame_bytes = dpaa_ceetm_red_frame_bytes(mtu);
+	u32 want = max_t(u32, cls->red_limit / frame_bytes, 1U);
+	u32 depth = min_t(u32, want, max_t(u32, share, 1U));
+	u64 lo = cls->red_min / frame_bytes;
+	u64 hi = cls->red_max / frame_bytes;
+	u32 min_band = dpaa_ceetm_wred_min_band(cls->red_prob);
+
+	if (!cls->ccg || !cls->red_limit || !cls->red_max ||
+	    cls->red_max <= cls->red_min)
+		return -EINVAL;
+
+	if (depth < want) {
+		lo = div64_u64(lo * depth, want);
+		hi = div64_u64(hi * depth, want);
+	}
+	if (lo >= depth)
+		lo = depth - 1U;
+	hi = max_t(u64, hi, lo + min_band);
+
+	memset(&ccgp, 0, sizeof(ccgp));
+	ccgp.mode = 1;		/* frame mode only (A337 safety) */
+	ccgp.td_en = 1;
+	ccgp.td_mode = 1;
+	ccgp.oal = 0;
+	qm_cgr_cs_thres_set64(&ccgp.td_thres, depth, 0);
+
+	dpaa_ceetm_wred_encode_parm((u32)lo, (u32)hi, cls->red_prob,
+				    &ccgp.wr_parm_g);
+	ccgp.wr_parm_y = ccgp.wr_parm_g;
+	ccgp.wr_parm_r = ccgp.wr_parm_g;
+	ccgp.wr_en_g = 1;
+	ccgp.wr_en_y = 1;
+	ccgp.wr_en_r = 1;
+
+	return qman_ceetm_ccg_set(cls->ccg,
+				  QM_CCGR_WE_MODE | QM_CCGR_WE_TD_EN |
+				  QM_CCGR_WE_TD_MODE | QM_CCGR_WE_TD_THRES |
+				  QM_CCGR_WE_OAL |
+				  QM_CCGR_WE_WR_EN_G | QM_CCGR_WE_WR_EN_Y |
+				  QM_CCGR_WE_WR_EN_R |
+				  QM_CCGR_WE_WR_PARM_G | QM_CCGR_WE_WR_PARM_Y |
+				  QM_CCGR_WE_WR_PARM_R, &ccgp);
+}
+
+static void dpaa_ceetm_clear_red_state(struct dpaa_ceetm_class *cls)
+{
+	smp_store_release(&cls->red_active, false);
+	WRITE_ONCE(cls->red_handle, 0);
+	cls->red_displaced = false;
+	cls->red_displaced_handle = 0;
+}
+
+static void dpaa_ceetm_red_sync_ask(struct net_device *net_dev,
+				    bool withdraw_hw);
+
+/* Rebalance frame-mode CCGR limits (and active WRED curves) across all active
+ * (non-quarantined) CQs. Returns true if any RED leaf was demoted on HW error. */
+static bool dpaa_ceetm_rebalance_ccgs(struct dpaa_priv *priv,
 				      struct dpaa_ceetm *ceetm,
 				      unsigned int mtu)
 {
 	unsigned int n = dpaa_ceetm_active_cqs(ceetm);
+	bool demoted = false;
 	u32 budget, share;
 	int i;
 
 	if (!n)
-		return;
+		return false;
 	budget = dpaa_ceetm_port_frame_budget(priv, mtu);
 	/* Clamp at 1 (not MIN_CQ_FRAMES) so an MTU increase never pushes the
 	 * aggregate per-port depth above the half-RX-pool / XSFDR budget. */
@@ -300,9 +481,30 @@ static void dpaa_ceetm_rebalance_ccgs(struct dpaa_priv *priv,
 
 	if (ceetm->def.ccg && !ceetm->def.quarantined)
 		dpaa_ceetm_set_ccg_frames(ceetm->def.ccg, share);
-	for (i = 0; i < DPAA_CEETM_MAX_TXQS; i++)
-		if (ceetm->leaf[i].ccg && !ceetm->leaf[i].quarantined)
-			dpaa_ceetm_set_ccg_frames(ceetm->leaf[i].ccg, share);
+	for (i = 0; i < DPAA_CEETM_MAX_TXQS; i++) {
+		struct dpaa_ceetm_class *cls = &ceetm->leaf[i];
+
+		if (!cls->ccg || cls->quarantined)
+			continue;
+		if (cls->red_active) {
+			u32 old_handle = cls->red_handle;
+
+			if (dpaa_ceetm_set_ccg_wred(cls, share, mtu)) {
+				dpaa_ceetm_clear_red_state(cls);
+				WRITE_ONCE(cls->red_soft_pending_handle,
+					   old_handle);
+				dpaa_ceetm_set_ccg_frames(cls->ccg, share);
+				demoted = true;
+				if (cls->net_dev)
+					netdev_warn(cls->net_dev,
+						    "CEETM: WRED rebalance failed on class 0x%x; reverted to tail-drop\n",
+						    cls->classid);
+			}
+		} else {
+			dpaa_ceetm_set_ccg_frames(cls->ccg, share);
+		}
+	}
+	return demoted;
 }
 
 void dpaa_ceetm_update_mtu(struct dpaa_priv *priv, unsigned int mtu)
@@ -313,7 +515,8 @@ void dpaa_ceetm_update_mtu(struct dpaa_priv *priv, unsigned int mtu)
 	ceetm = priv->ceetm;
 	if (!ceetm)
 		return;
-	dpaa_ceetm_rebalance_ccgs(priv, ceetm, mtu);
+	if (dpaa_ceetm_rebalance_ccgs(priv, ceetm, mtu))
+		dpaa_ceetm_red_sync_ask(priv->net_dev, true);
 }
 
 /* Decode an HTB classid or mark (either major:minor matching ceetm->htb_maj,
@@ -373,10 +576,97 @@ static struct dpaa_ceetm_chan *dpaa_ceetm_find_inner_chan(struct dpaa_ceetm *cee
 	return NULL;
 }
 
+/* Deterministic SW 5-tuple hash using the exact same dpaa_ceetm_flow_hash_5tuple()
+ * helper as ask_hw_flow_key_hash(), so unmarked flows stay on the identical WBFS
+ * CQ across SW->HW offload handoff (zero reordering on transition). */
+static u32 dpaa_ceetm_skb_flow_hash(const struct sk_buff *skb)
+{
+	struct flow_keys keys;
+
+	/* Use STOP_BEFORE_ENCAP (not STOP_AT_FLOW_LABEL) so IPv6 packets with
+	 * non-zero flow labels still dissect L4 ports, matching ask_hw.c. */
+	if (!skb_flow_dissect_flow_keys(skb, &keys,
+					FLOW_DISSECTOR_F_STOP_BEFORE_ENCAP))
+		return 0;
+
+	if (keys.control.addr_type == FLOW_DISSECTOR_KEY_IPV4_ADDRS)
+		return dpaa_ceetm_flow_hash_5tuple(4, keys.basic.ip_proto,
+						   &keys.addrs.v4addrs.src,
+						   &keys.addrs.v4addrs.dst,
+						   keys.ports.src,
+						   keys.ports.dst);
+	if (keys.control.addr_type == FLOW_DISSECTOR_KEY_IPV6_ADDRS)
+		return dpaa_ceetm_flow_hash_5tuple(6, keys.basic.ip_proto,
+						   &keys.addrs.v6addrs.src,
+						   &keys.addrs.v6addrs.dst,
+						   keys.ports.src,
+						   keys.ports.dst);
+	return 0;
+}
+
+/* Lockless equal-weight WBFS sibling selector (G10 Phase 5b).
+ * Opt-in only (priv->ceetm_wbfs_hash == true via sysfs ceetm_wbfs_hash):
+ * by default equal-weight tenant WBFS classes stay strictly isolated.
+ * When opted in and an unmarked flow falls back to a WBFS @def_slot on an
+ * inner channel, spread deterministically across all live, non-quarantined
+ * WBFS leaves on that channel matching @def_slot's weight. */
+static int dpaa_ceetm_pick_wbfs_slot(const struct dpaa_priv *priv,
+				     const struct dpaa_ceetm *ceetm,
+				     int def_slot, u32 flow_hash)
+{
+	struct dpaa_ceetm_chan *target_chan;
+	int by_cq[DPAA_CEETM_MAX_CQ_TOTAL - DPAA_CEETM_WBFS_START];
+	int pool[DPAA_CEETM_MAX_CQ_TOTAL - DPAA_CEETM_WBFS_START];
+	u32 weight;
+	int i, n_pool = 0;
+
+	if (!priv || !READ_ONCE(priv->ceetm_wbfs_hash))
+		return def_slot;
+	if (def_slot < 0 || def_slot >= DPAA_CEETM_MAX_TXQS)
+		return def_slot;
+	if (!READ_ONCE(ceetm->leaf[def_slot].is_wbfs))
+		return def_slot;
+	target_chan = READ_ONCE(ceetm->leaf[def_slot].chan);
+	weight = READ_ONCE(ceetm->leaf[def_slot].wbfs_weight);
+	if (!target_chan || !READ_ONCE(target_chan->is_inner) || !weight)
+		return def_slot;
+
+	for (i = 0; i < ARRAY_SIZE(by_cq); i++)
+		by_cq[i] = -1;
+
+	for (i = 0; i < DPAA_CEETM_MAX_TXQS; i++) {
+		u8 cq;
+
+		if (!smp_load_acquire(&ceetm->leaf[i].used))
+			continue;
+		if (READ_ONCE(ceetm->leaf[i].quarantined))
+			continue;
+		if (!READ_ONCE(ceetm->leaf[i].is_wbfs))
+			continue;
+		if (READ_ONCE(ceetm->leaf[i].chan) != target_chan)
+			continue;
+		if (READ_ONCE(ceetm->leaf[i].wbfs_weight) != weight)
+			continue;
+		cq = READ_ONCE(ceetm->leaf[i].cq_prio);
+		if (cq >= DPAA_CEETM_WBFS_START && cq < DPAA_CEETM_MAX_CQ_TOTAL)
+			by_cq[cq - DPAA_CEETM_WBFS_START] = i;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(by_cq); i++)
+		if (by_cq[i] >= 0)
+			pool[n_pool++] = by_cq[i];
+
+	if (n_pool <= 1)
+		return def_slot;
+	return pool[flow_hash % (u32)n_pool];
+}
+
 /*
  * ndo_select_queue: steer an HTB-offloaded class to its leaf Tx queue.
  * Matches skb->priority first (skbedit / nft meta priority), then skb->mark
- * (symmetric with ASK2 HW ct->mark steering), then ceetm->defcls.
+ * (symmetric with ASK2 HW ct->mark steering), then DSCP map, then ceetm->defcls
+ * (spreading across equal-weight WBFS siblings when ceetm_wbfs_hash is enabled,
+ * using the exact same 5-tuple hash as ASK2 HW).
  */
 u16 dpaa_ceetm_select_queue(struct net_device *net_dev, struct sk_buff *skb,
 			    struct net_device *sb_dev)
@@ -404,8 +694,13 @@ u16 dpaa_ceetm_select_queue(struct net_device *net_dev, struct sk_buff *skb,
 		if (classid)
 			slot = dpaa_ceetm_find_live_slot(ceetm, classid);
 	}
-	if (slot < 0 && ceetm->defcls)
+	if (slot < 0 && ceetm->defcls) {
 		slot = dpaa_ceetm_find_live_slot(ceetm, ceetm->defcls);
+		if (slot >= 0 && READ_ONCE(priv->ceetm_wbfs_hash))
+			slot = dpaa_ceetm_pick_wbfs_slot(
+				priv, ceetm, slot,
+				dpaa_ceetm_skb_flow_hash(skb));
+	}
 
 	if (slot >= 0)
 		return ceetm->base_txq + slot;
@@ -466,8 +761,12 @@ static void dpaa_ceetm_quarantine_class(struct dpaa_ceetm_class *cls,
 {
 	smp_store_release(&cls->used, false);
 	WRITE_ONCE(cls->quarantined, true);
-	if (cls->chan)
+	dpaa_ceetm_clear_red_state(cls);
+	WRITE_ONCE(cls->red_soft_pending_handle, 0);
+	if (cls->chan) {
+		cls->chan->live_cq_mask &= ~BIT(cls->cq_prio);
 		cls->chan->quarantined = true;
+	}
 	if (cls->ccg)
 		dpaa_ceetm_set_ccg_frames(cls->ccg, DPAA_CEETM_PARKED_FRAMES);
 	if (cls->net_dev)
@@ -519,8 +818,10 @@ static int dpaa_ceetm_chan_build(struct net_device *net_dev,
 
 	ch->classid = classid;
 	ch->cq_mask = 0;
+	ch->live_cq_mask = 0;
 	ch->active_cqs = 0;
 	ch->is_inner = false;
+	ch->wbfs_group_cfg = false;
 	ch->quarantined = false;
 	return 0;
 
@@ -528,8 +829,10 @@ err_disable_shaper:
 	qman_ceetm_channel_disable_shaper(ch->channel);
 	ch->shaped = false;
 err_release_channel:
-	qman_ceetm_channel_release(ch->channel);
-	ch->channel = NULL;
+	if (qman_ceetm_channel_release(ch->channel))
+		ch->quarantined = true;
+	else
+		ch->channel = NULL;
 	return err;
 }
 
@@ -541,28 +844,62 @@ static void dpaa_ceetm_chan_destroy(struct dpaa_ceetm_chan *ch)
 		qman_ceetm_channel_disable_shaper(ch->channel);
 		ch->shaped = false;
 	}
-	qman_ceetm_channel_release(ch->channel);
+	if (qman_ceetm_channel_release(ch->channel)) {
+		ch->quarantined = true;
+		return;
+	}
 	ch->channel = NULL;
 	ch->classid = 0;
 	ch->cq_mask = 0;
+	ch->live_cq_mask = 0;
 	ch->is_inner = false;
+	ch->wbfs_group_cfg = false;
+}
+
+static int dpaa_ceetm_alloc_wbfs_cq(const struct dpaa_ceetm_chan *ch)
+{
+	int cq;
+
+	for (cq = DPAA_CEETM_WBFS_START; cq < DPAA_CEETM_MAX_CQ_TOTAL; cq++)
+		if (!(ch->cq_mask & BIT(cq)))
+			return cq;
+	return -ENOSPC;
 }
 
 /*
- * Build one strict-priority CQ (0..7), frame-mode CCG, and TWO LFQs
- * (lfq for SW dpaa_xmit and hw_lfq for ASK2 FE ENQUEUE_PKT) on @ch.
+ * Build one CQ (strict-priority 0..7 or WBFS Group A 8..15), frame-mode CCG,
+ * and TWO LFQs (lfq for SW dpaa_xmit and hw_lfq for ASK2 FE ENQUEUE_PKT) on @ch.
  */
 static int dpaa_ceetm_cq_build(struct net_device *net_dev,
 			       struct dpaa_ceetm_chan *ch,
 			       struct dpaa_ceetm_class *cls,
-			       u8 cq_prio, u32 ccg_frames)
+			       u8 cq_prio, bool is_wbfs, u32 wbfs_weight,
+			       u32 ccg_frames)
 {
+	struct qm_ceetm_weight_code wc = { 0, 0 };
+	bool had_wbfs = (ch->cq_mask & DPAA_CEETM_WBFS_MASK) != 0;
 	int err;
 
-	if (cq_prio >= DPAA_CEETM_MAX_CQ_PRIO)
+	if (is_wbfs) {
+		if (cq_prio < DPAA_CEETM_WBFS_START ||
+		    cq_prio >= DPAA_CEETM_MAX_CQ_TOTAL)
+			return -EINVAL;
+		err = qman_ceetm_ratio2wbfs(wbfs_weight, 1, &wc, 0);
+		if (err)
+			return err;
+	} else if (cq_prio >= DPAA_CEETM_MAX_CQ_PRIO) {
 		return -EINVAL;
+	}
 	if (ch->cq_mask & BIT(cq_prio))
 		return -EEXIST;
+
+	if (is_wbfs && !ch->wbfs_group_cfg) {
+		err = qman_ceetm_channel_set_group(ch->channel, 0,
+						   DPAA_CEETM_WBFS_PRIO_A,
+						   DPAA_CEETM_WBFS_PRIO_A);
+		if (err)
+			return err;
+	}
 
 	err = qman_ceetm_ccg_claim(&cls->ccg, ch->channel, cq_prio);
 	if (err)
@@ -572,16 +909,37 @@ static int dpaa_ceetm_cq_build(struct net_device *net_dev,
 	if (err)
 		goto err_release_ccg;
 
-	err = qman_ceetm_cq_claim(&cls->cq, ch->channel, cq_prio, cls->ccg);
+	if (is_wbfs)
+		err = qman_ceetm_cq_claim_A(&cls->cq, ch->channel, cq_prio,
+					    cls->ccg);
+	else
+		err = qman_ceetm_cq_claim(&cls->cq, ch->channel, cq_prio,
+					  cls->ccg);
 	if (err)
 		goto err_release_ccg;
 
-	err = qman_ceetm_channel_set_cq_cr_eligibility(ch->channel, cq_prio, 1);
-	if (err)
-		goto err_release_cq;
-	err = qman_ceetm_channel_set_cq_er_eligibility(ch->channel, cq_prio, 1);
-	if (err)
-		goto err_disable_elig;
+	if (is_wbfs) {
+		err = qman_ceetm_set_queue_weight(cls->cq, &wc);
+		if (err)
+			goto err_release_cq;
+		err = qman_ceetm_channel_set_group_cr_eligibility(ch->channel,
+								  0, 1);
+		if (err)
+			goto err_release_cq;
+		err = qman_ceetm_channel_set_group_er_eligibility(ch->channel,
+								  0, 1);
+		if (err)
+			goto err_disable_elig;
+	} else {
+		err = qman_ceetm_channel_set_cq_cr_eligibility(ch->channel,
+							       cq_prio, 1);
+		if (err)
+			goto err_release_cq;
+		err = qman_ceetm_channel_set_cq_er_eligibility(ch->channel,
+							       cq_prio, 1);
+		if (err)
+			goto err_disable_elig;
+	}
 
 	/* LFQ #1: software TX (dpaa_xmit, confirmed skb/XDP path). */
 	err = qman_ceetm_lfq_claim(&cls->lfq, cls->cq);
@@ -610,9 +968,14 @@ static int dpaa_ceetm_cq_build(struct net_device *net_dev,
 	if (err)
 		goto err_release_hw_lfq;
 
-	cls->chan = ch;
-	cls->cq_prio = cq_prio;
+	WRITE_ONCE(cls->chan, ch);
+	WRITE_ONCE(cls->cq_prio, cq_prio);
+	WRITE_ONCE(cls->is_wbfs, is_wbfs);
+	WRITE_ONCE(cls->wbfs_weight, is_wbfs ? wbfs_weight : 0);
+	if (is_wbfs)
+		ch->wbfs_group_cfg = true;
 	ch->cq_mask |= BIT(cq_prio);
+	ch->live_cq_mask |= BIT(cq_prio);
 	ch->active_cqs++;
 	return 0;
 
@@ -625,8 +988,19 @@ err_release_lfq:
 	qman_ceetm_lfq_release(cls->lfq);
 	cls->lfq = NULL;
 err_disable_elig:
-	qman_ceetm_channel_set_cq_cr_eligibility(ch->channel, cq_prio, 0);
-	qman_ceetm_channel_set_cq_er_eligibility(ch->channel, cq_prio, 0);
+	if (is_wbfs) {
+		if (!had_wbfs) {
+			qman_ceetm_channel_set_group_cr_eligibility(ch->channel,
+								    0, 0);
+			qman_ceetm_channel_set_group_er_eligibility(ch->channel,
+								    0, 0);
+		}
+	} else {
+		qman_ceetm_channel_set_cq_cr_eligibility(ch->channel,
+							 cq_prio, 0);
+		qman_ceetm_channel_set_cq_er_eligibility(ch->channel,
+							 cq_prio, 0);
+	}
 err_release_cq:
 	qman_ceetm_cq_release(cls->cq);
 	cls->cq = NULL;
@@ -636,14 +1010,40 @@ err_release_ccg:
 	return err;
 }
 
+/* Wait briefly for DCP0 to drain a departing non-last WBFS CQ naturally so
+ * sibling WBFS CQs are not stalled during normal leaf deletion. */
+static int dpaa_ceetm_wait_cq_empty(struct qm_ceetm_cq *cq, unsigned int ms)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(ms);
+	u32 frm_cnt = 1;
+	int err;
+
+	for (;;) {
+		err = qman_ceetm_cq_get_frm_cnt(cq, &frm_cnt);
+		if (err)
+			return err;
+		if (!frm_cnt)
+			return 0;
+		if (time_after_eq(jiffies, deadline))
+			return -ETIMEDOUT;
+		usleep_range(50, 100);
+	}
+}
+
 /* Release a CQ/LFQ pair (and optionally its owning channel if now empty).
  * Returns true if quarantined. */
 static bool dpaa_ceetm_destroy_class(struct dpaa_ceetm_class *cls,
 				     bool force_quarantine,
-				     bool release_empty_chan)
+				     bool release_empty_chan,
+				     bool tearing_down)
 {
 	struct dpaa_ceetm_chan *ch = cls->chan;
-	int drain_rc;
+	bool is_wbfs = cls->is_wbfs;
+	bool last_wbfs = is_wbfs && ch &&
+			 (tearing_down ||
+			  ((ch->live_cq_mask & DPAA_CEETM_WBFS_MASK) ==
+			   BIT(cls->cq_prio)));
+	int drain_rc = 0;
 
 	if (!cls->cq && !ch)
 		return false;
@@ -654,21 +1054,74 @@ static bool dpaa_ceetm_destroy_class(struct dpaa_ceetm_class *cls,
 		return true;
 	}
 
+	/* Flush remote-portal EQCRs + pending SW ERNs BEFORE checking/draining
+	 * the CQ so no late in-flight EQCR enqueue lands in cls->cq after we
+	 * observe it empty (P1-2 fix). */
+	if (cls->lfq)
+		qman_ceetm_drain_ern();
+
 	/* Stop DCP0 dequeues on this CQ before popping remaining frames so
-	 * CQ_PEEK_POP_XFDRREAD does not contend with active prefetch/dequeue. */
+	 * CQ_PEEK_POP_XFDRREAD does not contend with active prefetch/dequeue.
+	 * For a non-last WBFS CQ, Group A eligibility belongs to surviving
+	 * siblings too: park CCG and let DCP0 drain naturally first, falling
+	 * back to a brief Group A pause + pop only if frames remain. */
 	if (cls->cq && ch && ch->channel) {
-		qman_ceetm_channel_set_cq_cr_eligibility(ch->channel,
-							 cls->cq_prio, 0);
-		qman_ceetm_channel_set_cq_er_eligibility(ch->channel,
-							 cls->cq_prio, 0);
+		if (!is_wbfs) {
+			qman_ceetm_channel_set_cq_cr_eligibility(ch->channel,
+								 cls->cq_prio,
+								 0);
+			qman_ceetm_channel_set_cq_er_eligibility(ch->channel,
+								 cls->cq_prio,
+								 0);
+			drain_rc = dpaa_ceetm_drain_and_release_cq(cls);
+		} else if (last_wbfs) {
+			if (!tearing_down) {
+				int er_rc = qman_ceetm_channel_set_group_cr_eligibility(
+						ch->channel, 0, 0);
+				er_rc |= qman_ceetm_channel_set_group_er_eligibility(
+						ch->channel, 0, 0);
+				if (er_rc)
+					drain_rc = -EIO;
+			}
+			if (!drain_rc)
+				drain_rc = dpaa_ceetm_drain_and_release_cq(cls);
+		} else {
+			if (cls->ccg)
+				dpaa_ceetm_set_ccg_frames(cls->ccg,
+						DPAA_CEETM_PARKED_FRAMES);
+			if (dpaa_ceetm_wait_cq_empty(cls->cq, 50)) {
+				int dis_rc, ena_rc;
+
+				dis_rc = qman_ceetm_channel_set_group_cr_eligibility(
+					ch->channel, 0, 0);
+				dis_rc |= qman_ceetm_channel_set_group_er_eligibility(
+					ch->channel, 0, 0);
+				if (dis_rc) {
+					drain_rc = -EIO;
+				} else {
+					drain_rc = dpaa_ceetm_drain_and_release_cq(cls);
+				}
+				ena_rc = qman_ceetm_channel_set_group_cr_eligibility(
+					ch->channel, 0, 1);
+				ena_rc |= qman_ceetm_channel_set_group_er_eligibility(
+					ch->channel, 0, 1);
+				if (ena_rc) {
+					ch->quarantined = true;
+					drain_rc = -EIO;
+				}
+			}
+		}
 	}
 
-	/* Drain and free every frame still queued on the CQ BEFORE releasing
-	 * LFQs/CQ/channel. If drain fails, quarantine rather than leak/reuse. */
-	drain_rc = dpaa_ceetm_drain_and_release_cq(cls);
 	if (drain_rc) {
 		dpaa_ceetm_quarantine_class(cls, "CQ drain failed");
 		return true;
+	}
+
+	if (is_wbfs && cls->cq) {
+		struct qm_ceetm_weight_code def_wc = { 0, 0 };
+
+		qman_ceetm_set_queue_weight(cls->cq, &def_wc);
 	}
 
 	if (cls->hw_lfq) {
@@ -678,10 +1131,8 @@ static bool dpaa_ceetm_destroy_class(struct dpaa_ceetm_class *cls,
 		qman_ceetm_lfq_release(hw_lfq);
 	}
 	if (cls->lfq) {
-		/* Drain pending portal EQCRs and MR/SW-ERNs across all CPUs
-		 * before clearing fq_table[fq->idx], then wait an RCU grace
-		 * period so any in-flight ERN handler completes before cls or
-		 * ceetm can be reused or freed. */
+		/* Drain any residual MR/SW-ERNs before clearing fq_table[fq->idx],
+		 * then wait an RCU grace period before freeing/reusing cls. */
 		qman_ceetm_drain_ern();
 		qman_ceetm_destroy_fq(&cls->fq);
 		synchronize_rcu();
@@ -689,7 +1140,9 @@ static bool dpaa_ceetm_destroy_class(struct dpaa_ceetm_class *cls,
 		cls->lfq = NULL;
 	}
 	if (cls->cq) {
-		qman_ceetm_cq_release(cls->cq);
+		/* CQ is already verified empty/drained above; never invoke
+		 * unbounded CQ_PEEK_POP while Group A may be active on siblings. */
+		qman_ceetm_cq_release_drained(cls->cq);
 		cls->cq = NULL;
 	}
 	if (cls->ccg) {
@@ -698,13 +1151,20 @@ static bool dpaa_ceetm_destroy_class(struct dpaa_ceetm_class *cls,
 	}
 	if (ch) {
 		ch->cq_mask &= ~BIT(cls->cq_prio);
+		ch->live_cq_mask &= ~BIT(cls->cq_prio);
+		if (!(ch->cq_mask & DPAA_CEETM_WBFS_MASK))
+			ch->wbfs_group_cfg = false;
 		if (ch->active_cqs)
 			ch->active_cqs--;
 		if (release_empty_chan && ch->active_cqs == 0 && !ch->quarantined)
 			dpaa_ceetm_chan_destroy(ch);
 	}
-	cls->chan = NULL;
-	cls->cq_prio = 0;
+	WRITE_ONCE(cls->chan, NULL);
+	WRITE_ONCE(cls->cq_prio, 0);
+	WRITE_ONCE(cls->is_wbfs, false);
+	WRITE_ONCE(cls->wbfs_weight, 0);
+	dpaa_ceetm_clear_red_state(cls);
+	WRITE_ONCE(cls->red_soft_pending_handle, 0);
 	smp_store_release(&cls->used, false);
 	WRITE_ONCE(cls->classid, 0);
 	return false;
@@ -751,18 +1211,55 @@ void dpaa_ceetm_teardown(struct dpaa_priv *priv)
 	smp_store_release(&priv->ceetm, NULL);
 	synchronize_net();
 
-	for (i = 0; i < DPAA_CEETM_MAX_TXQS; i++)
-		any_quarantined |= dpaa_ceetm_destroy_class(&ceetm->leaf[i],
-							    quiesce_rc != 0,
-							    true);
+	/* Disable WBFS Group A once per channel before popping all its CQs so
+	 * teardown never stalls waiting on sibling WBFS leaves. Track disable
+	 * failures locally so an earlier single-leaf quarantine on a channel
+	 * never prevents healthy siblings from draining and releasing cleanly. */
+	{
+		bool group_dis_failed[DPAA_CEETM_MAX_CHANS] = { false };
+
+		for (i = 0; i < DPAA_CEETM_MAX_CHANS; i++) {
+			struct dpaa_ceetm_chan *ch = &ceetm->chans[i];
+
+			if (ch->channel && ch->wbfs_group_cfg) {
+				if (qman_ceetm_channel_set_group_cr_eligibility(
+						ch->channel, 0, 0) ||
+				    qman_ceetm_channel_set_group_er_eligibility(
+						ch->channel, 0, 0)) {
+					group_dis_failed[i] = true;
+					ch->quarantined = true;
+				}
+			}
+		}
+
+		for (i = 0; i < DPAA_CEETM_MAX_TXQS; i++) {
+			struct dpaa_ceetm_chan *ch = ceetm->leaf[i].chan;
+			bool force_q = quiesce_rc != 0;
+
+			if (!force_q && ceetm->leaf[i].is_wbfs &&
+			    ch >= ceetm->chans &&
+			    ch < ceetm->chans + DPAA_CEETM_MAX_CHANS &&
+			    group_dis_failed[ch - ceetm->chans])
+				force_q = true;
+			any_quarantined |= dpaa_ceetm_destroy_class(
+				&ceetm->leaf[i], force_q, true, true);
+		}
+	}
 	any_quarantined |= dpaa_ceetm_destroy_class(&ceetm->def,
-						    quiesce_rc != 0, true);
+						    quiesce_rc != 0, true,
+						    true);
+	if (ceetm->def_chan.quarantined)
+		any_quarantined = true;
 	for (i = 0; i < DPAA_CEETM_MAX_CHANS; i++) {
+		if (!ceetm->chans[i].quarantined)
+			dpaa_ceetm_chan_destroy(&ceetm->chans[i]);
 		if (ceetm->chans[i].quarantined)
 			any_quarantined = true;
-		else
-			dpaa_ceetm_chan_destroy(&ceetm->chans[i]);
 	}
+
+	if (!any_quarantined && ceetm->lni &&
+	    qman_ceetm_lni_release(ceetm->lni))
+		any_quarantined = true;
 
 	if (any_quarantined) {
 		if (ceetm->sp)
@@ -771,13 +1268,10 @@ void dpaa_ceetm_teardown(struct dpaa_priv *priv)
 		netdev_err(net_dev,
 			   "CEETM teardown had quarantined class(es); LNI/SP retained\n");
 	} else {
-		if (ceetm->lni) {
-			qman_ceetm_lni_release(ceetm->lni);
-			if (ceetm->sp)
-				ceetm->sp->lni = NULL;
-		}
-		if (ceetm->sp)
+		if (ceetm->sp) {
+			ceetm->sp->lni = NULL;
 			qman_ceetm_sp_release(ceetm->sp);
+		}
 	}
 
 	prev_real = ceetm->prev_real_txqs;
@@ -793,6 +1287,43 @@ void dpaa_ceetm_teardown(struct dpaa_priv *priv)
 	netdev_info(net_dev, "CEETM HTB offload removed\n");
 }
 
+/* A458: Bounded drain of ALL conventional WQ TX FQs (both SW FQ_TYPE_TX and
+ * ASK2 offload FQ_TYPE_TX_NO_CONFIRM on priv->dpaa_fq_list) before switching
+ * the DCP0 sub-portal into CEETM mode (which stops conventional WQ dequeues).
+ * Caller must have paused SW TX (ceetm_tx_paused + netif_tx_disable) and
+ * quiesced ASK2 FE records so no new frames enter these FQs. */
+static int dpaa_ceetm_drain_plain_tx_fqs(struct dpaa_priv *priv)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(50);
+	struct dpaa_fq *dpaa_fq;
+
+	for (;;) {
+		bool busy = false;
+
+		list_for_each_entry(dpaa_fq, &priv->dpaa_fq_list, list) {
+			struct qm_mcr_queryfq_np np;
+			int err;
+
+			if (dpaa_fq->fq_type != FQ_TYPE_TX &&
+			    dpaa_fq->fq_type != FQ_TYPE_TX_NO_CONFIRM)
+				continue;
+			memset(&np, 0, sizeof(np));
+			err = qman_query_fq_np(&dpaa_fq->fq_base, &np);
+			if (err)
+				return err;
+			if (be32_to_cpu(np.frm_cnt) & qm_mcr_frm_cnt_mask) {
+				busy = true;
+				break;
+			}
+		}
+		if (!busy)
+			return 0;
+		if (time_after_eq(jiffies, deadline))
+			return -EBUSY;
+		usleep_range(50, 100);
+	}
+}
+
 static int dpaa_ceetm_htb_create(struct net_device *net_dev,
 				 struct tc_htb_qopt_offload *opt)
 {
@@ -800,6 +1331,7 @@ static int dpaa_ceetm_htb_create(struct net_device *net_dev,
 	struct dpaa_ceetm *ceetm;
 	enum qm_dc_portal dcp;
 	unsigned int sp_id;
+	bool stopped_tx = false;
 	u32 channel, budget;
 	int err;
 
@@ -851,10 +1383,27 @@ static int dpaa_ceetm_htb_create(struct net_device *net_dev,
 	 * CEETM claims the sub-portal. */
 	dpaa_wgfp_egress_deactivate(net_dev);
 
+	/* A458: Pause SW TX and drain conventional WQ TX + no-confirm FQs before
+	 * switching the sub-portal to CEETM mode. Publish ceetm_tx_paused and
+	 * synchronize_net() FIRST so any in-flight dpaa_eth_cgscn(0) that read
+	 * false has already exited before netif_tx_disable() stops the queues. */
+	if (netif_running(net_dev)) {
+		WRITE_ONCE(priv->ceetm_tx_paused, true);
+		synchronize_net();
+		netif_tx_disable(net_dev);
+		stopped_tx = true;
+	}
+	err = dpaa_ceetm_drain_plain_tx_fqs(priv);
+	if (err) {
+		NL_SET_ERR_MSG_MOD(opt->extack,
+				   "plain TX queues did not drain before CEETM enable");
+		goto err_wake_tx;
+	}
+
 	err = qman_ceetm_sp_claim(&ceetm->sp, dcp, sp_id);
 	if (err) {
 		NL_SET_ERR_MSG_MOD(opt->extack, "CEETM sub-portal claim failed");
-		goto err_post_abort;
+		goto err_wake_tx;
 	}
 
 	err = qman_ceetm_lni_claim(&ceetm->lni, dcp, sp_id);
@@ -903,7 +1452,7 @@ static int dpaa_ceetm_htb_create(struct net_device *net_dev,
 		goto err_unpublish;
 	}
 	err = dpaa_ceetm_cq_build(net_dev, &ceetm->def_chan, &ceetm->def,
-				  DPAA_CEETM_CQ_PRIO, budget);
+				  DPAA_CEETM_CQ_PRIO, false, 0, budget);
 	if (err) {
 		dpaa_ceetm_chan_destroy(&ceetm->def_chan);
 		NL_SET_ERR_MSG_MOD(opt->extack,
@@ -911,6 +1460,16 @@ static int dpaa_ceetm_htb_create(struct net_device *net_dev,
 		goto err_unpublish;
 	}
 	smp_store_release(&ceetm->def.used, true);
+	if (stopped_tx) {
+		WRITE_ONCE(priv->ceetm_tx_paused, false);
+		smp_mb();
+		/* Plain-WQ TX FQs were drained to 0 and SW TX now targets CEETM
+		 * LFQs governed by per-CQ CCGRs (not priv->cgr_data); only wake
+		 * if plain CGR did not report congestion while paused. */
+		if (!READ_ONCE(priv->ceetm_cgr_congested))
+			netif_tx_wake_all_queues(net_dev);
+		stopped_tx = false;
+	}
 
 	dpaa_fo_notify_egress_change(net_dev, DPAA_EGRESS_CEETM_POST_CHANGE, 0);
 
@@ -930,7 +1489,13 @@ err_release_lni:
 	ceetm->sp->lni = NULL;
 err_release_sp:
 	qman_ceetm_sp_release(ceetm->sp);
-err_post_abort:
+err_wake_tx:
+	if (stopped_tx) {
+		WRITE_ONCE(priv->ceetm_tx_paused, false);
+		smp_mb();
+		if (!READ_ONCE(priv->ceetm_cgr_congested))
+			netif_tx_wake_all_queues(net_dev);
+	}
 	dpaa_fo_notify_egress_change(net_dev, DPAA_EGRESS_CEETM_POST_CHANGE, 0);
 err_free:
 	kfree(ceetm);
@@ -968,10 +1533,10 @@ static int dpaa_ceetm_htb_leaf_alloc(struct net_device *net_dev,
 	struct dpaa_ceetm *ceetm = priv->ceetm;
 	struct dpaa_ceetm_chan *ch = NULL;
 	unsigned int next_active;
-	bool own_chan = false;
+	bool own_chan = false, is_wbfs = false;
 	u64 rate_bps, ceil_bps;
-	u32 budget, share, hw_fqid, minor;
-	u8 cq_prio;
+	u32 budget, share, hw_fqid, minor, wbfs_weight = 0;
+	u8 cq_prio = DPAA_CEETM_CQ_PRIO;
 	int slot, err;
 
 	if (!ceetm) {
@@ -1012,7 +1577,7 @@ static int dpaa_ceetm_htb_leaf_alloc(struct net_device *net_dev,
 						TC_H_MIN(opt->parent_classid));
 		if (!ch) {
 			NL_SET_ERR_MSG_MOD(opt->extack,
-					   "DPAA CEETM supports at most 2 levels (root -> channel -> prio CQ 0..7)");
+					   "DPAA CEETM supports at most 2 levels (root -> channel -> strict CQ 0..7 / WBFS CQ 8..15)");
 			return -EOPNOTSUPP;
 		}
 		if (ch->quarantined) {
@@ -1020,11 +1585,32 @@ static int dpaa_ceetm_htb_leaf_alloc(struct net_device *net_dev,
 					   "CEETM parent channel is quarantined");
 			return -EBUSY;
 		}
-		cq_prio = min_t(u8, opt->prio, DPAA_CEETM_MAX_CQ_PRIO - 1);
-		if (ch->cq_mask & BIT(cq_prio)) {
-			NL_SET_ERR_MSG_MOD(opt->extack,
-					   "CEETM strict-priority level already in use on parent channel; set distinct prio 0..7");
-			return -EEXIST;
+		if (opt->quantum) {
+			struct qm_ceetm_weight_code wc;
+			int wbfs_cq;
+
+			if (qman_ceetm_ratio2wbfs(opt->quantum, 1, &wc, 0)) {
+				NL_SET_ERR_MSG_MOD(opt->extack,
+						   "CEETM WBFS quantum must be a weight of 1..248");
+				return -ERANGE;
+			}
+			wbfs_cq = dpaa_ceetm_alloc_wbfs_cq(ch);
+			if (wbfs_cq < 0) {
+				NL_SET_ERR_MSG_MOD(opt->extack,
+						   "no free CEETM WBFS class queue on parent channel (max 8)");
+				return -ENOSPC;
+			}
+			is_wbfs = true;
+			wbfs_weight = opt->quantum;
+			cq_prio = (u8)wbfs_cq;
+		} else {
+			cq_prio = min_t(u8, opt->prio,
+					DPAA_CEETM_MAX_CQ_PRIO - 1);
+			if (ch->cq_mask & BIT(cq_prio)) {
+				NL_SET_ERR_MSG_MOD(opt->extack,
+						   "CEETM strict-priority level already in use on parent channel; set distinct prio 0..7 or give quantum 1..248 for WBFS");
+				return -EEXIST;
+			}
 		}
 	}
 
@@ -1069,7 +1655,7 @@ static int dpaa_ceetm_htb_leaf_alloc(struct net_device *net_dev,
 	}
 
 	err = dpaa_ceetm_cq_build(net_dev, ch, &ceetm->leaf[slot],
-				  cq_prio, share);
+				  cq_prio, is_wbfs, wbfs_weight, share);
 	if (err) {
 		if (own_chan)
 			dpaa_ceetm_chan_destroy(ch);
@@ -1085,7 +1671,8 @@ static int dpaa_ceetm_htb_leaf_alloc(struct net_device *net_dev,
 			      ceetm->base_txq + slot + 1));
 	if (err) {
 		NL_SET_ERR_MSG_MOD(opt->extack, "failed to grow Tx queues");
-		dpaa_ceetm_destroy_class(&ceetm->leaf[slot], false, own_chan);
+		dpaa_ceetm_destroy_class(&ceetm->leaf[slot], false, own_chan,
+					 false);
 		dpaa_fo_notify_egress_change(net_dev,
 					     DPAA_EGRESS_CEETM_POST_CHANGE, 0);
 		return err;
@@ -1119,7 +1706,9 @@ static int dpaa_ceetm_htb_leaf_to_inner(struct net_device *net_dev,
 	struct dpaa_ceetm_class *cls;
 	struct dpaa_ceetm_chan *ch;
 	u32 parent_minor, child_minor, old_fqid, new_fqid, budget, share;
+	u32 new_weight = 0;
 	u8 old_prio, new_prio;
+	bool new_wbfs = false;
 	int slot, quiesce_rc, err;
 
 	if (!ceetm) {
@@ -1139,12 +1728,25 @@ static int dpaa_ceetm_htb_leaf_to_inner(struct net_device *net_dev,
 	ch = cls->chan;
 	if (!ch || ch->is_inner) {
 		NL_SET_ERR_MSG_MOD(opt->extack,
-				   "DPAA CEETM supports at most 2 levels (root -> channel -> prio CQ 0..7)");
+				   "DPAA CEETM supports at most 2 levels (root -> channel -> strict CQ 0..7 / WBFS CQ 8..15)");
 		return -EOPNOTSUPP;
 	}
 
 	old_prio = cls->cq_prio;
-	new_prio = min_t(u8, opt->prio, DPAA_CEETM_MAX_CQ_PRIO - 1);
+	if (opt->quantum) {
+		struct qm_ceetm_weight_code wc;
+
+		if (qman_ceetm_ratio2wbfs(opt->quantum, 1, &wc, 0)) {
+			NL_SET_ERR_MSG_MOD(opt->extack,
+					   "CEETM WBFS quantum must be a weight of 1..248");
+			return -ERANGE;
+		}
+		new_wbfs = true;
+		new_weight = opt->quantum;
+		new_prio = DPAA_CEETM_WBFS_START;
+	} else {
+		new_prio = min_t(u8, opt->prio, DPAA_CEETM_MAX_CQ_PRIO - 1);
+	}
 	old_fqid = cls->hw_lfq ? (cls->hw_lfq->idx & 0x00FFFFFFU) : 0;
 
 	quiesce_rc = dpaa_fo_notify_egress_change(net_dev,
@@ -1161,13 +1763,13 @@ static int dpaa_ceetm_htb_leaf_to_inner(struct net_device *net_dev,
 	smp_store_release(&cls->used, false);
 	synchronize_net();
 
-	if (new_prio != old_prio) {
+	if (new_wbfs != cls->is_wbfs || new_prio != old_prio) {
 		budget = dpaa_ceetm_port_frame_budget(priv,
 						      READ_ONCE(net_dev->mtu));
 		share = max_t(u32, budget / max_t(unsigned int,
 						  dpaa_ceetm_active_cqs(ceetm),
 						  1U), 1U);
-		if (dpaa_ceetm_destroy_class(cls, false, false)) {
+		if (dpaa_ceetm_destroy_class(cls, false, false, false)) {
 			dpaa_ceetm_dscp_resync(net_dev);
 			dpaa_fo_notify_egress_change(net_dev,
 						     DPAA_EGRESS_CEETM_POST_CHANGE,
@@ -1176,11 +1778,12 @@ static int dpaa_ceetm_htb_leaf_to_inner(struct net_device *net_dev,
 					   "CEETM CQ drain failed during promotion; channel quarantined");
 			return -EBUSY;
 		}
-		err = dpaa_ceetm_cq_build(net_dev, ch, cls, new_prio, share);
+		err = dpaa_ceetm_cq_build(net_dev, ch, cls, new_prio,
+					  new_wbfs, new_weight, share);
 		if (err) {
 			/* Attempt to restore parent at old_prio before failing. */
 			if (!dpaa_ceetm_cq_build(net_dev, ch, cls, old_prio,
-						 share)) {
+						 false, 0, share)) {
 				WRITE_ONCE(cls->classid, parent_minor);
 				smp_store_release(&cls->used, true);
 			}
@@ -1194,7 +1797,9 @@ static int dpaa_ceetm_htb_leaf_to_inner(struct net_device *net_dev,
 		}
 	}
 
-	ch->is_inner = true;
+	WRITE_ONCE(ch->is_inner, true);
+	dpaa_ceetm_clear_red_state(cls);
+	WRITE_ONCE(cls->red_soft_pending_handle, 0);
 	WRITE_ONCE(cls->classid, child_minor);
 	dpaa_ceetm_rebalance_ccgs(priv, ceetm, READ_ONCE(net_dev->mtu));
 	smp_store_release(&cls->used, true);
@@ -1246,11 +1851,13 @@ static int dpaa_ceetm_htb_leaf_del(struct net_device *net_dev,
 	synchronize_net();
 
 	if (opt->command == TC_HTB_LEAF_DEL_LAST && ch && ch->is_inner &&
-	    ch->active_cqs == 1) {
+	    hweight16(ch->live_cq_mask) == 1) {
 		/* sch_htb demotes the inner parent channel back into a leaf on
 		 * the SAME Tx queue slot when its last child is deleted. */
-		if (cls->cq_prio != DPAA_CEETM_CQ_PRIO) {
+		if (cls->is_wbfs || cls->cq_prio != DPAA_CEETM_CQ_PRIO) {
 			u8 old_prio = cls->cq_prio;
+			bool old_wbfs = cls->is_wbfs;
+			u32 old_weight = cls->wbfs_weight;
 			u32 old_classid = cls->classid;
 			u32 budget = dpaa_ceetm_port_frame_budget(priv,
 							READ_ONCE(net_dev->mtu));
@@ -1258,7 +1865,19 @@ static int dpaa_ceetm_htb_leaf_del(struct net_device *net_dev,
 						dpaa_ceetm_active_cqs(ceetm),
 						1U), 1U);
 
-			if (dpaa_ceetm_destroy_class(cls, false, false)) {
+			if (ch->cq_mask & BIT(DPAA_CEETM_CQ_PRIO)) {
+				/* Strict CQ 0 is held by a quarantined sibling:
+				 * cannot demote cleanly onto CQ 0. */
+				smp_store_release(&cls->used, true);
+				dpaa_fo_notify_egress_change(net_dev,
+							     DPAA_EGRESS_CEETM_POST_CHANGE,
+							     0);
+				NL_SET_ERR_MSG_MOD(opt->extack,
+						   "CEETM CQ 0 quarantined; cannot demote parent channel");
+				return -EBUSY;
+			}
+
+			if (dpaa_ceetm_destroy_class(cls, false, false, false)) {
 				dpaa_ceetm_dscp_resync(net_dev);
 				dpaa_fo_notify_egress_change(net_dev,
 							     DPAA_EGRESS_CEETM_POST_CHANGE,
@@ -1268,10 +1887,12 @@ static int dpaa_ceetm_htb_leaf_del(struct net_device *net_dev,
 				return -EBUSY;
 			}
 			err = dpaa_ceetm_cq_build(net_dev, ch, cls,
-						  DPAA_CEETM_CQ_PRIO, share);
+						  DPAA_CEETM_CQ_PRIO, false, 0,
+						  share);
 			if (err) {
 				if (!dpaa_ceetm_cq_build(net_dev, ch, cls,
-							 old_prio, share)) {
+							 old_prio, old_wbfs,
+							 old_weight, share)) {
 					WRITE_ONCE(cls->classid, old_classid);
 					smp_store_release(&cls->used, true);
 				}
@@ -1284,7 +1905,9 @@ static int dpaa_ceetm_htb_leaf_del(struct net_device *net_dev,
 				return err;
 			}
 		}
-		ch->is_inner = false;
+		WRITE_ONCE(ch->is_inner, false);
+		dpaa_ceetm_clear_red_state(cls);
+		WRITE_ONCE(cls->red_soft_pending_handle, 0);
 		WRITE_ONCE(cls->classid, ch->classid);
 		smp_store_release(&cls->used, true);
 		dpaa_ceetm_rebalance_ccgs(priv, ceetm, READ_ONCE(net_dev->mtu));
@@ -1294,7 +1917,7 @@ static int dpaa_ceetm_htb_leaf_del(struct net_device *net_dev,
 		return 0;
 	}
 
-	dpaa_ceetm_destroy_class(cls, quiesce_rc != 0, true);
+	dpaa_ceetm_destroy_class(cls, quiesce_rc != 0, true, false);
 	dpaa_ceetm_rebalance_ccgs(priv, ceetm, READ_ONCE(net_dev->mtu));
 	dpaa_ceetm_dscp_resync(net_dev);
 
@@ -1338,11 +1961,65 @@ static int dpaa_ceetm_htb_node_modify(struct net_device *net_dev,
 		return -EINVAL;
 	}
 	if (ch->is_inner) {
-		/* Child CQs share their parent inner channel's shaper and
-		 * cannot change CQ strict-priority index in place. */
-		u8 req_prio = min_t(u8, opt->prio, DPAA_CEETM_MAX_CQ_PRIO - 1);
+		struct dpaa_ceetm_class *cls = &ceetm->leaf[slot];
 
-		if (req_prio != ceetm->leaf[slot].cq_prio) {
+		if (cls->is_wbfs) {
+			struct qm_ceetm_weight_code wc;
+
+			/* sch_htb passes hopt->quantum == 0 when a rate/ceil
+			 * change omits quantum; keep the existing WBFS weight. */
+			if (!opt->quantum)
+				return 0;
+			if (opt->quantum != cls->wbfs_weight) {
+				int qrc;
+
+				if (qman_ceetm_ratio2wbfs(opt->quantum, 1,
+							  &wc, 0)) {
+					NL_SET_ERR_MSG_MOD(opt->extack,
+							   "CEETM WBFS quantum must be a weight of 1..248");
+					return -ERANGE;
+				}
+				/* Quiesce ASK2 HW flows so equal-weight pool
+				 * membership changes never leave unmarked bulk
+				 * HW flows pinned on an unequal-weight leaf
+				 * (P1-3 fix). */
+				qrc = dpaa_fo_notify_egress_change(
+					net_dev, DPAA_EGRESS_CEETM_PRE_CHANGE,
+					0);
+				if (qrc) {
+					dpaa_fo_notify_egress_change(
+						net_dev,
+						DPAA_EGRESS_CEETM_POST_CHANGE,
+						0);
+					NL_SET_ERR_MSG_MOD(opt->extack,
+							   "failed to quiesce ASK flows before WBFS weight change");
+					return -EBUSY;
+				}
+				err = qman_ceetm_set_queue_weight(cls->cq, &wc);
+				if (!err)
+					WRITE_ONCE(cls->wbfs_weight,
+						   opt->quantum);
+				dpaa_fo_notify_egress_change(
+					net_dev, DPAA_EGRESS_CEETM_POST_CHANGE,
+					0);
+				if (err) {
+					NL_SET_ERR_MSG_MOD(opt->extack,
+							   "failed to update CEETM WBFS queue weight");
+					return err;
+				}
+			}
+			return 0;
+		}
+
+		/* Child strict CQs share their parent inner channel's shaper
+		 * and cannot change CQ index or switch to WBFS in place. */
+		if (opt->quantum) {
+			NL_SET_ERR_MSG_MOD(opt->extack,
+					   "delete and re-add class to switch between strict priority and WBFS");
+			return -EOPNOTSUPP;
+		}
+		if (min_t(u8, opt->prio, DPAA_CEETM_MAX_CQ_PRIO - 1) !=
+		    cls->cq_prio) {
 			NL_SET_ERR_MSG_MOD(opt->extack,
 					   "delete and re-add class to change CEETM priority");
 			return -EOPNOTSUPP;
@@ -1405,6 +2082,265 @@ int dpaa_ceetm_setup_htb(struct net_device *net_dev, void *type_data)
 		return -EOPNOTSUPP;
 	}
 }
+
+/* Synchronously refresh ASK2 soft-qdisc state when a leaf RED qdisc changes
+ * offload status (withdraw HW flows immediately if falling back to SW). */
+static void dpaa_ceetm_red_sync_ask(struct net_device *net_dev,
+				    bool withdraw_hw)
+{
+	if (withdraw_hw)
+		dpaa_fo_notify_egress_change(net_dev,
+					     DPAA_EGRESS_CEETM_PRE_CHANGE, 0);
+	dpaa_fo_notify_egress_change(net_dev,
+				     DPAA_EGRESS_CEETM_POST_CHANGE, 0);
+}
+
+static u32 dpaa_ceetm_current_share(const struct dpaa_priv *priv,
+				    const struct dpaa_ceetm *ceetm,
+				    unsigned int mtu)
+{
+	unsigned int n = max_t(unsigned int, dpaa_ceetm_active_cqs(ceetm), 1U);
+	u32 budget = dpaa_ceetm_port_frame_budget(priv, mtu);
+
+	return max_t(u32, budget / n, 1U);
+}
+
+int dpaa_ceetm_setup_red(struct net_device *net_dev, void *type_data)
+{
+	struct tc_red_qopt_offload *opt = type_data;
+	struct dpaa_priv *priv = netdev_priv(net_dev);
+	struct dpaa_ceetm *ceetm;
+	struct dpaa_ceetm_class *cls = NULL;
+	const char *refused = NULL;
+	unsigned int mtu;
+	bool running;
+	u32 share;
+	int slot, rc = -EOPNOTSUPP;
+
+	ASSERT_RTNL();
+	ceetm = priv->ceetm;
+	if (!ceetm) {
+		if (opt->command == TC_RED_REPLACE)
+			netdev_warn(net_dev,
+				    "RED qdisc %x: not offloaded: CEETM HTB offload is not installed\n",
+				    TC_H_MAJ(opt->handle) >> 16);
+		return -EOPNOTSUPP;
+	}
+
+	mtu = READ_ONCE(net_dev->mtu);
+	share = dpaa_ceetm_current_share(priv, ceetm, mtu);
+
+	if (opt->parent == TC_H_ROOT) {
+		refused = "root qdisc has no single CEETM class queue";
+	} else if ((TC_H_MAJ(opt->parent) >> 16) != ceetm->htb_maj) {
+		refused = "not grafted directly on an offloaded HTB class";
+	} else if (dpaa_ceetm_find_inner_chan(ceetm, TC_H_MIN(opt->parent))) {
+		refused = "inner CEETM channel has no congestion group";
+	} else {
+		slot = dpaa_ceetm_find_slot(ceetm, TC_H_MIN(opt->parent));
+		if (slot < 0)
+			refused = "no such offloaded HTB leaf class";
+		else
+			cls = &ceetm->leaf[slot];
+	}
+
+	running = cls && cls->red_active && cls->red_handle == opt->handle;
+
+	switch (opt->command) {
+	case TC_RED_REPLACE: {
+		bool had;
+		u32 had_handle, had_min, had_max, had_prob, had_limit;
+
+		if (!refused && opt->set.is_ecn) {
+			refused = "CEETM hardware drops and cannot mark ECN";
+		} else if (!refused && opt->set.is_nodrop) {
+			refused = "CEETM hardware cannot offload nodrop";
+		} else if (!refused &&
+			   (!opt->set.limit || !opt->set.max ||
+			    opt->set.max <= opt->set.min)) {
+			refused = "RED requires limit > 0 and min < max";
+			rc = -EINVAL;
+		} else if (!refused && cls) {
+			had = cls->red_active;
+			had_handle = cls->red_handle;
+			had_min = cls->red_min;
+			had_max = cls->red_max;
+			had_prob = cls->red_prob;
+			had_limit = cls->red_limit;
+
+			cls->red_min = opt->set.min;
+			cls->red_max = opt->set.max;
+			cls->red_prob = opt->set.probability;
+			cls->red_limit = opt->set.limit;
+			if (!dpaa_ceetm_set_ccg_wred(cls, share, mtu)) {
+				if (had && !running) {
+					cls->red_displaced = true;
+					cls->red_displaced_handle = had_handle;
+					cls->red_displaced_min = had_min;
+					cls->red_displaced_max = had_max;
+					cls->red_displaced_prob = had_prob;
+					cls->red_displaced_limit = had_limit;
+				}
+				WRITE_ONCE(cls->red_soft_pending_handle, 0);
+				WRITE_ONCE(cls->red_handle, opt->handle);
+				smp_store_release(&cls->red_active, true);
+				dpaa_ceetm_red_sync_ask(net_dev, false);
+				return 0;
+			}
+			refused = "QMan CEETM rejected WRED CCGR config";
+			rc = -EIO;
+			cls->red_min = had_min;
+			cls->red_max = had_max;
+			cls->red_prob = had_prob;
+			cls->red_limit = had_limit;
+			if (had && !running) {
+				if (dpaa_ceetm_set_ccg_wred(cls, share, mtu)) {
+					dpaa_ceetm_clear_red_state(cls);
+					dpaa_ceetm_set_ccg_frames(cls->ccg,
+								  share);
+				}
+			}
+		}
+
+		if (running && cls) {
+			dpaa_ceetm_clear_red_state(cls);
+			dpaa_ceetm_set_ccg_frames(cls->ccg, share);
+		}
+		if (cls) {
+			/* Latch pending soft-RED handle BEFORE POST_CHANGE so
+			 * ask_tc_qdisc_is_soft() sees the rejected RED even
+			 * though qdisc_create() runs prior to qdisc_graft()
+			 * (P0-2 fix). */
+			WRITE_ONCE(cls->red_soft_pending_handle, opt->handle);
+			dpaa_ceetm_red_sync_ask(net_dev, true);
+		}
+		netdev_warn(net_dev,
+			    "RED qdisc %x: not offloaded: %s\n",
+			    TC_H_MAJ(opt->handle) >> 16,
+			    refused ? refused : "unsupported");
+		return rc;
+	}
+
+	case TC_RED_DESTROY:
+		if (!cls)
+			return -EOPNOTSUPP;
+		if (cls->red_soft_pending_handle == opt->handle)
+			WRITE_ONCE(cls->red_soft_pending_handle, 0);
+		if (cls->red_displaced &&
+		    cls->red_displaced_handle == opt->handle) {
+			cls->red_displaced = false;
+			cls->red_displaced_handle = 0;
+			dpaa_ceetm_red_sync_ask(net_dev, false);
+			return 0;
+		}
+		if (!running) {
+			dpaa_ceetm_red_sync_ask(net_dev, false);
+			return 0;
+		}
+		if (cls->red_displaced) {
+			cls->red_displaced = false;
+			cls->red_min = cls->red_displaced_min;
+			cls->red_max = cls->red_displaced_max;
+			cls->red_prob = cls->red_displaced_prob;
+			cls->red_limit = cls->red_displaced_limit;
+			WRITE_ONCE(cls->red_handle, cls->red_displaced_handle);
+			cls->red_displaced_handle = 0;
+			if (dpaa_ceetm_set_ccg_wred(cls, share, mtu)) {
+				dpaa_ceetm_clear_red_state(cls);
+				dpaa_ceetm_set_ccg_frames(cls->ccg, share);
+			}
+			dpaa_ceetm_red_sync_ask(net_dev, false);
+			return 0;
+		}
+		dpaa_ceetm_clear_red_state(cls);
+		dpaa_ceetm_set_ccg_frames(cls->ccg, share);
+		dpaa_ceetm_red_sync_ask(net_dev, false);
+		return 0;
+
+	case TC_RED_STATS:
+		/* Returning 0 sets TCQ_F_OFFLOADED in qdisc_offload_dump_helper.
+		 * Keep SW bstats/qstats untouched; HW rejects live in CEETM CCG. */
+		return running ? 0 : -EOPNOTSUPP;
+
+	case TC_RED_XSTATS:
+		/* Do not mutate q->stats unlocked against red_enqueue() (P1-3). */
+		return running ? 0 : -EOPNOTSUPP;
+
+	case TC_RED_GRAFT:
+		/* Grafting a user child qdisc under RED cannot be offloaded;
+		 * demote to tail-drop and immediately withdraw HW flows so the
+		 * software child qdisc is never bypassed. */
+		if (opt->child_handle && running && cls) {
+			dpaa_ceetm_clear_red_state(cls);
+			WRITE_ONCE(cls->red_soft_pending_handle, opt->handle);
+			dpaa_ceetm_set_ccg_frames(cls->ccg, share);
+			dpaa_ceetm_red_sync_ask(net_dev, true);
+		}
+		return -EOPNOTSUPP;
+
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
+bool dpaa_ceetm_red_soft_pending(struct net_device *dev)
+{
+	struct dpaa_priv *priv;
+	struct dpaa_ceetm *ceetm;
+	bool pending = false;
+	int i;
+
+	if (!dev || !dpaa_get_rx_fman_port(dev))
+		return false;
+
+	priv = netdev_priv(dev);
+	rcu_read_lock();
+	ceetm = smp_load_acquire(&priv->ceetm);
+	if (ceetm) {
+		for (i = 0; i < DPAA_CEETM_MAX_TXQS; i++) {
+			if (!smp_load_acquire(&ceetm->leaf[i].used) ||
+			    READ_ONCE(ceetm->leaf[i].quarantined))
+				continue;
+			if (READ_ONCE(ceetm->leaf[i].red_soft_pending_handle)) {
+				pending = true;
+				break;
+			}
+		}
+	}
+	rcu_read_unlock();
+	return pending;
+}
+EXPORT_SYMBOL_GPL(dpaa_ceetm_red_soft_pending);
+
+bool dpaa_ceetm_red_qdisc_offloaded(struct net_device *dev, u32 handle)
+{
+	struct dpaa_priv *priv;
+	struct dpaa_ceetm *ceetm;
+	bool offloaded = false;
+	int i;
+
+	if (!dev || !handle || !dpaa_get_rx_fman_port(dev))
+		return false;
+
+	priv = netdev_priv(dev);
+	rcu_read_lock();
+	ceetm = smp_load_acquire(&priv->ceetm);
+	if (ceetm) {
+		for (i = 0; i < DPAA_CEETM_MAX_TXQS; i++) {
+			if (!smp_load_acquire(&ceetm->leaf[i].used) ||
+			    READ_ONCE(ceetm->leaf[i].quarantined))
+				continue;
+			if (smp_load_acquire(&ceetm->leaf[i].red_active) &&
+			    READ_ONCE(ceetm->leaf[i].red_handle) == handle) {
+				offloaded = true;
+				break;
+			}
+		}
+	}
+	rcu_read_unlock();
+	return offloaded;
+}
+EXPORT_SYMBOL_GPL(dpaa_ceetm_red_qdisc_offloaded);
 
 struct qman_fq *dpaa_ceetm_egress_fq(struct dpaa_ceetm *ceetm,
 				     int queue_mapping)
@@ -1489,8 +2425,8 @@ EXPORT_SYMBOL_GPL(dpaa_ceetm_fqid_is_live);
  *   -EAGAIN if CEETM is active but no live leaf backs @classid or defcls
  *     (fail closed to software; never target DEFECT-B raw default or WQ6).
  */
-int dpaa_ceetm_offload_egress_fqid(struct net_device *dev, u32 classid,
-				   u32 *fqid)
+int dpaa_ceetm_offload_egress_fqid_hashed(struct net_device *dev, u32 classid,
+					  u32 flow_hash, u32 *fqid)
 {
 	struct dpaa_priv *priv;
 	struct dpaa_ceetm *ceetm;
@@ -1518,8 +2454,12 @@ int dpaa_ceetm_offload_egress_fqid(struct net_device *dev, u32 classid,
 	want = dpaa_ceetm_decode_classid(ceetm, classid);
 	if (want)
 		slot = dpaa_ceetm_find_live_slot(ceetm, want);
-	if (slot < 0 && ceetm->defcls)
+	if (slot < 0 && ceetm->defcls) {
 		slot = dpaa_ceetm_find_live_slot(ceetm, ceetm->defcls);
+		if (slot >= 0)
+			slot = dpaa_ceetm_pick_wbfs_slot(priv, ceetm, slot,
+							 flow_hash);
+	}
 	if (slot < 0)
 		goto out_unlock;
 
@@ -1533,7 +2473,62 @@ out_unlock:
 	rcu_read_unlock();
 	return ret;
 }
+EXPORT_SYMBOL_GPL(dpaa_ceetm_offload_egress_fqid_hashed);
+
+int dpaa_ceetm_offload_egress_fqid(struct net_device *dev, u32 classid,
+				   u32 *fqid)
+{
+	return dpaa_ceetm_offload_egress_fqid_hashed(dev, classid, 0, fqid);
+}
 EXPORT_SYMBOL_GPL(dpaa_ceetm_offload_egress_fqid);
+
+ssize_t dpaa_ceetm_wbfs_hash_show(struct net_device *net_dev, char *buf)
+{
+	struct dpaa_priv *priv = netdev_priv(net_dev);
+
+	return sysfs_emit(buf, "%u\n", READ_ONCE(priv->ceetm_wbfs_hash) ? 1 : 0);
+}
+
+ssize_t dpaa_ceetm_wbfs_hash_store(struct net_device *net_dev,
+				   const char *buf, size_t count)
+{
+	struct dpaa_priv *priv = netdev_priv(net_dev);
+	bool enable;
+	int err;
+
+	err = kstrtobool(buf, &enable);
+	if (err)
+		return err;
+
+	/* Avoid kernfs kn->active vs rtnl_lock ABBA deadlock during
+	 * unregister_netdev() (matches net/core/net-sysfs.c). */
+	if (!rtnl_trylock())
+		return restart_syscall();
+	if (READ_ONCE(net_dev->reg_state) != NETREG_REGISTERED) {
+		rtnl_unlock();
+		return -ENODEV;
+	}
+	if (enable != READ_ONCE(priv->ceetm_wbfs_hash)) {
+		if (priv->ceetm) {
+			err = dpaa_fo_notify_egress_change(
+				net_dev, DPAA_EGRESS_CEETM_PRE_CHANGE, 0);
+			if (err) {
+				dpaa_fo_notify_egress_change(
+					net_dev, DPAA_EGRESS_CEETM_POST_CHANGE,
+					0);
+				rtnl_unlock();
+				return -EBUSY;
+			}
+			WRITE_ONCE(priv->ceetm_wbfs_hash, enable);
+			dpaa_fo_notify_egress_change(
+				net_dev, DPAA_EGRESS_CEETM_POST_CHANGE, 0);
+		} else {
+			WRITE_ONCE(priv->ceetm_wbfs_hash, enable);
+		}
+	}
+	rtnl_unlock();
+	return count;
+}
 
 /* -------------------------------------------------------------------------
  * G10 Phase 3: Single-port per-packet MURAM DSCP -> CEETM CQ map (F-328).

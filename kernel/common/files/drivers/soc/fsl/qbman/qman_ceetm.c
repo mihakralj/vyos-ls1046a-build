@@ -614,12 +614,24 @@ int qman_ceetm_channel_release(struct qm_ceetm_channel *channel)
 		return -EBUSY;
 	}
 
-	/* Reset the channel shaper record */
+	/* Reset the channel shaper and class-scheduler records so a re-claimed
+	 * channel never inherits stale WBFS group eligibility or weights. */
 	opts.cid = cpu_to_be16(CEETM_COMMAND_CHANNEL_SHAPER | channel->idx);
 	opts.dcpid = channel->dcp_idx;
 	if (ceetm_configure_mst(&opts)) {
 		pr_err("CEETM: can't reset channel %u shaper\n", channel->idx);
 		return -EINVAL;
+	}
+	{
+		struct qm_mcc_ceetm_class_scheduler_config csch = {0};
+
+		csch.cqcid = cpu_to_be16(channel->idx);
+		csch.dcpid = channel->dcp_idx;
+		if (ceetm_configure_csch(&csch)) {
+			pr_err("CEETM: can't reset channel %u class scheduler\n",
+			       channel->idx);
+			return -EINVAL;
+		}
 	}
 
 	ceetm_bitmap_free(ceetm_channel_map, channel->idx);
@@ -837,22 +849,123 @@ int qman_ceetm_channel_set_cq_er_eligibility(struct qm_ceetm_channel *channel,
 }
 EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_cq_er_eligibility);
 
+int qman_ceetm_channel_set_group(struct qm_ceetm_channel *channel, int group_b,
+				 unsigned int prio_a, unsigned int prio_b)
+{
+	struct qm_mcc_ceetm_class_scheduler_config cfg = {0};
+	struct qm_mcr_ceetm_class_scheduler_query res = {0};
+	int i;
+
+	if (!channel || prio_a > 7 || (group_b && prio_b > 7))
+		return -EINVAL;
+	if (ceetm_query_csch(channel, &res)) {
+		pr_err("CEETM: can't query channel %u scheduler\n",
+		       channel->idx);
+		return -EINVAL;
+	}
+
+	cfg.cqcid = cpu_to_be16(channel->idx);
+	cfg.dcpid = channel->dcp_idx;
+	cfg.gpc = ((!group_b) ? CEETM_GPC_COMBINE : 0) |
+		  (((u8)prio_b << CEETM_GPC_PRIO_B_SHIFT) &
+		   CEETM_GPC_PRIO_B_MASK) |
+		  ((u8)prio_a & CEETM_GPC_PRIO_A_MASK);
+	cfg.crem = res.crem;
+	cfg.erem = res.erem;
+	for (i = 0; i < 8; i++)
+		cfg.w[i] = res.w[i];
+
+	return ceetm_configure_csch(&cfg);
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_group);
+
+int qman_ceetm_channel_get_group(struct qm_ceetm_channel *channel, int *group_b,
+				 unsigned int *prio_a, unsigned int *prio_b)
+{
+	struct qm_mcr_ceetm_class_scheduler_query res = {0};
+
+	if (!channel || !group_b || !prio_a || !prio_b)
+		return -EINVAL;
+	if (ceetm_query_csch(channel, &res)) {
+		pr_err("CEETM: can't query channel %u scheduler\n",
+		       channel->idx);
+		return -EINVAL;
+	}
+
+	*group_b = !(res.gpc & CEETM_GPC_COMBINE);
+	*prio_a = res.gpc & CEETM_GPC_PRIO_A_MASK;
+	*prio_b = (res.gpc & CEETM_GPC_PRIO_B_MASK) >> CEETM_GPC_PRIO_B_SHIFT;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_channel_get_group);
+
+static int channel_set_group_eligibility(struct qm_ceetm_channel *channel,
+					 int group_b, int set, bool commit)
+{
+	struct qm_mcc_ceetm_class_scheduler_config cfg = {0};
+	struct qm_mcr_ceetm_class_scheduler_query res = {0};
+	u16 bit = group_b ? GROUP_B_ELIGIBILITY_SET : GROUP_A_ELIGIBILITY_SET;
+	u16 mask;
+	int i;
+
+	if (!channel)
+		return -EINVAL;
+	if (ceetm_query_csch(channel, &res)) {
+		pr_err("CEETM: can't query channel %u scheduler\n",
+		       channel->idx);
+		return -EINVAL;
+	}
+
+	cfg.cqcid = cpu_to_be16(channel->idx);
+	cfg.dcpid = channel->dcp_idx;
+	cfg.gpc = res.gpc;
+	for (i = 0; i < 8; i++)
+		cfg.w[i] = res.w[i];
+
+	if (commit) {
+		mask = be16_to_cpu(res.crem);
+		mask = (mask & ~bit) | (set ? bit : 0);
+		cfg.crem = cpu_to_be16(mask);
+		cfg.erem = res.erem;
+	} else {
+		mask = be16_to_cpu(res.erem);
+		mask = (mask & ~bit) | (set ? bit : 0);
+		cfg.erem = cpu_to_be16(mask);
+		cfg.crem = res.crem;
+	}
+
+	if (ceetm_configure_csch(&cfg)) {
+		pr_err("CEETM: can't set group %c eligibility on channel %u\n",
+		       group_b ? 'B' : 'A', channel->idx);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+int qman_ceetm_channel_set_group_cr_eligibility(struct qm_ceetm_channel *channel,
+						int group_b, int cre)
+{
+	return channel_set_group_eligibility(channel, group_b, cre, true);
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_group_cr_eligibility);
+
+int qman_ceetm_channel_set_group_er_eligibility(struct qm_ceetm_channel *channel,
+						int group_b, int ere)
+{
+	return channel_set_group_eligibility(channel, group_b, ere, false);
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_group_er_eligibility);
+
 /* ----------------------------------------------------------------------
  * Class Queues
  * ---------------------------------------------------------------------- */
 
-int qman_ceetm_cq_claim(struct qm_ceetm_cq **cq,
-			struct qm_ceetm_channel *channel, unsigned int idx,
-			struct qm_ceetm_ccg *ccg)
+static int ceetm_cq_claim_common(struct qm_ceetm_cq **cq,
+				 struct qm_ceetm_channel *channel,
+				 unsigned int idx, struct qm_ceetm_ccg *ccg)
 {
 	struct qm_ceetm_cq *p;
 	struct qm_mcc_ceetm_cq_config cfg = {0};
-
-	if (idx > 7) {
-		pr_err("CEETM: CQ index %u out of range (strict-prio 0-7)\n",
-		       idx);
-		return -EINVAL;
-	}
 
 	list_for_each_entry(p, &channel->class_queues, node) {
 		if (p->idx == idx) {
@@ -887,7 +1000,166 @@ int qman_ceetm_cq_claim(struct qm_ceetm_cq **cq,
 	*cq = p;
 	return 0;
 }
+
+int qman_ceetm_cq_claim(struct qm_ceetm_cq **cq,
+			struct qm_ceetm_channel *channel, unsigned int idx,
+			struct qm_ceetm_ccg *ccg)
+{
+	if (!cq || !channel || idx > 7) {
+		pr_err("CEETM: CQ index %u out of range (strict-prio 0-7)\n",
+		       idx);
+		return -EINVAL;
+	}
+	return ceetm_cq_claim_common(cq, channel, idx, ccg);
+}
 EXPORT_SYMBOL_GPL(qman_ceetm_cq_claim);
+
+int qman_ceetm_cq_claim_A(struct qm_ceetm_cq **cq,
+			  struct qm_ceetm_channel *channel, unsigned int idx,
+			  struct qm_ceetm_ccg *ccg)
+{
+	if (!cq || !channel || idx < 8 || idx > 15) {
+		pr_err("CEETM: grouped CQ A index %u out of range (8-15)\n",
+		       idx);
+		return -EINVAL;
+	}
+	return ceetm_cq_claim_common(cq, channel, idx, ccg);
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_cq_claim_A);
+
+int qman_ceetm_cq_claim_B(struct qm_ceetm_cq **cq,
+			  struct qm_ceetm_channel *channel, unsigned int idx,
+			  struct qm_ceetm_ccg *ccg)
+{
+	if (!cq || !channel || idx < 12 || idx > 15) {
+		pr_err("CEETM: grouped CQ B index %u out of range (12-15)\n",
+		       idx);
+		return -EINVAL;
+	}
+	return ceetm_cq_claim_common(cq, channel, idx, ccg);
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_cq_claim_B);
+
+int qman_ceetm_set_queue_weight(struct qm_ceetm_cq *cq,
+				const struct qm_ceetm_weight_code *weight_code)
+{
+	struct qm_mcc_ceetm_class_scheduler_config cfg = {0};
+	struct qm_mcr_ceetm_class_scheduler_query res = {0};
+	int i;
+
+	if (!cq || !cq->parent || !weight_code || cq->idx < 8 || cq->idx > 15)
+		return -EINVAL;
+	if (ceetm_query_csch(cq->parent, &res)) {
+		pr_err("CEETM: can't query channel %u scheduler\n",
+		       cq->parent->idx);
+		return -EINVAL;
+	}
+
+	cfg.cqcid = cpu_to_be16(cq->parent->idx);
+	cfg.dcpid = cq->parent->dcp_idx;
+	cfg.gpc = res.gpc;
+	cfg.crem = res.crem;
+	cfg.erem = res.erem;
+	for (i = 0; i < 8; i++)
+		cfg.w[i] = res.w[i];
+	cfg.w[cq->idx - 8] = ((u8)weight_code->y << 3) | (weight_code->x & 0x7);
+
+	return ceetm_configure_csch(&cfg);
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_set_queue_weight);
+
+int qman_ceetm_get_queue_weight(struct qm_ceetm_cq *cq,
+				struct qm_ceetm_weight_code *weight_code)
+{
+	struct qm_mcr_ceetm_class_scheduler_query res = {0};
+
+	if (!cq || !cq->parent || !weight_code || cq->idx < 8 || cq->idx > 15)
+		return -EINVAL;
+	if (ceetm_query_csch(cq->parent, &res)) {
+		pr_err("CEETM: can't query channel %u scheduler\n",
+		       cq->parent->idx);
+		return -EINVAL;
+	}
+
+	weight_code->y = res.w[cq->idx - 8] >> 3;
+	weight_code->x = res.w[cq->idx - 8] & 0x7;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_get_queue_weight);
+
+int qman_ceetm_ratio2wbfs(u32 numerator, u32 denominator,
+			  struct qm_ceetm_weight_code *weight_code,
+			  int rounding)
+{
+	u64 n = numerator, d = denominator;
+	unsigned int x = 0;
+	u64 q;
+
+	if (!weight_code || !numerator || !denominator)
+		return -EINVAL;
+	if (n < d)
+		return -ERANGE;
+
+	while (x < 8 && n >= (d << (x + 1)))
+		x++;
+	if (x >= 8)
+		return -ERANGE;
+
+	q = ROUNDING(d << (x + 6), n, -rounding);
+	/* Carry exact-boundary rounding (q == 32) into the next octave (x+1, y=0)
+	 * so weights like 127/1 (or 63/1 with rounding > 0) encode cleanly. */
+	if (q == 32 && x < 7) {
+		x++;
+		q = 64;
+	}
+	if (q > 64 || q < 32 || (64 - q) >= 32)
+		return -ERANGE;
+
+	weight_code->x = x;
+	weight_code->y = (u8)(64 - q);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_ratio2wbfs);
+
+int qman_ceetm_wbfs2ratio(const struct qm_ceetm_weight_code *weight_code,
+			  u32 *numerator, u32 *denominator)
+{
+	if (!weight_code || !numerator || !denominator)
+		return -EINVAL;
+	*numerator = 1U << (weight_code->x + 6);
+	*denominator = 64U - weight_code->y;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_wbfs2ratio);
+
+int qman_ceetm_cq_get_frm_cnt(struct qm_ceetm_cq *cq, u32 *frm_cnt)
+{
+	struct qm_mcr_ceetm_cq_query res = {0};
+	int ret;
+
+	if (!cq || !cq->parent || !frm_cnt)
+		return -EINVAL;
+	ret = ceetm_query_cq(cq, &res);
+	if (ret)
+		return ret;
+	*frm_cnt = be24_get(res.frm_cnt);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_cq_get_frm_cnt);
+
+int qman_ceetm_cq_release_drained(struct qm_ceetm_cq *cq)
+{
+	if (!cq)
+		return -EINVAL;
+	if (!list_empty(&cq->bound_lfqids)) {
+		pr_err("CEETM: CQ %u has unreleased LFQIDs\n", cq->idx);
+		return -EBUSY;
+	}
+	list_del(&cq->node);
+	kfree(cq);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qman_ceetm_cq_release_drained);
 
 int qman_ceetm_cq_release(struct qm_ceetm_cq *cq)
 {
@@ -928,6 +1200,7 @@ EXPORT_SYMBOL_GPL(qman_ceetm_cq_pop);
 int qman_ceetm_drain_cq(struct qm_ceetm_cq *cq)
 {
 	struct qm_mcr_ceetm_cq_peek_pop_xsfdrread ppxr;
+	unsigned int tries = 0;
 	int ret;
 
 	do {
@@ -936,6 +1209,11 @@ int qman_ceetm_drain_cq(struct qm_ceetm_cq *cq)
 			pr_err("CEETM: failed to pop frame from CQ %u\n",
 			       cq->idx);
 			return -EINVAL;
+		}
+		if (++tries >= 4096) {
+			pr_err("CEETM: drain CQ %u exceeded pop bound\n",
+			       cq->idx);
+			return -ETIMEDOUT;
 		}
 	} while (!(ppxr.stat & 0x2));
 
@@ -1005,11 +1283,13 @@ int qman_ceetm_ccg_release(struct qm_ceetm_ccg *ccg)
 {
 	struct qm_mcc_ceetm_ccgr_config opts = {0};
 
-	/* Disable tail-drop so a re-claimed CCG starts clean */
+	/* Disable tail-drop and WRED so a re-claimed CCG starts clean */
 	opts.ccgrid = cpu_to_be16(CEETM_CCGR_CM_CONFIGURE |
 				  (ccg->parent->idx << 4) | ccg->idx);
 	opts.dcpid = ccg->parent->dcp_idx;
-	opts.we_mask = cpu_to_be16(QM_CCGR_WE_TD_EN | QM_CCGR_WE_MODE);
+	opts.we_mask = cpu_to_be16(QM_CCGR_WE_TD_EN | QM_CCGR_WE_MODE |
+				   QM_CCGR_WE_WR_EN_G | QM_CCGR_WE_WR_EN_Y |
+				   QM_CCGR_WE_WR_EN_R);
 	ceetm_configure_ccgr(&opts);
 
 	list_del(&ccg->node);

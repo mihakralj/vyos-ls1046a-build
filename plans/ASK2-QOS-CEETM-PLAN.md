@@ -1,6 +1,6 @@
 # ASK2 QoS, CEETM Egress Shaping, and Policer Coexistence Plan (G10 / T-M6-QOS)
 
-**Status:** Phases 0, 1, 2, 3, and 4a **cold-boot silicon-verified PASS** on DUT1 (`.185`): Phase 0 + Phase 1 (`2026.11.25-1958-rolling`, `4ec2fb73`, CI `45690319479`), `noqueue` SW-qdisc fix (`043d0bb3`) + Phase 2 (`2026.11.25-2359-rolling`, `b20fefc5`, CI `45725355638`), and **Phase 3 (`F-328` single-port MURAM DSCP→CEETM CQ map) + Phase 4a (`F-329` `HWP -> PLCR -> downstream` port-wide ingress policer)** (`2026.11.26-0425-rolling`, `fc37476d`, CI `45755039380`). Optional follow-ups: Phase 4b (`QM_EXPT_RATE` exception policer / `PREEMPT_POLICE_PKT`) and vendor A458 (bounded plain TX FQ drain before CEETM attach). All findings cross-checked against shipped kernel source (`qman_ceetm.c`, `dpaa_ceetm.{c,h}`, `F-327`, `F-328`, `F-329`), `ask.ko`, `arch/qman-ceetm.md`, `arch/fman-microcode-210-programming-reference.md`, vendor `/mnt/builds/ASK/cdx/`, and live DUT1 (`.185`) + live vendor reference board DUT2 (`.106`).
+**Status:** Phases 0, 1, 2, 3, and 4a **cold-boot silicon-verified PASS** on DUT1 (`.185`): Phase 0 + Phase 1 (`2026.11.25-1958-rolling`, `4ec2fb73`, CI `45690319479`), `noqueue` SW-qdisc fix (`043d0bb3`) + Phase 2 (`2026.11.25-2359-rolling`, `b20fefc5`, CI `45725355638`), and **Phase 3 (`F-328` single-port MURAM DSCP→CEETM CQ map) + Phase 4a (`F-329` `HWP -> PLCR -> downstream` port-wide ingress policer)** (`2026.11.26-0425-rolling`, `fc37476d`, CI `45755039380`). **A460** (`F-329` `peakrate` `mtu + VLAN_HLEN`), **A458** (bounded plain TX + no-confirm FQ drain + `ceetm_tx_paused` CGR wake guard), **Phase 5a** (`F-330` frame-mode CCGR WRED `TC_SETUP_QDISC_RED`), and **Phase 5b** (`F-331` QMan CEETM WBFS 8-CQ group + 5-tuple equal-weight flow-hash spreading) are **implemented, independently safety-reviewed, and ARM64 `W=1` + host-gate PASS** (awaiting CI ISO & cold-boot DUT1 silicon verification). Remaining optional follow-ups: **Phase 4b** (`QM_EXPT_RATE` exception policer / `PREEMPT_POLICE_PKT`) and VyOS CLI `vyos-1x-061`/`025` rendering for Phase 3 DSCP / Phase 5a WRED / `clsact` coexistence. All findings cross-checked against shipped kernel source (`qman_ceetm.c`, `dpaa_ceetm.{c,h}`, `F-327`..`F-331`), `ask.ko`, `arch/qman-ceetm.md`, `arch/fman.md`, `arch/muram.md`, `arch/fman-microcode-210-programming-reference.md`, vendor `/mnt/builds/ASK/cdx/`, and live DUT1 (`.185`) + live vendor reference board DUT2 (`.106`).
 
 ## 1. Executive summary
 
@@ -190,12 +190,59 @@ Every phase requires failing-first host checks, independent review before silico
   - Clean teardown (`tc qdisc del dev eth3/eth4 clsact`): `ingress policer detached (slot 16)/(slot 17)`; post-teardown 10 pings `10/10 (0% loss)`, unshaped HW iperf3 recovered (`7.74 Gbit/s` over 3 s), final `ask-check` `47/49 OK, 0 FAIL`.
 - **Phase 4b (optional follow-up):** ehash MISS-path shared FMPL exception policer (`QM_EXPT_RATE`) and per-flow `tc flower police` (`PREEMPT_POLICE_PKT`). Also optional follow-up from vendor `mono-1.6.1`: A458 bounded drain of plain TX FQs before `qman_ceetm_sp_set_lni()`.
 
+### Phase 5 — Optional Hardware Bufferbloat Control ("CAKE-Lite": WBFS 8-CQ Flow-Hash Isolation + Frame-Mode WRED + DiffServ Tinning) — **IMPLEMENTED, HOST-GATE + ARM64 `W=1` PASS (awaiting cold-boot DUT1 silicon verification)**
+
+Goal: deliver the closest wire-rate (2.5G–10G) bufferbloat mitigation DPAA1 silicon can actually execute — without mislabelling it as CAKE, without touching FMan microcode, and without weakening the Phase 1 SW-qdisc guard that protects real software `cake` on links where the A72 cores suffice.
+
+1. **A460 (`F-329`) + A458 (`F-330` + `dpaa_ceetm.c`) — IMPLEMENTED & SAFETY-REVIEWED:**
+   - **A460:** `F_329.py` pads two-rate `peakrate` `mtu` by `+ VLAN_HLEN` with overflow check (`-ERANGE`); our `fman_pcd_plcr.c` already uses `FLS_L2` (`0x00003000u`), avoiding Mono's PPPoE `L3_FRM_LEN` drop bug.
+   - **A458:** `dpaa_ceetm_drain_plain_tx_fqs()` pauses SW TX (with `priv->ceetm_tx_paused` blocking `dpaa_eth_cgscn()` async wakes) and polls both `FQ_TYPE_TX` and `FQ_TYPE_TX_NO_CONFIRM` FQs on `priv->dpaa_fq_list` via `qman_query_fq_np()` (50 ms bound, `-EBUSY` abort) before `qman_ceetm_sp_set_lni()`.
+2. **Phase 5a — Frame-mode CCGR WRED leaf offload (`F-330`, `dpaa_ceetm.c`, `qman_ceetm.c`, `ask_flow_offload.c`) — IMPLEMENTED & SAFETY-REVIEWED:**
+   - Implemented `TC_SETUP_QDISC_RED` (`TC_RED_REPLACE` / `TC_RED_DESTROY` / `TC_RED_STATS` / `TC_RED_XSTATS` / `TC_RED_GRAFT`) with big-endian `qm_cgr_wr_parm` encoder (`MA[31:24]|Mn[23:19]|SA[18:12]|Sn[11:6]|Pn[5:0]`), frame-mode clamping `<= min(half RX pool, 512)` (A337 safe), strict `-EOPNOTSUPP` rejection of `is_ecn`/`is_nodrop`, displaced-handle tracking, rebalance/MTU curve updates with ASK2 demotion sync, and pre-graft fail-closed `dpaa_ceetm_red_soft_pending()` + synchronous `POST_CHANGE` withdrawal in `ask_flow_offload.c`.
+   - Host gate: `bin/test-g10-phase5-wred.py` (ASan/UBSan harness + source contracts) — **PASS**.
+3. **Phase 5b — QMan CEETM WBFS 8-CQ group + 5-tuple flow-hash spreading (`F-331`, `qman_ceetm.c`, `dpaa_ceetm.c`, `dpaa_flow_offload.h`, `ask_hw.c`) — IMPLEMENTED & SAFETY-REVIEWED:**
+   - Added full NXP SDK WBFS primitives in `qman_ceetm.c` + `F_331.py`: `struct qm_ceetm_weight_code`, `qman_ceetm_channel_set_group()`/`_get_group()`, `qman_ceetm_channel_set_group_{cr,er}_eligibility()`, `qman_ceetm_cq_claim_A()`/`_B()`, `qman_ceetm_{set,get}_queue_weight()`, `qman_ceetm_ratio2wbfs()` (with exact octave-carry for boundary weights like `127/1` so every integer weight `1..248` encodes cleanly) / `_wbfs2ratio()`, `qman_ceetm_cq_get_frm_cnt()`, `qman_ceetm_cq_release_drained()`, bounded `qman_ceetm_drain_cq()`, and channel-release csch reset.
+   - Wired 2-level WBFS leaves (`opt->quantum` in `1..248`) into `dpaa_ceetm.c` (`DPAA_CEETM_WBFS_PRIO_A = 6`, combined Group A CQs `8..15` sitting below strict `0..6` and above strict `7`), with `ch->live_cq_mask` quarantine tracking, non-last WBFS CQ natural drain preserving Group A eligibility for surviving siblings, EQCR-first drain ordering, and `PRE_CHANGE`/`POST_CHANGE` quiesce around live weight changes.
+   - Wired lockless 5-tuple hash spreading (`dpaa_ceetm_pick_wbfs_slot()`, `dpaa_ceetm_offload_egress_fqid_hashed()`, `ask_hw_flow_key_hash()`, and `skb_get_hash(skb)` in `dpaa_ceetm_select_queue()`): unmarked flows falling back to a WBFS `defcls` with equal-weight WBFS siblings on the same inner channel spread evenly across all live equal-weight CQs `8..15` (while explicit `ct->mark`/`skb->priority` and unequal-weight tenant classes stay pinned, and **Phase 3 `F-328` MURAM DSCP map composes simultaneously**: mapped DSCPs jump to strict CQs `0..6`, while unmapped BE DSCP `0` falls back to each flow's 5-tuple-hashed WBFS CQ `8..15`).
+   - Host gate: `bin/test-g10-phase5b-wbfs.py` (ASan/UBSan harness testing all weights `1..248`, octave boundaries, GPC/eligibility bits, and 1,000-flow 8-bucket spread) — **PASS**.
+4. **Remaining acceptance gate (cold-boot DUT1):**
+   - Cold-boot DUT1 latency-under-load (RRUL / saturated multi-flow bulk + concurrent VoIP/ICMP/gaming flows): verify WBFS equal-weight sharing across competing bulk flows (`±5%`), strict-priority latency `< 1 ms` under 10G→shaped saturation, frame-mode WRED probabilistic early drops before hard tail-drop, zero `fmbm_rodc` / BMan pool exhaustion under 64 B stress, and clean teardown (`ask-check` `47/49 OK, 0 FAIL`).
+
 ---
 
-## 5. Open decisions requiring operator sign-off before coding
+## 5. CAKE Feasibility Analysis, Silicon Fact-Check & Operating Envelope
 
-1. **Phase 0 silicon probe first?** Confirm whether to run the quick read-only `QMAN_IP_REV` / CEETM channel-range check (resolving `8` vs `32` channels) and baseline `htb offload` check on DUT1 before authoring Phase 1.
-2. **Phase 1 scope:** Confirm shipping **Phase 1** (safety fixes + frame-mode CCGR + Two-LFQ-per-CQ shared SW/HW shaper + SW-qdisc bypass guard) as the first PR/CI cycle before multi-class Phase 2 and VyOS CLI wiring.
-3. **VyOS QoS CLI behavior:** When an operator configures `set qos policy shaper` on an ASK-engaged port, should VyOS:
-   - *(a, recommended)* Keep existing `set qos policy shaper` in software (honestly enforced by the Phase 1 SW-qdisc guard) and add an explicit opt-in `offload` flag for CEETM-compatible shapers, or
-   - *(b)* Auto-attempt `htb offload` for compatible shapers and fall back to software (with SW-qdisc guard) when incompatible?
+### 5.1 Why true CAKE (or CoDel/COBALT) cannot run in FMan microcode
+
+Confirmed against LS1046A DPAA RM Ch.3 & Ch.5, QEF `210.10.1` full decompilation (`arch/fman-microcode-210-full-reference.md`), and `arch/qman-ceetm.md`:
+
+1. **FMan does not own queues or dequeue timing:** FMan (`BMI -> PRS -> KG -> CC/FE-VM -> PLCR -> QMI`) is a stateless per-frame pipeline with 128 transient TNUMs and 256 B Internal Contexts. Once QMI enqueues an FD to QMan, FMan has zero visibility into queue depth or dequeue time. COBALT/CoDel require measuring **sojourn time** ($t_{\text{dequeue}} - t_{\text{enqueue}}$) at dequeue — neither FMan nor QMan CEETM hardware tracks packet sojourn time.
+2. **FMan Policer (`FMPL`) is not a shaper:** The 256-profile RFC 2698/4115 policer (separate 16 KiB PRAM, shipped in Phase 4a `F-329`) has zero buffering and drops/re-colors immediately rather than pacing bursts.
+3. **Closed microcode & state/cycle limits:** QEF `210.10.1` is a 12,851-word proprietary blob; ASK2 never patches IRAM. Even hypothetically, 1,024-queue `triple-isolate` host tables + per-queue CoDel/BLUE state + 8-way set-associative DRR++ loops cannot run inside FMan's stateless ingress pipeline.
+
+### 5.2 Silicon fact-check (correcting common DPAA1 / CAKE-lite misconceptions)
+
+| Claim in external analyses | LS1046A / ASK2 verified silicon truth |
+|---|---|
+| FMan clock is ~350–400 MHz | **Correction:** LS1046A FMan v3 runs at **~700 MHz** (32 Mpps / 22 Gbps aggregate, `arch/fman.md`, RM Ch.5). Core verdict still holds: FMan has no queue ownership or sojourn timer. |
+| MURAM holds BMan pools, PCD hash tables, and RX/TX buffers | **Correction:** MURAM is **384 KiB** (`arch/muram.md`) holding BMI port FIFOs, transient 256 B ICs, and the 64 KiB CC/PCD `gen_pool` arena (~58.8 KiB free). **BMan pools and ASK2's ehash flow table live in DDR4** (0 B per-flow MURAM in ASK2); Policer PRAM (16 KiB) and Parser soft-instruction RAM (2 KiB) are separate SRAMs. |
+| CEETM WRED can mark ECN via FMan header rewrite | **Correction (impossible):** CEETM WRED runs inside **QMan DCP0** *after* FMan finishes header rewrite and QMI enqueue. QMan CEETM CCGR can only **drop** (reject/ERN) — it cannot set IP ECN CE bits (confirmed in vendor `cdx_htb.c`: `is_ecn` is explicitly rejected). |
+| Tune CEETM WRED to ~5–10 ms worth of **bytes** | **Correction (starvation hazard — vendor bug A337):** Every queued frame holds 1 BMan RX buffer + 1 CEETM XSFDR even at 64 B. Byte-mode CCGR (`ccgp.mode = 0`) allows 10k–20k small frames to exhaust the 1,024-XSFDR budget and 5,120-buffer RX pool (`fmbm_rodc`). **Frame-mode CCGR (`ccgp.mode = 1`)** capped at `<= min(half RX pool, 512)` per port is mandatory. |
+| KeyGen 5-tuple hash spreads flows across 16–64 CQs per channel | **Correction:** A single CEETM channel has **16 CQs total** (`8` strict-priority `0..7` + `8` WBFS `8..15`), not 64 (though 30 usable channels exist SoC-wide under 8 LNIs). Moreover, on ASK2 ports KeyGen hashes into the ehash table — **`ask.ko` writes the egress `lfq_hw` LFQID per flow in the FE-VM `ENQUEUE_PKT` record**, so 5-tuple spreading across the 8 WBFS CQs requires **zero** KeyGen or microcode changes. |
+| CEETM has no framing overhead compensation | **Correction (partial):** CEETM LNI shapers support signed 6-bit **OAL (`-32..+31` B/frame)** — `dpaa_ceetm.c` already programs `OAL = 24` (Ethernet preamble+SFD+FCS+IFG, Erratum A-010383: `mps = 0` when `oal != 0`), covering fixed Ethernet/VLAN/PPPoE/DOCSIS overhead. Only non-linear ATM/ADSL 48/53-byte cell quantization is absent. |
+
+### 5.3 Operating envelope: when to use real software `cake` vs hardware CEETM
+
+| WAN speed / goal | Recommended mechanism | What you get (honest boundary) |
+|---|---|---|
+| **≤ ~1–1.5 Gbps** WAN, full bufferbloat / fairness priority | **Real Linux software `cake`** (protected automatically by Phase 1 `ask_tc_qdisc_is_soft()` bypass guard — verified on DUT1) | True 1,024-queue DRR++, `triple-isolate` per-host fairness, COBALT sojourn-time CoDel+BLUE, RFC 3168 ECN marking, ATM/overhead tables. CPU-forwarded on 4× A72 cores. |
+| **Multi-gigabit (2.5G–10G)** WAN, DiffServ prioritization + shaping (shipped today, Phases 1–3) | **ASK2 + CEETM 2-level HQoS** (`set qos policy shaper <name> offload` + `ct->mark` or Phase 3 `F-328` DSCP map) | Line-rate 10G HW offload, <1 ms strict-priority preemption (`0.3 ms` ICMP RTT under 600M saturation), shared SW+HW shaper, OAL=24, frame-mode CCGR tail-drop. No per-flow bulk isolation or early WRED. |
+| **Multi-gigabit (2.5G–10G)** WAN, hardware bufferbloat control (optional **Phase 5**) | **ASK2 + CEETM DiffServ + 8-CQ WBFS hash + frame-mode WRED** | Line-rate 10G HW offload, strict-priority tins (`CQ 0..7`), 8-bucket 5-tuple weighted bulk isolation (`CQ 8..15`), frame-mode WRED early drop, OAL framing. **Not CAKE:** no ECN marking, no sojourn-time CoDel, 8 bulk buckets (not 1,024), no per-host `triple-isolate`. |
+
+---
+
+## 6. Open follow-ups (operator choice)
+
+1. **Cold-boot DUT1 silicon verification of staged A460 + A458 + Phase 5a/5b:** verify two-rate VLAN `peakrate` padding (A460), plain TX + no-confirm FQ drain on CEETM attach (A458), frame-mode `TC_SETUP_QDISC_RED` WRED (`F-330`), and 8-CQ WBFS weighted sharing + opt-in (`ceetm_wbfs_hash=1`) 5-tuple hash spreading (`F-331`) on a freshly built CI ISO.
+2. **VyOS CLI rendering (`vyos-1x-061` + `vyos-1x-025`, zero new XML):** render Phase 3 DSCP `flower`, Phase 5a `random-detect` WRED, and `ingress-policer` `clsact` coexistence from existing VyOS `qos.xml.in` nodes.
+3. **Phase 4b (`QM_EXPT_RATE` / `PREEMPT_POLICE_PKT`):** shared FMPL profile on the ehash MISS chain to bound CPU punt floods without capping offloaded flows, and/or per-flow `tc flower police`.

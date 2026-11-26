@@ -51,6 +51,8 @@ def check_sources() -> None:
             "plcr_saved_rfpne",
             "hw.drop_yellow = true",
             "act->police.mtu",
+            "VLAN_HLEN",
+            "check_add_overflow",
             "check_mul_overflow",
             "TC_CLSMATCHALL_STATS",
             "dpaa_setup_tc_matchall_stats",
@@ -293,6 +295,15 @@ int main(void)
     assert(counter_delta(100, 150) == 50);
     assert(counter_delta(150, 150) == 0);
     assert(counter_delta(5000, 12) == 12);
+
+    /* 8. A460: FLS_L2 peakrate PBS adds VLAN_HLEN (+4) with u32 overflow guard. */
+    {
+        u32 pbs = 0;
+        u32 mtu_tagged = 1514U;
+        assert(!__builtin_add_overflow(mtu_tagged, 4U, &pbs));
+        assert(pbs == 1518U);
+        assert(__builtin_add_overflow(0xFFFFFFFEU, 4U, &pbs));
+    }
 
     printf("G10 Phase 4 HWP->PLCR->downstream policer C harness PASS\n");
     return 0;

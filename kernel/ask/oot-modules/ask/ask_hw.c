@@ -37,6 +37,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/jhash.h>
 #include <linux/atomic.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -2071,8 +2072,8 @@ int ask_hw_offload_engage(u8 hw_port_id)
 EXPORT_SYMBOL_GPL(ask_hw_offload_engage);
 
 static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id);
-static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 classid, u32 *fqid,
-				   bool allow_alloc, int *slotp);
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 classid, u32 flow_hash,
+				   u32 *fqid, bool allow_alloc, int *slotp);
 
 static int ask_hw_b2_port_of(const char *ifname, u8 *port_id)
 {
@@ -2785,8 +2786,28 @@ static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
  * Only ask_hw_prewarm_egress_fq() (genuinely safe process context, no
  * flow_block_lock held) passes allow_alloc=true.
  */
-static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 classid, u32 *fqid,
-				   bool allow_alloc, int *slotp)
+/* G10 Phase 5b: deterministic post-NAT 5-tuple hash shared verbatim with
+ * dpaa_ceetm_select_queue() via dpaa_ceetm_flow_hash_5tuple() so unmarked
+ * bulk flows stay on the exact same WBFS CQ across SW->HW offload handoff. */
+static u32 ask_hw_flow_key_hash(const struct ask_flow_key *key)
+{
+	const void *saddr, *daddr;
+	__be16 sport, dport;
+	u8 ip_ver;
+
+	if (!key)
+		return 0;
+	ip_ver = (key->l3_proto == ASK_FLOW_L3_IPV6) ? 6 : 4;
+	saddr = (key->nat_flags & ASK_NATF_SNAT) ? key->nat_src_ip : key->src_ip;
+	daddr = (key->nat_flags & ASK_NATF_DNAT) ? key->nat_dst_ip : key->dst_ip;
+	sport = (key->nat_flags & ASK_NATF_SPAT) ? key->nat_sport : key->sport;
+	dport = (key->nat_flags & ASK_NATF_DPAT) ? key->nat_dport : key->dport;
+	return dpaa_ceetm_flow_hash_5tuple(ip_ver, key->l4_proto,
+					   saddr, daddr, sport, dport);
+}
+
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 classid, u32 flow_hash,
+				   u32 *fqid, bool allow_alloc, int *slotp)
 {
 	struct ask_hw_pcd *h = ask_hw_pcd_inst;
 	struct net_device *dev;
@@ -2848,8 +2869,8 @@ static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 classid, u32 *fqid,
 			 * conventional WQ6 FQs stop dequeuing; target the active
 			 * leaf's no-confirm CEETM hw_lfq (0xF00xxx) matching
 			 * @classid (ct->mark) or defcls, or fail closed. */
-			ceetm_rc = dpaa_ceetm_offload_egress_fqid(phys, classid,
-								  &ceetm_fq);
+			ceetm_rc = dpaa_ceetm_offload_egress_fqid_hashed(
+					phys, classid, flow_hash, &ceetm_fq);
 			if (ceetm_rc < 0) {
 				mutex_unlock(&h->lock);
 				dev_put(dev);
@@ -3034,7 +3055,7 @@ bool ask_hw_port_is_l2(u8 hw_port_id)
 /* Cache-only egress FQ lookup: safe under rtnl (never allocates). */
 int ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid)
 {
-	return ask_hw_resolve_oif_fqid(ifindex, 0, fqid, false, NULL);
+	return ask_hw_resolve_oif_fqid(ifindex, 0, 0, fqid, false, NULL);
 }
 
 static DEFINE_MUTEX(ask_hw_prewarm_lock);
@@ -3834,7 +3855,7 @@ void ask_hw_prewarm_egress_fq(u8 hw_port_id)
 		ifindex = dev->ifindex;
 	rtnl_unlock();
 
-	if (ifindex && !ask_hw_resolve_oif_fqid(ifindex, 0, &fqid, true, &slot))
+	if (ifindex && !ask_hw_resolve_oif_fqid(ifindex, 0, 0, &fqid, true, &slot))
 		ask_hw_prewarm_flow_fqs(hw_port_id, slot);
 }
 
@@ -3927,7 +3948,8 @@ int ask_hw_flow_preflight(const struct ask_flow_key *key,
 	/* Egress forward FQ must exist before we publish. CR-013: this runs
 	 * in the flow-insert hot path under flow_block_lock -- never allow
 	 * the cold-cache allocation here. */
-	rc = ask_hw_resolve_oif_fqid(oif, key->ceetm_classid, &tx_fqid,
+	rc = ask_hw_resolve_oif_fqid(oif, key->ceetm_classid,
+				     ask_hw_flow_key_hash(key), &tx_fqid,
 				     false, NULL);
 	if (rc)
 		return rc;
@@ -3987,7 +4009,8 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 
 	/* CR-013: same hot-path constraint as ask_hw_flow_preflight() above --
 	 * this runs under flow_block_lock, never allow the cold-cache alloc. */
-	rc = ask_hw_resolve_oif_fqid(oif, key->ceetm_classid, &tx_fqid,
+	rc = ask_hw_resolve_oif_fqid(oif, key->ceetm_classid,
+				     ask_hw_flow_key_hash(key), &tx_fqid,
 				     false, &oif_slot);
 	if (rc)
 		return rc;

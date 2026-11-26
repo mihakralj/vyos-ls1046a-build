@@ -814,8 +814,15 @@ DPAA_ETH_C_EDITS = [
         "\t\t\t\t\t   \"peakrate policing requires a positive mtu\");\n"
         "\t\t\treturn -EOPNOTSUPP;\n"
         "\t\t}\n"
+        "\t\t/* A460: FLS_L2 meters Ethernet + 802.1Q tag; add VLAN_HLEN so\n"
+        "\t\t * mtu 1514 on a tagged WAN admits full-size 1518-byte frames. */\n"
+        "\t\tif (check_add_overflow(act->police.mtu, (u32)VLAN_HLEN,\n"
+        "\t\t\t\t       &hw.pbs_bytes)) {\n"
+        "\t\t\tNL_SET_ERR_MSG_MOD(extack,\n"
+        "\t\t\t\t\t   \"policer mtu exceeds hardware range\");\n"
+        "\t\t\treturn -ERANGE;\n"
+        "\t\t}\n"
         "\t\thw.trtcm     = true;\n"
-        "\t\thw.pbs_bytes = act->police.mtu;\n"
         "\t} else {\n"
         "\t\thw.trtcm     = false;\n"
         "\t\thw.pir_bps   = hw.cir_bps;\n"
@@ -949,11 +956,42 @@ DPAA_ETH_C_EDITS = [
 ]
 
 
+A460_OLD = (
+    "\t\thw.trtcm     = true;\n"
+    "\t\thw.pbs_bytes = act->police.mtu;\n"
+)
+A460_NEW = (
+    "\t\t/* A460: FLS_L2 meters Ethernet + 802.1Q tag; add VLAN_HLEN so\n"
+    "\t\t * mtu 1514 on a tagged WAN admits full-size 1518-byte frames. */\n"
+    "\t\tif (check_add_overflow(act->police.mtu, (u32)VLAN_HLEN,\n"
+    "\t\t\t\t       &hw.pbs_bytes)) {\n"
+    "\t\t\tNL_SET_ERR_MSG_MOD(extack,\n"
+    "\t\t\t\t\t   \"policer mtu exceeds hardware range\");\n"
+    "\t\t\treturn -ERANGE;\n"
+    "\t\t}\n"
+    "\t\thw.trtcm     = true;\n"
+)
+
+
 def apply_one(path: str, edits: list[tuple[str, str, str]]) -> None:
     with open(path, "r") as fh:
         text = fh.read()
     if MARK in text:
-        print(f"### {MARK}: {path} already applied")
+        upgraded = False
+        if path == DPAA_ETH_C and A460_NEW not in text:
+            if text.count(A460_OLD) != 1:
+                sys.exit(f"### {MARK}: {path}: marker present but A460 hunk missing and upgrade anchor not unique")
+            text = text.replace(A460_OLD, A460_NEW, 1)
+            upgraded = True
+        for label, _target, replacement in edits:
+            if replacement not in text:
+                sys.exit(f"### {MARK}: {path}: marker present but '{label}' missing")
+        if upgraded:
+            with open(path, "w") as fh:
+                fh.write(text)
+            print(f"### {MARK}: upgraded {path} with A460 VLAN_HLEN padding")
+        else:
+            print(f"### {MARK}: {path} already applied")
         return
     for label, target, replacement in edits:
         n = text.count(target)
