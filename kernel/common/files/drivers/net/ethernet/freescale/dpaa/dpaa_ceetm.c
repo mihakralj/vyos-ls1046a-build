@@ -38,9 +38,16 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
+#include <linux/if_vlan.h>
+#include <net/dsfield.h>
+#include <net/flow_offload.h>
 #include <net/pkt_cls.h>
 #include <soc/fsl/qman.h>
+#include <linux/fsl/fman_pcd.h>
 
+#include "fman.h"
 #include "fman_port.h"
 
 void dpaa_wgfp_egress_deactivate(struct net_device *dev);
@@ -48,6 +55,14 @@ void dpaa_wgfp_egress_deactivate(struct net_device *dev);
 #include "dpaa_eth.h"
 #include "dpaa_fman_caps.h"
 #include "dpaa_ceetm.h"
+
+/* G10 Phase 3 DSCP->CEETM forward helpers (implemented at end of file). */
+static u32 dpaa_ceetm_dscp_sw_minor_lookup(struct net_device *net_dev,
+					   const struct sk_buff *skb);
+static void dpaa_ceetm_dscp_resync(struct net_device *net_dev);
+static void dpaa_ceetm_dscp_teardown_pre(struct net_device *net_dev);
+static void dpaa_ceetm_dscp_teardown_post(struct net_device *net_dev,
+					  bool quiesce_ok);
 
 /* Sub-portal id is the low 5 bits of the FMan Tx port's QMan channel. */
 #define DPAA_CEETM_SP_MASK		0x1f
@@ -384,6 +399,11 @@ u16 dpaa_ceetm_select_queue(struct net_device *net_dev, struct sk_buff *skb,
 		if (classid)
 			slot = dpaa_ceetm_find_live_slot(ceetm, classid);
 	}
+	if (slot < 0) {
+		classid = dpaa_ceetm_dscp_sw_minor_lookup(net_dev, skb);
+		if (classid)
+			slot = dpaa_ceetm_find_live_slot(ceetm, classid);
+	}
 	if (slot < 0 && ceetm->defcls)
 		slot = dpaa_ceetm_find_live_slot(ceetm, ceetm->defcls);
 
@@ -714,11 +734,18 @@ void dpaa_ceetm_teardown(struct dpaa_priv *priv)
 	if (!ceetm)
 		return;
 
+	/* Unpublish any DSCP map on this port BEFORE PRE_CHANGE so no new HW
+	 * record gets DSCP_FQ_MAP_ENABLE during teardown. */
+	dpaa_ceetm_dscp_teardown_pre(net_dev);
+
 	/* Fence ASK2 admission and withdraw every HW flow targeting this
 	 * port's CEETM LFQIDs BEFORE stopping CEETM mode on the sub-portal. */
 	quiesce_rc = dpaa_fo_notify_egress_change(net_dev,
 						  DPAA_EGRESS_CEETM_PRE_CHANGE,
 						  0);
+
+	/* Clear MURAM DSCP table if quiesce succeeded, or poison handoff if not. */
+	dpaa_ceetm_dscp_teardown_post(net_dev, quiesce_rc == 0);
 
 	/* Stop diverting new SW frames, then wait for in-flight xmit to finish. */
 	smp_store_release(&priv->ceetm, NULL);
@@ -1070,6 +1097,7 @@ static int dpaa_ceetm_htb_leaf_alloc(struct net_device *net_dev,
 	/* Publish the slot last so xmit and ASK2 see a complete class. */
 	smp_store_release(&ceetm->leaf[slot].used, true);
 	opt->qid = ceetm->base_txq + slot;
+	dpaa_ceetm_dscp_resync(net_dev);
 
 	hw_fqid = ceetm->leaf[slot].hw_lfq ?
 		  (ceetm->leaf[slot].hw_lfq->idx & 0x00FFFFFFU) : 0;
@@ -1140,6 +1168,7 @@ static int dpaa_ceetm_htb_leaf_to_inner(struct net_device *net_dev,
 						  dpaa_ceetm_active_cqs(ceetm),
 						  1U), 1U);
 		if (dpaa_ceetm_destroy_class(cls, false, false)) {
+			dpaa_ceetm_dscp_resync(net_dev);
 			dpaa_fo_notify_egress_change(net_dev,
 						     DPAA_EGRESS_CEETM_POST_CHANGE,
 						     0);
@@ -1155,6 +1184,7 @@ static int dpaa_ceetm_htb_leaf_to_inner(struct net_device *net_dev,
 				WRITE_ONCE(cls->classid, parent_minor);
 				smp_store_release(&cls->used, true);
 			}
+			dpaa_ceetm_dscp_resync(net_dev);
 			dpaa_fo_notify_egress_change(net_dev,
 						     DPAA_EGRESS_CEETM_POST_CHANGE,
 						     0);
@@ -1168,6 +1198,7 @@ static int dpaa_ceetm_htb_leaf_to_inner(struct net_device *net_dev,
 	WRITE_ONCE(cls->classid, child_minor);
 	dpaa_ceetm_rebalance_ccgs(priv, ceetm, READ_ONCE(net_dev->mtu));
 	smp_store_release(&cls->used, true);
+	dpaa_ceetm_dscp_resync(net_dev);
 
 	new_fqid = cls->hw_lfq ? (cls->hw_lfq->idx & 0x00FFFFFFU) : 0;
 	dpaa_fo_notify_egress_change(net_dev, DPAA_EGRESS_CEETM_POST_CHANGE,
@@ -1228,6 +1259,7 @@ static int dpaa_ceetm_htb_leaf_del(struct net_device *net_dev,
 						1U), 1U);
 
 			if (dpaa_ceetm_destroy_class(cls, false, false)) {
+				dpaa_ceetm_dscp_resync(net_dev);
 				dpaa_fo_notify_egress_change(net_dev,
 							     DPAA_EGRESS_CEETM_POST_CHANGE,
 							     0);
@@ -1243,6 +1275,7 @@ static int dpaa_ceetm_htb_leaf_del(struct net_device *net_dev,
 					WRITE_ONCE(cls->classid, old_classid);
 					smp_store_release(&cls->used, true);
 				}
+				dpaa_ceetm_dscp_resync(net_dev);
 				dpaa_fo_notify_egress_change(net_dev,
 							     DPAA_EGRESS_CEETM_POST_CHANGE,
 							     0);
@@ -1255,6 +1288,7 @@ static int dpaa_ceetm_htb_leaf_del(struct net_device *net_dev,
 		WRITE_ONCE(cls->classid, ch->classid);
 		smp_store_release(&cls->used, true);
 		dpaa_ceetm_rebalance_ccgs(priv, ceetm, READ_ONCE(net_dev->mtu));
+		dpaa_ceetm_dscp_resync(net_dev);
 		dpaa_fo_notify_egress_change(net_dev,
 					     DPAA_EGRESS_CEETM_POST_CHANGE, 0);
 		return 0;
@@ -1262,6 +1296,7 @@ static int dpaa_ceetm_htb_leaf_del(struct net_device *net_dev,
 
 	dpaa_ceetm_destroy_class(cls, quiesce_rc != 0, true);
 	dpaa_ceetm_rebalance_ccgs(priv, ceetm, READ_ONCE(net_dev->mtu));
+	dpaa_ceetm_dscp_resync(net_dev);
 
 	dpaa_fo_notify_egress_change(net_dev, DPAA_EGRESS_CEETM_POST_CHANGE, 0);
 	return 0;
@@ -1499,3 +1534,666 @@ out_unlock:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dpaa_ceetm_offload_egress_fqid);
+
+/* -------------------------------------------------------------------------
+ * G10 Phase 3: Single-port per-packet MURAM DSCP -> CEETM CQ map (F-328).
+ *
+ * Bridges standard Linux clsact egress flower rules:
+ *   tc qdisc add dev ethX clsact
+ *   tc filter add dev ethX egress protocol ip flower ip_dscp <d> \
+ *       action skbedit priority <maj:min>
+ * onto microcode 210.10.1's 64-entry MURAM dscp_fqid_map (at fe_frag_off+28)
+ * and a symmetric lockless SW array consulted by dpaa_ceetm_select_queue().
+ *
+ * Precedence: ct->mark / skb->priority / skb->mark strictly outranks DSCP.
+ * Singleton: only one port per FMan may hold the MURAM table at a time;
+ * turning off drains all HW records on the port via PRE_CHANGE before another
+ * port may claim it (or holds it in RETIRING/poisoned if quiesce fails).
+ * ------------------------------------------------------------------------- */
+
+#define DPAA_CEETM_DSCP_MASK		0xfcU
+#define DPAA_CEETM_DSCP_SHIFT		2
+#define DPAA_CEETM_DSCP_COUNT		64
+
+enum dpaa_ceetm_dscp_state {
+	DPAA_DSCP_OFF = 0,
+	DPAA_DSCP_CLAIMED,
+	DPAA_DSCP_ON,
+	DPAA_DSCP_RETIRING,
+};
+
+struct dpaa_ceetm_dscp_filter {
+	struct list_head list;
+	struct rcu_head rcu;
+	unsigned long cookie;
+	u32 classid;		/* raw HTB handle from action skbedit priority */
+	u32 prio;
+	u32 chain;
+	__be16 n_proto;
+	u8 dscp;
+};
+
+/* All mutations run under RTNL; lockless readers use RCU / acquire-release. */
+static struct net_device *dpaa_ceetm_dscp_owner;
+static enum dpaa_ceetm_dscp_state dpaa_ceetm_dscp_state;
+static bool dpaa_ceetm_dscp_poisoned;
+static LIST_HEAD(dpaa_ceetm_dscp_filters);
+static LIST_HEAD(dpaa_ceetm_dscp_block_cb_list);
+static u32 dpaa_ceetm_dscp_sw_minor[DPAA_CEETM_DSCP_COUNT];
+
+static struct fman *dpaa_ceetm_get_fman(struct net_device *net_dev)
+{
+	struct dpaa_priv *priv;
+
+	if (!net_dev || !dpaa_get_rx_fman_port(net_dev))
+		return NULL;
+	priv = netdev_priv(net_dev);
+	if (!priv->mac_dev || !priv->mac_dev->fman_dev)
+		return NULL;
+	/* Avoid fman_bind() here: it takes a get_device() ref on every call. */
+	return dev_get_drvdata(priv->mac_dev->fman_dev);
+}
+
+static struct dpaa_ceetm_dscp_filter *
+dpaa_ceetm_dscp_find_cookie(unsigned long cookie)
+{
+	struct dpaa_ceetm_dscp_filter *f;
+
+	ASSERT_RTNL();
+	list_for_each_entry(f, &dpaa_ceetm_dscp_filters, list)
+		if (f->cookie == cookie)
+			return f;
+	return NULL;
+}
+
+static bool dpaa_ceetm_dscp_replaces(const struct dpaa_ceetm_dscp_filter *a,
+				     const struct dpaa_ceetm_dscp_filter *b)
+{
+	return a->prio == b->prio && a->chain == b->chain &&
+	       a->n_proto == b->n_proto && a->dscp == b->dscp;
+}
+
+static bool dpaa_ceetm_dscp_dual_stack_pair(const struct dpaa_ceetm_dscp_filter *a,
+					    const struct dpaa_ceetm_dscp_filter *b)
+{
+	return a->dscp == b->dscp && a->classid == b->classid &&
+	       ((a->n_proto == htons(ETH_P_IP) &&
+		 b->n_proto == htons(ETH_P_IPV6)) ||
+		(a->n_proto == htons(ETH_P_IPV6) &&
+		 b->n_proto == htons(ETH_P_IP)));
+}
+
+static int dpaa_ceetm_dscp_resolve_leaf(struct net_device *net_dev,
+					u32 raw_classid, u32 *out_minor,
+					u32 *out_hw_fqid)
+{
+	struct dpaa_priv *priv = netdev_priv(net_dev);
+	struct dpaa_ceetm *ceetm = priv->ceetm;
+	u32 minor;
+	int slot;
+
+	if (!ceetm)
+		return -EOPNOTSUPP;
+	minor = dpaa_ceetm_decode_classid(ceetm, raw_classid);
+	if (!minor)
+		return -EINVAL;
+	slot = dpaa_ceetm_find_slot(ceetm, minor);
+	if (slot < 0 || !ceetm->leaf[slot].used || !ceetm->leaf[slot].hw_lfq)
+		return -ENOENT;
+	if (out_minor)
+		*out_minor = minor;
+	if (out_hw_fqid)
+		*out_hw_fqid = ceetm->leaf[slot].hw_lfq->idx & 0x00FFFFFFU;
+	return 0;
+}
+
+/* Re-resolve every installed DSCP filter into both MURAM and the lockless SW
+ * lookup array. Called under RTNL after any filter or HTB leaf mutation. */
+static void dpaa_ceetm_dscp_resync(struct net_device *net_dev)
+{
+	struct dpaa_ceetm_dscp_filter *f;
+	struct fman *fm;
+	u32 sw_next[DPAA_CEETM_DSCP_COUNT];
+	u32 hw_next[DPAA_CEETM_DSCP_COUNT];
+	unsigned int d;
+
+	ASSERT_RTNL();
+	if (dpaa_ceetm_dscp_owner != net_dev ||
+	    (dpaa_ceetm_dscp_state != DPAA_DSCP_CLAIMED &&
+	     dpaa_ceetm_dscp_state != DPAA_DSCP_ON))
+		return;
+
+	memset(sw_next, 0, sizeof(sw_next));
+	memset(hw_next, 0, sizeof(hw_next));
+
+	list_for_each_entry(f, &dpaa_ceetm_dscp_filters, list) {
+		u32 minor = 0, hw_fqid = 0;
+
+		if (!dpaa_ceetm_dscp_resolve_leaf(net_dev, f->classid,
+						  &minor, &hw_fqid)) {
+			sw_next[f->dscp] = minor;
+			hw_next[f->dscp] = hw_fqid;
+		}
+	}
+
+	fm = dpaa_ceetm_get_fman(net_dev);
+	for (d = 0; d < DPAA_CEETM_DSCP_COUNT; d++) {
+		WRITE_ONCE(dpaa_ceetm_dscp_sw_minor[d], sw_next[d]);
+		if (fm)
+			fman_pcd_dscp_map_set(fm, (u8)d, hw_next[d]);
+	}
+}
+
+static int dpaa_ceetm_dscp_finish_retiring(void)
+{
+	struct net_device *retiring = dpaa_ceetm_dscp_owner;
+	struct fman *fm;
+	int quiesce_rc;
+
+	ASSERT_RTNL();
+	if (dpaa_ceetm_dscp_poisoned)
+		return -EBUSY;
+	if (!retiring || dpaa_ceetm_dscp_state != DPAA_DSCP_RETIRING)
+		return 0;
+
+	quiesce_rc = dpaa_fo_notify_egress_change(retiring,
+						  DPAA_EGRESS_CEETM_PRE_CHANGE,
+						  0);
+	if (quiesce_rc) {
+		dpaa_fo_notify_egress_change(retiring,
+					     DPAA_EGRESS_CEETM_POST_CHANGE, 0);
+		return -EBUSY;
+	}
+
+	fm = dpaa_ceetm_get_fman(retiring);
+	if (fm)
+		fman_pcd_dscp_map_clear_all(fm);
+	smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_OFF);
+	smp_store_release(&dpaa_ceetm_dscp_owner, NULL);
+	dpaa_fo_notify_egress_change(retiring,
+				     DPAA_EGRESS_CEETM_POST_CHANGE, 0);
+	return 0;
+}
+
+static void dpaa_ceetm_dscp_teardown_pre(struct net_device *net_dev)
+{
+	ASSERT_RTNL();
+	if (dpaa_ceetm_dscp_owner != net_dev)
+		return;
+	smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_RETIRING);
+}
+
+static void dpaa_ceetm_dscp_teardown_post(struct net_device *net_dev,
+					  bool quiesce_ok)
+{
+	struct dpaa_ceetm_dscp_filter *f, *tmp;
+	struct fman *fm;
+	unsigned int d;
+
+	ASSERT_RTNL();
+	if (dpaa_ceetm_dscp_owner != net_dev)
+		return;
+
+	list_for_each_entry_safe(f, tmp, &dpaa_ceetm_dscp_filters, list) {
+		list_del_rcu(&f->list);
+		kfree_rcu(f, rcu);
+	}
+	for (d = 0; d < DPAA_CEETM_DSCP_COUNT; d++)
+		WRITE_ONCE(dpaa_ceetm_dscp_sw_minor[d], 0);
+
+	if (quiesce_ok) {
+		fm = dpaa_ceetm_get_fman(net_dev);
+		if (fm)
+			fman_pcd_dscp_map_clear_all(fm);
+		smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_OFF);
+		smp_store_release(&dpaa_ceetm_dscp_owner, NULL);
+	} else {
+		/* Retained HW records may still read MURAM dscp_fqid_map;
+		 * block any future port from overwriting it, and drop the raw
+		 * net_device pointer so it can never dangle after free_netdev. */
+		dpaa_ceetm_dscp_poisoned = true;
+		smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_OFF);
+		smp_store_release(&dpaa_ceetm_dscp_owner, NULL);
+		netdev_err(net_dev,
+			   "CEETM: DSCP map retained after failed teardown quiesce\n");
+	}
+}
+
+static void dpaa_ceetm_dscp_flush_port(struct net_device *net_dev)
+{
+	struct dpaa_ceetm_dscp_filter *f, *tmp;
+	unsigned int d;
+
+	ASSERT_RTNL();
+	if (dpaa_ceetm_dscp_owner != net_dev)
+		return;
+
+	list_for_each_entry_safe(f, tmp, &dpaa_ceetm_dscp_filters, list) {
+		list_del_rcu(&f->list);
+		kfree_rcu(f, rcu);
+	}
+	for (d = 0; d < DPAA_CEETM_DSCP_COUNT; d++)
+		WRITE_ONCE(dpaa_ceetm_dscp_sw_minor[d], 0);
+
+	if (dpaa_ceetm_dscp_state == DPAA_DSCP_ON ||
+	    dpaa_ceetm_dscp_state == DPAA_DSCP_RETIRING) {
+		smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_RETIRING);
+		if (dpaa_ceetm_dscp_finish_retiring() &&
+		    net_dev->reg_state >= NETREG_UNREGISTERING) {
+			/* Netdev is going away before flows quiesced: poison
+			 * the MURAM singleton and drop the raw netdev pointer. */
+			dpaa_ceetm_dscp_poisoned = true;
+			smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_OFF);
+			smp_store_release(&dpaa_ceetm_dscp_owner, NULL);
+		}
+	} else if (dpaa_ceetm_dscp_state == DPAA_DSCP_CLAIMED) {
+		struct fman *fm = dpaa_ceetm_get_fman(net_dev);
+
+		if (fm)
+			fman_pcd_dscp_map_clear_all(fm);
+		smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_OFF);
+		smp_store_release(&dpaa_ceetm_dscp_owner, NULL);
+	}
+}
+
+void dpaa_ceetm_dscp_netdev_unregister(struct net_device *net_dev)
+{
+	ASSERT_RTNL();
+	if (!net_dev || dpaa_ceetm_dscp_owner != net_dev)
+		return;
+	dpaa_ceetm_dscp_flush_port(net_dev);
+	if (dpaa_ceetm_dscp_owner == net_dev) {
+		dpaa_ceetm_dscp_poisoned = true;
+		smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_OFF);
+		smp_store_release(&dpaa_ceetm_dscp_owner, NULL);
+	}
+}
+
+static int dpaa_ceetm_dscp_parse(struct flow_cls_offload *f, u8 *dscp,
+				 __be16 *n_proto, u32 *classid)
+{
+	struct netlink_ext_ack *extack = f->common.extack;
+	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
+	const struct flow_action_entry *act;
+	struct flow_match_control control;
+	struct flow_match_basic basic;
+	struct flow_match_ip ip;
+	const unsigned long long allowed =
+		BIT_ULL(FLOW_DISSECTOR_KEY_CONTROL) |
+		BIT_ULL(FLOW_DISSECTOR_KEY_BASIC) |
+		BIT_ULL(FLOW_DISSECTOR_KEY_IP);
+
+	if (rule->match.dissector->used_keys & ~allowed) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "CEETM egress flower supports only ip_dscp");
+		return -EOPNOTSUPP;
+	}
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CONTROL)) {
+		flow_rule_match_control(rule, &control);
+		if (control.mask->flags || control.mask->addr_type ||
+		    control.mask->thoff) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "CEETM egress flower supports only ip_dscp");
+			return -EOPNOTSUPP;
+		}
+	}
+	*n_proto = 0;
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
+		flow_rule_match_basic(rule, &basic);
+		if (basic.mask->ip_proto) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "CEETM egress flower supports only ip_dscp");
+			return -EOPNOTSUPP;
+		}
+		*n_proto = basic.key->n_proto & basic.mask->n_proto;
+	}
+	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IP)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "CEETM egress flower requires an ip_dscp match");
+		return -EOPNOTSUPP;
+	}
+	flow_rule_match_ip(rule, &ip);
+	if (ip.mask->ttl) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "CEETM egress flower does not support ttl match");
+		return -EOPNOTSUPP;
+	}
+	if (ip.mask->tos != DPAA_CEETM_DSCP_MASK) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "CEETM egress flower must match full 6-bit DSCP without ECN bits");
+		return -EOPNOTSUPP;
+	}
+	if (!flow_offload_has_one_action(&rule->action)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "CEETM egress flower supports exactly one action");
+		return -EOPNOTSUPP;
+	}
+	act = &rule->action.entries[0];
+	if (act->id != FLOW_ACTION_PRIORITY || !act->priority) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "CEETM egress flower supports only skbedit priority <classid>");
+		return -EOPNOTSUPP;
+	}
+
+	*dscp = (ip.key->tos & DPAA_CEETM_DSCP_MASK) >> DPAA_CEETM_DSCP_SHIFT;
+	*classid = act->priority;
+	return 0;
+}
+
+static int dpaa_ceetm_dscp_replace(struct net_device *net_dev,
+				   struct flow_cls_offload *f)
+{
+	struct netlink_ext_ack *extack = f->common.extack;
+	struct dpaa_priv *priv = netdev_priv(net_dev);
+	struct dpaa_ceetm_dscp_filter *flt, *existing;
+	struct fman *fm;
+	__be16 n_proto;
+	u32 classid, minor = 0, hw_fqid = 0;
+	u8 dscp;
+	bool was_on, was_retiring;
+	int err;
+
+	ASSERT_RTNL();
+	if (!f->common.skip_sw) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "CEETM egress DSCP offload requires skip_sw to preserve mark precedence");
+		return -EOPNOTSUPP;
+	}
+	if (!priv->ceetm) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "CEETM HTB offload is not installed on this interface");
+		return -EOPNOTSUPP;
+	}
+	fm = dpaa_ceetm_get_fman(net_dev);
+	if (!fm)
+		return -EOPNOTSUPP;
+
+	err = dpaa_ceetm_dscp_parse(f, &dscp, &n_proto, &classid);
+	if (err)
+		return err;
+
+	err = dpaa_ceetm_dscp_resolve_leaf(net_dev, classid, &minor, &hw_fqid);
+	if (err) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "target HTB offload class not found on this interface");
+		return err;
+	}
+
+	if (dpaa_ceetm_dscp_poisoned) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "hardware DSCP map is quarantined after prior quiesce failure");
+		return -EBUSY;
+	}
+	if (dpaa_ceetm_dscp_owner && dpaa_ceetm_dscp_owner != net_dev) {
+		if (dpaa_ceetm_dscp_finish_retiring()) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "hardware DSCP map serves one port at a time; another port holds it");
+			return -EBUSY;
+		}
+		if (dpaa_ceetm_dscp_owner && dpaa_ceetm_dscp_owner != net_dev) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "hardware DSCP map serves one port at a time; another port holds it");
+			return -EBUSY;
+		}
+	}
+
+	flt = kzalloc(sizeof(*flt), GFP_KERNEL);
+	if (!flt)
+		return -ENOMEM;
+	flt->cookie = f->cookie;
+	flt->classid = classid;
+	flt->prio = f->common.prio;
+	flt->chain = f->common.chain_index;
+	flt->n_proto = n_proto;
+	flt->dscp = dscp;
+
+	list_for_each_entry(existing, &dpaa_ceetm_dscp_filters, list) {
+		if (existing->dscp == dscp && existing->cookie != f->cookie &&
+		    !dpaa_ceetm_dscp_replaces(flt, existing) &&
+		    !dpaa_ceetm_dscp_dual_stack_pair(flt, existing)) {
+			kfree(flt);
+			NL_SET_ERR_MSG_MOD(extack,
+					   "another egress filter already claims that DSCP");
+			return -EEXIST;
+		}
+	}
+
+	was_on = (dpaa_ceetm_dscp_owner == net_dev &&
+		  dpaa_ceetm_dscp_state == DPAA_DSCP_ON);
+	was_retiring = (dpaa_ceetm_dscp_owner == net_dev &&
+			dpaa_ceetm_dscp_state == DPAA_DSCP_RETIRING);
+	if (!was_on) {
+		if (!dpaa_ceetm_dscp_owner) {
+			fman_pcd_dscp_map_clear_all(fm);
+			smp_store_release(&dpaa_ceetm_dscp_owner, net_dev);
+		}
+		smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_CLAIMED);
+	}
+
+	existing = dpaa_ceetm_dscp_find_cookie(f->cookie);
+	if (existing) {
+		existing->classid = classid;
+		existing->dscp = dscp;
+		kfree(flt);
+		flt = existing;
+	} else {
+		list_add_tail_rcu(&flt->list, &dpaa_ceetm_dscp_filters);
+	}
+	dpaa_ceetm_dscp_resync(net_dev);
+
+	if (!was_on) {
+		int qrc;
+
+		/* Retire pre-existing unmarked HW flows on this port so they
+		 * re-admit with DSCP_FQ_MAP_ENABLE set in ENQUEUE word2. */
+		qrc = dpaa_fo_notify_egress_change(net_dev,
+						   DPAA_EGRESS_CEETM_PRE_CHANGE,
+						   0);
+		if (qrc) {
+			if (!existing) {
+				list_del_rcu(&flt->list);
+				kfree_rcu(flt, rcu);
+			}
+			WRITE_ONCE(dpaa_ceetm_dscp_sw_minor[dscp], 0);
+			if (was_retiring) {
+				/* Preserve RETIRING ownership so no other port
+				 * can overwrite MURAM while unquiesced flows
+				 * on @net_dev may still read it. */
+				smp_store_release(&dpaa_ceetm_dscp_state,
+						  DPAA_DSCP_RETIRING);
+			} else {
+				fman_pcd_dscp_map_clear_all(fm);
+				smp_store_release(&dpaa_ceetm_dscp_state,
+						  DPAA_DSCP_OFF);
+				smp_store_release(&dpaa_ceetm_dscp_owner, NULL);
+			}
+			dpaa_fo_notify_egress_change(net_dev,
+						     DPAA_EGRESS_CEETM_POST_CHANGE,
+						     0);
+			NL_SET_ERR_MSG_MOD(extack,
+					   "failed to quiesce ASK flows before enabling DSCP map");
+			return -EBUSY;
+		}
+		smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_ON);
+		dpaa_fo_notify_egress_change(net_dev,
+					     DPAA_EGRESS_CEETM_POST_CHANGE, 0);
+	}
+	return 0;
+}
+
+static int dpaa_ceetm_dscp_destroy(struct net_device *net_dev,
+				   struct flow_cls_offload *f)
+{
+	struct dpaa_ceetm_dscp_filter *flt;
+
+	ASSERT_RTNL();
+	if (dpaa_ceetm_dscp_owner != net_dev)
+		return -ENOENT;
+	flt = dpaa_ceetm_dscp_find_cookie(f->cookie);
+	if (!flt)
+		return -ENOENT;
+
+	list_del_rcu(&flt->list);
+	dpaa_ceetm_dscp_resync(net_dev);
+	kfree_rcu(flt, rcu);
+
+	if (list_empty(&dpaa_ceetm_dscp_filters) &&
+	    dpaa_ceetm_dscp_state == DPAA_DSCP_ON) {
+		smp_store_release(&dpaa_ceetm_dscp_state, DPAA_DSCP_RETIRING);
+		dpaa_ceetm_dscp_finish_retiring();
+	}
+	return 0;
+}
+
+static int dpaa_ceetm_dscp_block_cb(enum tc_setup_type type, void *type_data,
+				    void *cb_priv)
+{
+	struct net_device *net_dev = cb_priv;
+	struct flow_cls_offload *f = type_data;
+
+	if (!tc_cls_can_offload_and_chain0(net_dev, type_data))
+		return -EOPNOTSUPP;
+	if (type != TC_SETUP_CLSFLOWER)
+		return -EOPNOTSUPP;
+
+	switch (f->command) {
+	case FLOW_CLS_REPLACE:
+		return dpaa_ceetm_dscp_replace(net_dev, f);
+	case FLOW_CLS_DESTROY:
+		return dpaa_ceetm_dscp_destroy(net_dev, f);
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
+static void dpaa_ceetm_dscp_block_release(void *cb_priv)
+{
+	struct net_device *net_dev = cb_priv;
+
+	dpaa_ceetm_dscp_flush_port(net_dev);
+}
+
+int dpaa_ceetm_setup_dscp_block(struct net_device *net_dev,
+				struct flow_block_offload *f)
+{
+	struct flow_block_cb *block_cb;
+
+	ASSERT_RTNL();
+	if (f->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_EGRESS)
+		return -EOPNOTSUPP;
+
+	f->driver_block_list = &dpaa_ceetm_dscp_block_cb_list;
+
+	switch (f->command) {
+	case FLOW_BLOCK_BIND:
+		if (flow_block_cb_is_busy(dpaa_ceetm_dscp_block_cb, net_dev,
+					  &dpaa_ceetm_dscp_block_cb_list))
+			return -EBUSY;
+		block_cb = flow_block_cb_alloc(dpaa_ceetm_dscp_block_cb,
+					       net_dev, net_dev,
+					       dpaa_ceetm_dscp_block_release);
+		if (IS_ERR(block_cb))
+			return PTR_ERR(block_cb);
+		flow_block_cb_add(block_cb, f);
+		list_add_tail(&block_cb->driver_list,
+			      &dpaa_ceetm_dscp_block_cb_list);
+		return 0;
+	case FLOW_BLOCK_UNBIND:
+		block_cb = flow_block_cb_lookup(f->block,
+						dpaa_ceetm_dscp_block_cb,
+						net_dev);
+		if (!block_cb)
+			return -ENOENT;
+		flow_block_cb_remove(block_cb, f);
+		list_del(&block_cb->driver_list);
+		return 0;
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
+/* Lockless SW TX lookup (called from dpaa_ceetm_select_queue): extract IPv4 or
+ * IPv6 DSCP (including VLAN-tagged frames) without mutating @skb. */
+static u32 dpaa_ceetm_dscp_sw_minor_lookup(struct net_device *net_dev,
+					   const struct sk_buff *skb)
+{
+	__be16 proto;
+	int nh_off;
+	u8 dscp;
+
+	if (smp_load_acquire(&dpaa_ceetm_dscp_state) != DPAA_DSCP_ON ||
+	    smp_load_acquire(&dpaa_ceetm_dscp_owner) != net_dev)
+		return 0;
+	nh_off = skb_network_offset(skb);
+	if (nh_off < (int)ETH_HLEN)
+		return 0;
+	proto = vlan_get_protocol(skb);
+	if (proto == htons(ETH_P_IP)) {
+		if (skb_headlen(skb) < (unsigned int)nh_off + sizeof(struct iphdr))
+			return 0;
+		dscp = ipv4_get_dsfield(ip_hdr(skb)) >> DPAA_CEETM_DSCP_SHIFT;
+	} else if (proto == htons(ETH_P_IPV6)) {
+		if (skb_headlen(skb) < (unsigned int)nh_off + sizeof(struct ipv6hdr))
+			return 0;
+		dscp = ipv6_get_dsfield(ipv6_hdr(skb)) >> DPAA_CEETM_DSCP_SHIFT;
+	} else {
+		return 0;
+	}
+	if (dscp >= DPAA_CEETM_DSCP_COUNT)
+		return 0;
+	return READ_ONCE(dpaa_ceetm_dscp_sw_minor[dscp]);
+}
+
+bool dpaa_ceetm_dscp_map_active(struct net_device *dev)
+{
+	if (!dev)
+		return false;
+	return smp_load_acquire(&dpaa_ceetm_dscp_state) == DPAA_DSCP_ON &&
+	       smp_load_acquire(&dpaa_ceetm_dscp_owner) == dev;
+}
+EXPORT_SYMBOL_GPL(dpaa_ceetm_dscp_map_active);
+
+bool dpaa_ceetm_dscp_cookie_offloaded(struct net_device *dev,
+				      unsigned long cookie)
+{
+	struct dpaa_ceetm_dscp_filter *f;
+	bool found = false;
+
+	if (!dev)
+		return false;
+	rcu_read_lock();
+	if (smp_load_acquire(&dpaa_ceetm_dscp_state) == DPAA_DSCP_ON &&
+	    smp_load_acquire(&dpaa_ceetm_dscp_owner) == dev) {
+		list_for_each_entry_rcu(f, &dpaa_ceetm_dscp_filters, list) {
+			if (f->cookie == cookie) {
+				found = true;
+				break;
+			}
+		}
+	}
+	rcu_read_unlock();
+	return found;
+}
+EXPORT_SYMBOL_GPL(dpaa_ceetm_dscp_cookie_offloaded);
+
+/* Lockless check: true iff @classid matches a live HTB offload leaf on @dev.
+ * Used by ASK2 so unrelated non-HTB ct->mark values still consult DSCP map,
+ * matching dpaa_ceetm_select_queue() SW precedence. */
+bool dpaa_ceetm_classid_is_live(struct net_device *dev, u32 classid)
+{
+	struct dpaa_priv *priv;
+	struct dpaa_ceetm *ceetm;
+	u32 minor;
+
+	if (!dev || !classid || !dpaa_get_rx_fman_port(dev))
+		return false;
+	priv = netdev_priv(dev);
+	ceetm = READ_ONCE(priv->ceetm);
+	if (!ceetm)
+		return false;
+	minor = dpaa_ceetm_decode_classid(ceetm, classid);
+	if (!minor)
+		return false;
+	return dpaa_ceetm_find_live_slot(ceetm, minor) >= 0;
+}
+EXPORT_SYMBOL_GPL(dpaa_ceetm_classid_is_live);

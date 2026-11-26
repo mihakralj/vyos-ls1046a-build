@@ -56,6 +56,7 @@
 #include <linux/jiffies.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
+#include <net/tcx.h>
 #include <net/arp.h>
 #include <net/ndisc.h>
 #include <net/neighbour.h>
@@ -3304,6 +3305,32 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		action.vlan_push_tci = ntohs(key->vlan_push_tci);
 		action.vlan_push_tpid = ntohs(key->vlan_push_tpid);
 		action.pppoe_sid = key->pppoe_push_sid;	/* F-261 */
+	}
+
+	/* G10 Phase 3: on flows without a live CEETM class match egressing the
+	 * port that owns the 210.10.1 MURAM DSCP->CEETM table, enable per-packet
+	 * DSCP lookup in ENQUEUE_PKT word2 (live ct->mark / ceetm_classid
+	 * strictly outranks DSCP; unrelated non-HTB marks still consult DSCP,
+	 * matching dpaa_ceetm_select_queue()). Also resolve oif_phys_ifindex
+	 * when egress_dev is NULL (ARP-deferred / neigh-rebuilt paths). */
+	if ((action.tx_fqid & 0x00F00000U) == 0x00F00000U) {
+		rcu_read_lock();
+		{
+			const struct net_device *odev = egress_dev;
+			const struct net_device *phys;
+
+			if (!odev && key->oif_phys_ifindex)
+				odev = dev_get_by_index_rcu(&init_net,
+							    key->oif_phys_ifindex);
+			phys = (odev && is_vlan_dev(odev)) ?
+			       vlan_dev_real_dev(odev) : odev;
+			if (phys &&
+			    !dpaa_ceetm_classid_is_live((struct net_device *)phys,
+							key->ceetm_classid) &&
+			    dpaa_ceetm_dscp_map_active((struct net_device *)phys))
+				action.dscp_fq_map = true;
+		}
+		rcu_read_unlock();
 	}
 
 	/* F-195/F-204 contract: the second argument remains exclusively the
@@ -7520,9 +7547,17 @@ static void ask_flow_offload_stats_cb(struct net_device *dev,
 		ask_port_stats_get(dev->ifindex, hw);
 }
 
+static bool ask_tc_qdisc_is_soft(struct net_device *dev);
+
 static int ask_flow_offload_egress_change(struct net_device *dev,
 					  enum dpaa_egress_event ev, u32 fqid)
 {
+	/* G10 Phase 3: synchronously refresh soft-qdisc/clsact state BEFORE
+	 * lifting ceetm_transitioning on POST_CHANGE so removing HTB offload
+	 * while clsact egress filters remain never opens a 1 s bypass window. */
+	if (ev == DPAA_EGRESS_CEETM_POST_CHANGE && dev)
+		ask_hw_set_dev_soft_qdisc(dev->ifindex,
+					  ask_tc_qdisc_is_soft(dev));
 	return ask_hw_egress_ceetm_event(dev, (int)ev, fqid);
 }
 
@@ -7533,6 +7568,28 @@ static int ask_flow_offload_egress_change(struct net_device *dev,
  * VLAN vifs. Flows egressing such a device are kept in software (and existing
  * HW records are retired) so ASK2 never silently bypasses an operator's qdisc.
  */
+#ifdef CONFIG_NET_XGRESS
+struct ask_tc_egress_walk_ctx {
+	struct tcf_walker w;
+	struct net_device *dev;
+	bool unoffloaded;
+};
+
+static int ask_tc_egress_walk_fn(struct tcf_proto *tp, void *fh,
+				 struct tcf_walker *arg)
+{
+	struct ask_tc_egress_walk_ctx *ctx =
+		container_of(arg, struct ask_tc_egress_walk_ctx, w);
+
+	if (!dpaa_ceetm_dscp_cookie_offloaded(ctx->dev, (unsigned long)fh)) {
+		ctx->unoffloaded = true;
+		arg->stop = 1;
+		return -ECANCELED;
+	}
+	return 0;
+}
+#endif
+
 static bool ask_tc_qdisc_is_soft(struct net_device *dev)
 {
 	struct Qdisc *q;
@@ -7542,8 +7599,59 @@ static bool ask_tc_qdisc_is_soft(struct net_device *dev)
 	if (!dev)
 		return false;
 #ifdef CONFIG_NET_XGRESS
-	if (rcu_access_pointer(dev->tcx_egress))
-		return true;
+	{
+		struct bpf_mprog_entry *entry =
+			rcu_dereference_rtnl(dev->tcx_egress);
+
+		if (entry) {
+			struct tcx_entry *tcx = tcx_entry(entry);
+			struct tcf_block *block;
+			struct mini_Qdisc *miniq;
+
+			if (bpf_mprog_total(entry))
+				return true;
+			/* clsact + flower are DOIT_UNLOCKED: snapshot block
+			 * under RCU and walk chains/protos with refcounted
+			 * iterators, draining to NULL so refs always drop. */
+			rcu_read_lock();
+			miniq = rcu_dereference(tcx->miniq);
+			block = miniq ? miniq->block : NULL;
+			rcu_read_unlock();
+			if (block) {
+				struct tcf_chain *chain;
+				bool soft = false;
+
+				for (chain = tcf_get_next_chain(block, NULL);
+				     chain;
+				     chain = tcf_get_next_chain(block, chain)) {
+					struct tcf_proto *tp;
+
+					for (tp = tcf_get_next_proto(chain, NULL);
+					     tp;
+					     tp = tcf_get_next_proto(chain, tp)) {
+						struct ask_tc_egress_walk_ctx ctx = {
+							.w = { .fn = ask_tc_egress_walk_fn },
+							.dev = dev,
+						};
+
+						if (soft)
+							continue;
+						if (!tp->ops ||
+						    strcmp(tp->ops->kind, "flower") ||
+						    !tp->ops->walk) {
+							soft = true;
+							continue;
+						}
+						tp->ops->walk(tp, &ctx.w, true);
+						if (ctx.unoffloaded)
+							soft = true;
+					}
+				}
+				if (soft)
+					return true;
+			}
+		}
+	}
 #endif
 	q = rtnl_dereference(dev->qdisc);
 	/* Linux noqueue_qdisc_ops clears q->enqueue=NULL without setting

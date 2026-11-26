@@ -1,6 +1,6 @@
 # ASK2 QoS, CEETM Egress Shaping, and Policer Coexistence Plan (G10 / T-M6-QOS)
 
-**Status:** Phase 0 + Phase 1 **cold-boot silicon-verified PASS** (`2026.11.25-1958-rolling`, `4ec2fb73`, CI `45690319479` on DUT1 `.185`); `noqueue` SW-qdisc guard bug fixed (`043d0bb3`); **Phase 2 implemented and host/build/review-verified** (awaiting CI ISO + cold-boot silicon gate). All findings cross-checked against shipped kernel source (`qman_ceetm.c`, `dpaa_ceetm.{c,h}`, `F-327`), `ask.ko`, `arch/qman-ceetm.md`, `arch/fman-microcode-210-programming-reference.md`, vendor `/mnt/builds/ASK/cdx/`, and live DUT1 (`.185`) + live vendor reference board DUT2 (`.106`).
+**Status:** Phase 0 + Phase 1 **cold-boot silicon-verified PASS** (`2026.11.25-1958-rolling`, `4ec2fb73`, CI `45690319479` on DUT1 `.185`); `noqueue` SW-qdisc guard bug fix (`043d0bb3`) + **Phase 2 cold-boot silicon-verified PASS** (`2026.11.25-2359-rolling`, `b20fefc5`, CI `45725355638` on DUT1 `.185`). Phase 3 (single-port MURAM DSCP map) and Phase 4 (ingress/exception policing) remain open. All findings cross-checked against shipped kernel source (`qman_ceetm.c`, `dpaa_ceetm.{c,h}`, `F-327`), `ask.ko`, `arch/qman-ceetm.md`, `arch/fman-microcode-210-programming-reference.md`, vendor `/mnt/builds/ASK/cdx/`, and live DUT1 (`.185`) + live vendor reference board DUT2 (`.106`).
 
 ## 1. Executive summary
 
@@ -154,20 +154,30 @@ Every phase requires failing-first host checks, independent review before silico
   - `cake 150mbit` guard: stayed in SW (`dump-flows = []`, preflight `-95`, `144 Mbit/s`); lifted cleanly on delete.
 - Follow-up fix (`043d0bb3`): `ask_tc_qdisc_is_soft()` treats Linux `noqueue_qdisc_ops` (`q->enqueue == NULL`, e.g. VLAN/PPPoE devices) as pass-through rather than a software qdisc.
 
-### Phase 2 — Multi-Class HQoS (2-level Channel→CQ + `ct->mark` Class Steering + VyOS CLI) — **IMPLEMENTED, HOST/REVIEW-VERIFIED (awaiting CI + cold-boot gate)**
+### Phase 2 — Multi-Class HQoS (2-level Channel→CQ + `ct->mark` Class Steering + VyOS CLI) — **COLD-BOOT PASS (2026-11-26, `2026.11.25-2359-rolling`, `043d0bb3` + `b20fefc5`, CI `45725355638`)**
 - Extended `dpaa_ceetm.c` into 2-level `LNI -> Channel (rate/ceil) -> up to 8 strict-priority CQs 0..7` (`TC_HTB_LEAF_TO_INNER`, 2-level `TC_HTB_LEAF_ALLOC_QUEUE`, `TC_HTB_LEAF_DEL_LAST` demotion, `TC_HTB_NODE_MODIFY` on inner channels) with lockless acquire-ordered `dpaa_ceetm_find_live_slot()`, direct-range `prev_real_txqs` fallback fold, symmetric `skb->priority` / `skb->mark` (SW) and `ct->mark` (HW) classid decoding, paired PRE/POST notifications on leaf add/del/promote, and exported `dpaa_ceetm_fqid_is_live()`.
 - Wired `ask_flow_offload.c` (`ask_flow_cookie_mark()` reading `ct->mark` under `CONFIG_NF_CONNTRACK_MARK`) and `ask_hw.c` (`key->ceetm_classid` + `dpaa_ceetm_fqid_is_live()` multi-leaf concurrency).
 - Added VyOS CLI opt-in (`data/vyos-1x-061-qos-ceetm-offload.patch`: `set qos policy shaper <name> offload` on physical Ethernet ports, enforcing `<= 7` classes + default with distinct priorities `0..7` and `mark` matching class ID).
-- **Next cold-boot gate:** multi-class isolation (strict-priority CQ 0 preempts saturated CQ 7 bulk class with bounded latency; aggregate rate matches parent channel within ±5%; `ct->mark` HW + `skb->mark` SW steer identically; `set qos policy shaper ... offload` commit/delete + exhaustion `-ENOSPC`/`-EEXIST` clean).
+- **Cold-boot verified on DUT1 (`6.18.65-1-vyos`, `ask-check` `47/49 OK, 0 FAIL`, 0 kernel errors/quarantines):**
+  - `043d0bb3` `noqueue` fix: VLAN `eth3.10 <-> eth4.20` HW offload `9.39 Gbit/s` (plain baseline `9.41 Gbit/s`), `0` qdisc fallbacks.
+  - VyOS CLI negative guards: rejected mismatched `mark 42` on `class 10`, duplicate `priority 0`, and VLAN `eth3.10` attach; valid 2-level `G10-P2` (`500mbit`, `1:a prio 0`, `1:14 prio 4`, `1:15` auto-`prio 7` from XML `defaultValue=20`) committed cleanly (`hw_lfqid=0xf00009`).
+  - HW `ct->mark` class steering: `5201` (`mark=10`, CQ 0) `471 Mbit/s` (`112,210` HW pkts/3 s), `5203` (`mark=20`, CQ 4) `471 Mbit/s`, `5202` (unmarked, CQ 7) `471 Mbit/s`.
+  - Strict-priority preemption under 500M saturation: (a) 600M CQ 7 UDP flood + 200M CQ 0 UDP + marked ICMP -> CQ 0 `191 Mbit/s` (`0.019 ms` jitter) and ICMP `15/15` `0%` loss @ `0.298/0.337/0.385 ms` min/avg/max RTT while CQ 7 took `39%` CCGR drop; (b) HW TCP CQ 0 preempted saturated HW TCP CQ 7 (`471/470/468/473 Mbit/s` vs `0.00 bits/s`), with instant CQ 7 recovery (`442/477/471 Mbit/s`) when CQ 0 ended.
+  - Live VyOS `bandwidth 500mbit -> 250mbit` commit mid-flow: 335 ms live 2-level rebuild under active HW traffic, 0 disconnects, stabilized at `237 Mbit/s` (0 retr).
+  - Symmetric SW `skb->mark` steering: DUT1 local TX hit exact classes `1:a` (`40,789` pkts), `1:14` (`40,775` pkts), `1:15` (`62,227` pkts), summing to `1:1` (`143,791` pkts).
+  - Clean `delete qos` teardown: `eth3` back on `mq`, unshaped HW recovered to `9.41 Gbit/s`, `ask-check` `47/49 OK, 0 FAIL`.
 
-### Phase 3 — Optional Single-Port Per-Packet DSCP→CQ (`DSCP_FQ_MAP_ENABLE`)
-- Implement FMan 210.10.1 MURAM `dscp_fqid_map` singleton (extending `F-262`'s owned FE MURAM block) driven by `tc filter add dev ethX egress protocol ip flower ip_dscp <d> action skbedit priority <M:N>`, with strict single-port ownership and retirement drain before port handoff.
-- **Gate:** live DSCP-marked packets within one flow steer to distinct CEETM CQs at wire rate without flowtable re-install; second port refused `-EBUSY`; teardown drains cleanly.
+### Phase 3 — Optional Single-Port Per-Packet DSCP→CQ (`DSCP_FQ_MAP_ENABLE`) — **IMPLEMENTED & SAFETY-REVIEWED (pending cold-boot DUT1 gate)**
+- Implemented `F-328` (`bin/kernel-fixups/F_328.py`), extending `F-262`'s owned FE MURAM block from 32 B to 288 B for vendor `cdx_muram_memory_cmn_db_t` (`28 B` `cdx_ucode_frag_info_t` + `256 B` `dscp_fqid_map[64]` at `+28`), shadow `fe_dscp_map[64]` replayed across `S0 <-> S1`, `ENQUEUE_PKT word2 = (0x01 << 24) | fe_frag_off`, and `dpaa_ceetm.c` `clsact` egress `flower skip_sw ip_dscp <d> action skbedit priority <M:N>` offload with strict single-port ownership, dual-stack IPv4+IPv6 pairing, retirement drain (`DPAA_DSCP_RETIRING`), `dpaa_remove()` unregister cleanup, and HTB tree-change resync.
+- Updated `ask_flow_offload.c` (`ask_tc_qdisc_is_soft()` using refcounted `tcf_get_next_chain`/`tcf_get_next_proto` walk, `ask_fe_flow_insert()` using `dpaa_ceetm_classid_is_live()` + `oif_phys_ifindex` resolution, synchronous soft-qdisc refresh on `POST_CHANGE`) and `ask_hw.c` (L2 bridge guard on DSCP-active ports).
+- Host gate: `bin/test-g10-phase3-dscp.py` (ASan/UBSan harness + source contracts).
+- **DUT1 cold-boot gate (pending CI build):** live DSCP-marked packets within one flow steer to distinct CEETM CQs at wire rate without flowtable re-install; `ct->mark` outranks DSCP; second port refused `-EBUSY`; teardown drains cleanly.
 
-### Phase 4 — Ingress & Exception Policing Coexistence (`QM_FF_RATE`, `QM_EXPT_RATE`)
-- Relocate port-wide `tc matchall police` (`0104`) from `KG(RSS) -> PLCR` to `BMI -> PLCR -> PRS` (`FMBM_RFNE`) so ASK-engaged ports are metered identically to unengaged ports (bounded ping/low-rate verification first — never flood-test the ingress policer without an approved recovery plan).
-- Add ehash MISS-path shared FMPL exception policer (`QM_EXPT_RATE`) to protect the A72 CPUs from new-flow/miss floods while leaving established HW flows unaffected.
-- Optional: per-flow `tc flower police` via FE opcode `0x05` `PREEMPT_POLICE_PKT`.
+### Phase 4 — Ingress & Exception Policing Coexistence (`QM_FF_RATE`, `QM_EXPT_RATE`) — **Phase 4a IMPLEMENTED & SAFETY-REVIEWED (pending cold-boot DUT1 gate)**
+- **Phase 4a (`F-329`, implemented):** Relocated port-wide `tc ingress matchall action police` (`0104`) from the RSS KeyGen scheme tail to `HWP -> PLCR -> downstream` (`fmbm_rfpne = 0x004C0000`, per-port physical FMPL slot `port_id`, selective `FMPL_PAR[PWSEL]` live `PEGNIA`/`PEYNIA` updates across ASK2 engage/disengage, `fman_pcd_kg.c` lock-order fix releasing `pcd->lock` before `cc_port_lock`, Linux `tc` `drop_yellow = true` + `mtu` PBS + full overflow validation, live hardware `PEGNIA`/`PEYNIA` disarm readback, `fman_pcd_release()` reap, and `TC_CLSMATCHALL_STATS` with seeded reset-safe HW packet/drop deltas). Note: `F-266` control-plane punt intentionally exits ahead of `HWP->PLCR` (matching NXP `cdx_sp.xml`); ports with `F-323` soft-parser G4/G5b class dispatch override `$nia` directly.
+- Host gate: `bin/test-g10-phase4-policer.py` (ASan/UBSan harness + source contracts).
+- **DUT1 cold-boot gate (pending CI build):** bounded-ping / low-rate verification only (never flood-test the ingress policer) across both ASK-engaged and disengaged ports, multi-port (`eth3` + `eth4`) independence, live engage/disengage while policed, `tc -s` HW stats, and clean teardown.
+- **Phase 4b (optional follow-up):** ehash MISS-path shared FMPL exception policer (`QM_EXPT_RATE`) and per-flow `tc flower police` (`PREEMPT_POLICE_PKT`).
 
 ---
 

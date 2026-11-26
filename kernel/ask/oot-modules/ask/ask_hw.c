@@ -3740,6 +3740,24 @@ int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
 	if (!h)
 		return -ENODEV;
 	if (add) {
+		if (out_ifindex > 0) {
+			bool dscp_active = false;
+
+			rcu_read_lock();
+			{
+				struct net_device *odev =
+					dev_get_by_index_rcu(&init_net, out_ifindex);
+				struct net_device *phys =
+					(odev && is_vlan_dev(odev)) ?
+					vlan_dev_real_dev(odev) : odev;
+
+				if (phys && dpaa_ceetm_dscp_map_active(phys))
+					dscp_active = true;
+			}
+			rcu_read_unlock();
+			if (dscp_active)
+				return -EOPNOTSUPP;
+		}
 		rc = ask_bridge_fe_action(key, fqid, ask_hw_get_enq_fe_off(),
 					  act, vid, &a);
 		if (rc)

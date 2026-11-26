@@ -469,61 +469,13 @@ err:
 /* ------------------------------------------------------------------------- */
 static int ask_genl_set_policer_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct fman_pcd_plcr_hw_profile hw;
-	struct fman *fman;
-	struct fman_pcd *pcd;
-	struct nlattr *nest;
-	struct nlattr *tb[ASK_POLICER_ATTR_MAX + 1];
-	struct nlattr **attrs;
-	u8 port_id;
-	u32 rate_bps;
-	u32 burst_bytes;
-	int rc;
-
-	nest = info->attrs[ASK_ATTR_POLICER];
-	if (nest) {
-		rc = nla_parse_nested(tb, ASK_POLICER_ATTR_MAX, nest,
-				      ask_policer_policy, info->extack);
-		if (rc)
-			return rc;
-		attrs = tb;
-	} else {
-		attrs = info->attrs;
-	}
-
-	if (!attrs[ASK_POLICER_ATTR_PORT_ID] ||
-	    !attrs[ASK_POLICER_ATTR_RATE_BPS] ||
-	    !attrs[ASK_POLICER_ATTR_BURST_BYTES])
-		return -EINVAL;
-
-	port_id     = nla_get_u8(attrs[ASK_POLICER_ATTR_PORT_ID]);
-	rate_bps    = nla_get_u32(attrs[ASK_POLICER_ATTR_RATE_BPS]);
-	burst_bytes = nla_get_u32(attrs[ASK_POLICER_ATTR_BURST_BYTES]);
-
-	fman = ask_hw_get_fman();
-	pcd = fman ? fman_get_pcd(fman) : NULL;
-	if (!pcd)
-		return -ENODEV;
-
-	memset(&hw, 0, sizeof(hw));
-	hw.trtcm       = false;	       /* srTCM: single-rate two-color */
-	hw.color_aware = false;	       /* colour-blind */
-	hw.cir_bps     = rate_bps;
-	hw.cbs_bytes   = burst_bytes;
-	hw.pir_bps     = 0;	       /* N/A for srTCM */
-	hw.pbs_bytes   = 0;	       /* N/A for srTCM */
-
-	/* profile_id == port_id (one srTCM policer slot per port). */
-	rc = fman_pcd_plcr_install(pcd, port_id, port_id, &hw);
-	if (rc) {
-		ask_pr_err("genl: set_policer port 0x%02x failed: %d\n",
-			   port_id, rc);
-		return rc;
-	}
-
-	ask_pr_info("genl: set_policer port 0x%02x rate=%u bps burst=%u\n",
-		    port_id, rate_bps, burst_bytes);
-	return 0;
+	/* G10 Phase 4: port-wide ingress policing is owned by the DPAA tc
+	 * matchall offload (HWP->PLCR->downstream, per-port slot = port_id).
+	 * Refuse direct genl writes so nothing clobbers FMPL_PMR or installs a
+	 * pir_bps=0 profile behind tc's back. */
+	NL_SET_ERR_MSG_MOD(info->extack,
+			   "ingress policing is configured via tc ingress matchall action police");
+	return -EOPNOTSUPP;
 }
 int ask_genl_register(void)
 {

@@ -3174,6 +3174,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # F-327: G10 Phase 1 CEETM + ASK2 coexistence hooks (SRCU egress notify, CQ pop, MTU budget).
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_327.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-g10-ceetm-ask.py" 2>&1
+    # F-328: G10 Phase 3 single-port MURAM DSCP->CEETM CQ map + clsact egress dispatch.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_328.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-g10-phase3-dscp.py" 2>&1
+    # F-329: G10 Phase 4 HWP->PLCR->downstream ingress policer coexistence + per-port slots.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_329.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-g10-phase4-policer.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_prepared_disarm,fman_arm_table 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-keygen-window.py" "$(pwd)" 2>&1

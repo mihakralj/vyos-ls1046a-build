@@ -100,6 +100,10 @@ int dpaa_ceetm_offload_egress_fqid(struct net_device *dev, u32 classid,
 				   u32 *fqid);
 bool dpaa_ceetm_is_active(struct net_device *dev);
 bool dpaa_ceetm_fqid_is_live(struct net_device *dev, u32 fqid);
+bool dpaa_ceetm_dscp_map_active(struct net_device *dev);
+bool dpaa_ceetm_dscp_cookie_offloaded(struct net_device *dev,
+				      unsigned long cookie);
+bool dpaa_ceetm_classid_is_live(struct net_device *dev, u32 classid);
 #else
 static inline int dpaa_ceetm_offload_egress_fqid(struct net_device *dev,
 						 u32 classid, u32 *fqid)
@@ -113,6 +117,20 @@ static inline bool dpaa_ceetm_is_active(struct net_device *dev)
 	return false;
 }
 static inline bool dpaa_ceetm_fqid_is_live(struct net_device *dev, u32 fqid)
+{
+	return false;
+}
+static inline bool dpaa_ceetm_dscp_map_active(struct net_device *dev)
+{
+	return false;
+}
+static inline bool dpaa_ceetm_dscp_cookie_offloaded(struct net_device *dev,
+						    unsigned long cookie)
+{
+	return false;
+}
+static inline bool dpaa_ceetm_classid_is_live(struct net_device *dev,
+					      u32 classid)
 {
 	return false;
 }

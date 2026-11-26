@@ -26,6 +26,7 @@ struct dpaa_priv;
 struct dpaa_ceetm;
 struct qman_fq;
 struct qm_fd;
+struct flow_block_offload;
 
 /* Shared with dpaa_eth.c (F-327). */
 int dpaa_fo_notify_egress_change(struct net_device *net_dev,
@@ -36,6 +37,11 @@ void dpaa_fd_release(const struct net_device *net_dev,
 #if IS_ENABLED(CONFIG_DPAA_HW_CEETM)
 
 int dpaa_ceetm_setup_htb(struct net_device *net_dev, void *type_data);
+
+int dpaa_ceetm_setup_dscp_block(struct net_device *net_dev,
+				struct flow_block_offload *f);
+
+void dpaa_ceetm_dscp_netdev_unregister(struct net_device *net_dev);
 
 struct qman_fq *dpaa_ceetm_egress_fq(struct dpaa_ceetm *ceetm,
 				     int queue_mapping);
@@ -53,6 +59,16 @@ static inline int dpaa_ceetm_setup_htb(struct net_device *net_dev,
 				       void *type_data)
 {
 	return -EOPNOTSUPP;
+}
+
+static inline int dpaa_ceetm_setup_dscp_block(struct net_device *net_dev,
+					      struct flow_block_offload *f)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void dpaa_ceetm_dscp_netdev_unregister(struct net_device *net_dev)
+{
 }
 
 static inline struct qman_fq *dpaa_ceetm_egress_fq(struct dpaa_ceetm *ceetm,

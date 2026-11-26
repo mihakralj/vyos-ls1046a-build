@@ -267,6 +267,7 @@ static void unregister_netdev(struct net_device *dev)
 		longjmp(unregister_wait, 1);
 }
 static void phylink_destroy(void *link) { cleanup_calls++; }
+static void dpaa_ceetm_dscp_netdev_unregister(struct net_device *dev) { (void)dev; }
 static void dpaa_cls_flush(struct net_device *dev) { cleanup_calls++; }
 static int dpaa_fq_free(struct device *dev, struct list_head *list)
 {
