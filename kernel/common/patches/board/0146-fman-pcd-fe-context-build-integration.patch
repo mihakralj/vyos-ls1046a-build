@@ -80,13 +80,3 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
  
  /*
   * fe_arm - arm the FE-VM datapath on a single FMan RX port (Phase 1
-+@@ -2132,6 +2132,9 @@
-+ 	if (err)
-+ 		return err;
-+ 
-++	/* Build FE-VM runtime contexts before logging ENGAGED (0146). */
-++	fman_pcd_fe_build_contexts(pcd);
-++
-+ 	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED FE_ENTER=0x%lx (AC_CC)\n",
-+ 		port_id, fe_enter_off);
-+ 	return 0;
