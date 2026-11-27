@@ -92,8 +92,8 @@ dut "sudo bridge link set dev eth3 isolated on"; chk "eth3 isolated" 0
 dut "sudo bridge link set dev eth3 isolated off"; warm; chk "eth3 not isolated + warm" 4
 dut "sudo ip link set $BR type bridge vlan_filtering 1"; chk "vlan_filtering 1" 0
 dut "sudo ip link set $BR type bridge vlan_filtering 0"; warm; chk "vlan_filtering 0 + warm" 4
-# a dynamic move: M2 shows up on eth3 (spoofed ARP from dell1), the bridge takes the entry back
-send "$D1" $M2 $M1 arp 1; chk "M2 moved to eth3" 0
+# a dynamic move: M2 shows up on eth3 (broadcast gratuitous ARP from dell1 — unicast dst=$M1 is dropped by dell1's i40e PF), the bridge takes the entry back
+send "$D1" $M2 ff:ff:ff:ff:ff:ff arp 1; chk "M2 moved to eth3" 0
 echo "M2 now: $(fdbflags $M2)"
 row v4-after-move "$D1" $M1 $M2 v4 eth3 "$D2" unicast 0
 warm; chk "M2 back on eth4 + warm" 4

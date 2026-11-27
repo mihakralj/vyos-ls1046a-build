@@ -1,0 +1,285 @@
+diff --git a/interface-definitions/include/firewall/global-options.xml.i b/interface-definitions/include/firewall/global-options.xml.i
+index 9cbdcc99b..a14a4b2bb 100644
+--- a/interface-definitions/include/firewall/global-options.xml.i
++++ b/interface-definitions/include/firewall/global-options.xml.i
+@@ -188,6 +188,12 @@
+       </properties>
+       <defaultValue>0</defaultValue>
+     </leafNode>
++    <leafNode name="allow-queue-offload-bypass">
++      <properties>
++        <help>Allow flowtable and hardware offload alongside firewall action queue rules (offloaded flows bypass NFQUEUE)</help>
++        <valueless/>
++      </properties>
++    </leafNode>
+     <leafNode name="ip-src-route">
+       <properties>
+         <help>Policy for handling IPv4 packets with source route option</help>
+diff --git a/interface-definitions/service_suricata.xml.in b/interface-definitions/service_suricata.xml.in
+index e0159e2ba..746f88dea 100644
+--- a/interface-definitions/service_suricata.xml.in
++++ b/interface-definitions/service_suricata.xml.in
+@@ -9,6 +9,12 @@
+         </properties>
+         <children>
+           #include <include/generic-interface-multi.xml.i>
++          <leafNode name="allow-offload-bypass">
++            <properties>
++              <help>Allow hardware offload on monitored interfaces (offloaded packets bypass Suricata capture)</help>
++              <valueless/>
++            </properties>
++          </leafNode>
+           <tagNode name="address-group">
+             <properties>
+               <help>Address group name</help>
+diff --git a/src/conf_mode/firewall.py b/src/conf_mode/firewall.py
+index fd80dcb8a..fd5c7ba42 100644
+--- a/src/conf_mode/firewall.py
++++ b/src/conf_mode/firewall.py
+@@ -18,6 +18,10 @@
+ from glob import glob
+ 
+ from sys import exit
++from vyos.ask_inspection_guard import (
++    verify_queue_offload_guard,
++    verify_suricata_offload_guard,
++)
+ from vyos.base import Warning
+ from vyos.config import Config
+ from vyos.configdict import is_node_changed
+@@ -205,6 +209,27 @@ def get_config(config=None):
+ 
+     firewall['ask_auto_flowtable'] = get_ask_auto_flowtable(conf, firewall)
+ 
++    # G7 Track 0 (D8): snapshot Suricata, ethernet, and bridge state for
++    # commit-time silent-bypass validation.
++    firewall['_g7_suricata'] = conf.get_config_dict(
++        ['service', 'suricata'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++    firewall['_g7_ethernet'] = conf.get_config_dict(
++        ['interfaces', 'ethernet'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++    firewall['_g7_bridges'] = conf.get_config_dict(
++        ['interfaces', 'bridge'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++
+     return firewall
+ 
+ def verify_jump_target(firewall, hook, jump_target, family, recursive=False):
+@@ -608,6 +633,20 @@ def verify(firewall):
+     for ifname in sorted(set(sum(firewall.get('ask_auto_flowtable', {}).values(), []))):
+         verify_hardware_offload(ifname)
+ 
++    # G7 Track 0 (D8): reject silent inspection bypass combinations unless the
++    # explicit operator override leaf is configured.
++    verify_suricata_offload_guard(
++        firewall.get('_g7_suricata'),
++        ethernet=firewall.get('_g7_ethernet'),
++        firewall=firewall,
++        bridges=firewall.get('_g7_bridges'),
++    )
++    verify_queue_offload_guard(
++        firewall,
++        ethernet=firewall.get('_g7_ethernet'),
++        bridges=firewall.get('_g7_bridges'),
++    )
++
+     if 'flowtable' in firewall:
+         for flowtable, flowtable_conf in firewall['flowtable'].items():
+             if 'interface' not in flowtable_conf:
+diff --git a/src/conf_mode/interfaces_bridge.py b/src/conf_mode/interfaces_bridge.py
+index e25880c99..6b8af48a5 100644
+--- a/src/conf_mode/interfaces_bridge.py
++++ b/src/conf_mode/interfaces_bridge.py
+@@ -14,6 +14,10 @@
+ 
+ from sys import exit
+ 
++from vyos.ask_inspection_guard import (
++    verify_queue_offload_guard,
++    verify_suricata_offload_guard,
++)
+ from vyos.config import Config
+ from vyos.configdict import get_interface_dict
+ from vyos.configdict import is_vrf_changed
+@@ -135,6 +139,33 @@ def get_config(config=None):
+ 
+     bridge['vpp_ifaces'] = cli_ifaces_list(conf)
+ 
++    # G7 Track 0 (D8): snapshot Suricata, ethernet, bridge, and firewall state
++    # so adding an offloaded member to a monitored/queued bridge is validated.
++    bridge['_g7_suricata'] = conf.get_config_dict(
++        ['service', 'suricata'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++    bridge['_g7_ethernet'] = conf.get_config_dict(
++        ['interfaces', 'ethernet'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++    bridge['_g7_bridges'] = conf.get_config_dict(
++        ['interfaces', 'bridge'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++    bridge['_g7_firewall'] = conf.get_config_dict(
++        ['firewall'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++
+     return bridge
+ 
+ def verify(bridge):
+@@ -151,6 +182,18 @@ def verify(bridge):
+     if 'deleted' in bridge:
+         return None
+ 
++    verify_suricata_offload_guard(
++        bridge.get('_g7_suricata'),
++        ethernet=bridge.get('_g7_ethernet'),
++        firewall=bridge.get('_g7_firewall'),
++        bridges=bridge.get('_g7_bridges'),
++    )
++    verify_queue_offload_guard(
++        bridge.get('_g7_firewall'),
++        ethernet=bridge.get('_g7_ethernet'),
++        bridges=bridge.get('_g7_bridges'),
++    )
++
+     verify_dhcpv6(bridge)
+     verify_vrf(bridge)
+     verify_mtu_ipv6(bridge)
+diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
+index b706be81d..8458f21ad 100644
+--- a/src/conf_mode/interfaces_ethernet.py
++++ b/src/conf_mode/interfaces_ethernet.py
+@@ -16,6 +16,7 @@
+ 
+ from sys import exit
+ 
++from vyos.ask_inspection_guard import verify_suricata_offload_guard
+ from vyos.base import Warning
+ from vyos.config import Config
+ from vyos.configdep import set_dependents
+@@ -263,6 +264,38 @@ def get_config(config=None):
+         if {'ipv4', 'ipv6'} & set(tmp):
+             set_dependents('firewall', conf)
+ 
++    # G7 Track 0 (D8): re-enabling a disabled port with offload ipv4/ipv6 also
++    # activates the auto flowtable and must re-run firewall.py validation.
++    if is_node_changed(conf, base + [ifname, 'disable']):
++        _off = ethernet.get('offload') or {}
++        if 'ipv4' in _off or 'ipv6' in _off:
++            set_dependents('firewall', conf)
++
++    ethernet['_g7_suricata'] = conf.get_config_dict(
++        ['service', 'suricata'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++    ethernet['_g7_ethernet'] = conf.get_config_dict(
++        ['interfaces', 'ethernet'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++    ethernet['_g7_bridges'] = conf.get_config_dict(
++        ['interfaces', 'bridge'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++    ethernet['_g7_firewall'] = conf.get_config_dict(
++        ['firewall'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++
+     for node, key in {
+         'disable-flow-control': 'flow_control_changed',
+         'ring-buffer': 'ring_buffer_changed',
+@@ -414,6 +447,13 @@ def verify_offload(ethernet: dict, ethtool: Ethtool):
+             raise ConfigError(
+                 f'Interface {ifname} cannot be configured for ASK offload while assigned to VPP!'
+             )
++        if 'disable' not in ethernet:
++            verify_suricata_offload_guard(
++                ethernet.get('_g7_suricata'),
++                ethernet=ethernet.get('_g7_ethernet') or {ifname: ethernet},
++                firewall=ethernet.get('_g7_firewall'),
++                bridges=ethernet.get('_g7_bridges'),
++            )
+         # All five DPAA ports can offload (kernel admits eth0=0x0c too). eth0
+         # is management by convention; offloading it is the operator's choice.
+         if ifname not in ('eth0', 'eth1', 'eth2', 'eth3', 'eth4'):
+diff --git a/src/conf_mode/service_suricata.py b/src/conf_mode/service_suricata.py
+index 25c9dea7c..7b3136e15 100644
+--- a/src/conf_mode/service_suricata.py
++++ b/src/conf_mode/service_suricata.py
+@@ -16,6 +16,7 @@
+ 
+ from sys import exit
+ 
++from vyos.ask_inspection_guard import verify_suricata_offload_guard
+ from vyos.base import Warning
+ from vyos.config import Config
+ from vyos.template import render
+@@ -40,6 +41,27 @@ def get_config(config=None):
+     suricata = conf.get_config_dict(base, key_mangling=('-', '_'),
+                                     get_first_key=True, with_recursive_defaults=True)
+ 
++    # G7 Track 0 (D8): snapshot offload/flowtable/bridge state for commit-time
++    # silent-bypass validation against ASK2 hardware offload.
++    suricata['_g7_ethernet'] = conf.get_config_dict(
++        ['interfaces', 'ethernet'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++    suricata['_g7_bridges'] = conf.get_config_dict(
++        ['interfaces', 'bridge'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++    suricata['_g7_firewall'] = conf.get_config_dict(
++        ['firewall'],
++        key_mangling=('-', '_'),
++        get_first_key=True,
++        no_tag_node_value_mangle=True,
++    ) or {}
++
+     return suricata
+ 
+ # https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
+@@ -95,6 +117,13 @@ def verify(suricata):
+     except (ConfigError,StopIteration) as e:
+         raise ConfigError(f'Invalid port-group: {e}')
+ 
++    verify_suricata_offload_guard(
++        suricata,
++        ethernet=suricata.get('_g7_ethernet'),
++        firewall=suricata.get('_g7_firewall'),
++        bridges=suricata.get('_g7_bridges'),
++    )
++
+ def generate(suricata):
+     if not suricata:
+         for file in [config_file, rotate_file]:

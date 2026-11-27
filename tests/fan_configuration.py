@@ -3085,3 +3085,55 @@ def test_pinned_commit_lock_blocks_reconcile_and_covers_publication(tmp_path, mo
             holder.join(5)
         parent.close()
         child.close()
+
+
+def test_boot_pending_grace_and_timeout_syslog_dedup(tmp_path, monkeypatch):
+    fan, daemon, ctrl, writes = controller_fixture(tmp_path, monkeypatch, 'fan_pid_boot_grace_dedup_test')
+    clock = [100.0]
+    monkeypatch.setattr(fan, 'clock_now', lambda: clock[0])
+    monkeypatch.setattr(daemon, 'clock_now', lambda: clock[0])
+    logs = []
+    monkeypatch.setattr(daemon.syslog, 'syslog', lambda prio, msg: logs.append((prio, msg)))
+
+    # Simulate early boot before boot_marker exists: PENDING created at boot start.
+    fan.boot_marker().unlink(missing_ok=True)
+    fan.verification_path().unlink(missing_ok=True)
+    fan.STATE.unlink(missing_ok=True)
+    fan.snapshot_marker(fan.STATE).unlink(missing_ok=True)
+    ctrl.snapshot_seen = False
+    fan.mark_pending()
+
+    # At +60s (> PENDING_TIMEOUT=30s, < BOOT_PENDING_TIMEOUT=180s), normal VyOS boot
+    # is still in progress: fans remain fail-safe MAX, status is unknown (not timeout error),
+    # and no timeout syslog spam is emitted.
+    clock[0] += 60.0
+    assert ctrl.step()[0]['fan1'] == 255
+    assert fan.configuration_status()['state'] == 'unknown'
+    assert not any('reconciliation timed out' in msg for _, msg in logs)
+
+    # At +BOOT_PENDING_TIMEOUT, wedged boot escalates to error and logs ONCE across 3 ticks.
+    clock[0] = 100.0 + fan.BOOT_PENDING_TIMEOUT
+    for _ in range(3):
+        assert ctrl.step()[0]['fan1'] == 255
+    assert fan.configuration_status()['state'] == 'error'
+    timeout_logs = [msg for _, msg in logs if 'reconciliation timed out' in msg]
+    assert len(timeout_logs) == 1
+
+    # Once boot reconciles and PENDING clears, recovery is logged once.
+    fan.mark_boot_ready()
+    gen = fan.write_snapshot(fan.DEFAULTS)
+    fan.write_verification(fan.DEFAULTS, gen)
+    fan.PENDING.unlink(missing_ok=True)
+    assert ctrl.step()[0]['fan1'] < 255
+    assert any('reconciliation recovered' in msg for _, msg in logs)
+
+    # Post-boot commits still strictly time out at PENDING_TIMEOUT (30s) and dedup syslog.
+    logs.clear()
+    fan.mark_pending()
+    clock[0] += fan.PENDING_TIMEOUT
+    fan.write_verification(fan.DEFAULTS, gen)
+    for _ in range(3):
+        assert ctrl.step()[0]['fan1'] == 255
+    assert fan.configuration_status()['state'] == 'error'
+    timeout_logs = [msg for _, msg in logs if 'reconciliation timed out' in msg]
+    assert len(timeout_logs) == 1

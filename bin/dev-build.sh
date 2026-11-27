@@ -105,22 +105,12 @@ export GITHUB_ENV="${GITHUB_ENV:-/tmp/dev-gh_env.$(id -u)}"
 export GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-/tmp/dev-gh_step_summary.$(id -u)}"
 : > "$GITHUB_OUTPUT"; : > "$GITHUB_ENV"; : > "$GITHUB_STEP_SUMMARY"
 
-# Resolve kernel version (same logic as stage-kernel.sh / common.sh).
-KVER=""
-[ -f vyos-build/data/defaults.toml ] && \
-    KVER=$(awk -F'"' '/^kernel_version/ {print $2; exit}' vyos-build/data/defaults.toml)
-# versions.lock uses shell-assignment form `: "${KERNEL_VERSION:=X}"`, so
-# source it (in a subshell) rather than grepping a bare `KERNEL_VERSION=` line.
-[ -z "$KVER" ] && [ -f versions.lock ] && \
-    KVER=$(. versions.lock >/dev/null 2>&1; printf '%s' "$KERNEL_VERSION")
-KVER="${KVER:-6.18.34}"
-# VyOS internal kernel revision (vyos-build T9591): release = <KVER>-<KREV>-vyos.
-KREV=""
-[ -f vyos-build/data/defaults.toml ] && \
-    KREV=$(awk -F'"' '/^kernel_revision/ {print $2; exit}' vyos-build/data/defaults.toml)
-[ -z "$KREV" ] && [ -f versions.lock ] && \
-    KREV=$(. versions.lock >/dev/null 2>&1; printf '%s' "$KERNEL_REVISION")
-KREV="${KREV:-1}"
+# Resolve kernel version/revision via sync-kernel-version.sh (single source of
+# truth shared with stage-kernel.sh and bin/common.sh; honors env overrides).
+# shellcheck source=../kernel/common/scripts/sync-kernel-version.sh
+. "$REPO_ROOT/kernel/common/scripts/sync-kernel-version.sh"
+KVER="$KERNEL_VERSION"
+KREV="$KERNEL_REVISION"
 KSRC="$REPO_ROOT/work/linux-$KVER"
 
 # ── SSH/rsync wrappers ────────────────────────────────────────────────

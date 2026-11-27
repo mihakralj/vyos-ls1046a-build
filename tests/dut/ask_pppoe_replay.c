@@ -21,6 +21,7 @@ typedef uint64_t u64;
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86dd
 #define ASK_FE_KEY_SIZE_DUAL 50
+#define ASK_FE_KEY_SIZE_G4_UDP 49
 #include "ask_flow_protocols.h"
 #define U64_MAX UINT64_MAX
 #define ASK_FAM_V4 1
@@ -54,7 +55,7 @@ struct ask_hw_pcd {
 	struct ask_hw_port port[ASK_HW_MAX_PORTS];
 };
 struct ask_flow_key {
-	u8 l3_proto, l4_proto, port_id, nat_flags, vlan_edit_flags;
+	u8 l3_proto, l4_proto, port_id, nat_flags, vlan_edit_flags, table_idx;
 	u8 next_hop_mac[ETH_ALEN], egress_mac[ETH_ALEN];
 	u8 nat_src_ip[16], nat_dst_ip[16];
 	u16 nat_sport, nat_dport, egress_mtu, vlan_ingress_vid;
@@ -83,7 +84,13 @@ static u64 ask_hw_family_seq = 1;
 static u64 ask_hw_family_changed[64][2];
 static bool ask_hw_family_seq_exhausted;
 #define ingress_family (ask_hw_port_family[0x10])
-static unsigned long ask_hw_port_l2[4];
+static unsigned long ask_hw_port_l2_only[4];
+static u8 ask_hw_get_udp_class(u8 port) { (void)port; return 0; }
+static void ask_fe_build_key_g4_udp(const struct ask_flow_key *key, u8 *buf)
+{
+	(void)key;
+	memset(buf, 0, ASK_FE_KEY_SIZE_G4_UDP);
+}
 static unsigned int publications;
 static unsigned int dev_refs;
 static struct fman fm;

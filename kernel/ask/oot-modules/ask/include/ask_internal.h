@@ -23,6 +23,7 @@
 #include <linux/xarray.h>        /* PR14j cookie indirection table */
 #include <linux/fsl/fman_pcd.h>    /* enum fman_pcd_fe_profile (T-M6-2 B3a) */
 #include <net/netlink.h>
+#include <uapi/linux/ask/ask.h>
 
 #define ASK_DRV_NAME            "ask"
 #define ASK_DRV_VERSION_STR     "2.1.0"
@@ -139,12 +140,21 @@ struct net_device *ask_hw_port_netdev(u8 hw_port_id);	/* rtnl held */
 int  ask_hw_dev_port(struct net_device *dev, u8 *hw_port_id);
 int  ask_hw_oif_fqid_cached(u32 ifindex, u32 *fqid);
 int ask_hw_l2_record(u8 hw_port_id, const u8 *key, u32 fqid, u8 act,
-		      u16 vid, u64 fe_token, bool add);
-void ask_hw_l2_fq_put(u32 fqid);
+		      u16 vid, u64 fe_token, int out_ifindex, bool add);
+void ask_hw_l2_fq_put(u32 fqid, int out_ifindex);
 int ask_hw_l2_record_hits(u8 hw_port_id, const u8 *key, u64 fe_token,
 			   u64 *pkts);
 bool ask_hw_port_is_l2(u8 hw_port_id);
+bool ask_hw_irb_mixed_enabled(void);
+void ask_hw_g4_pause_port(u8 hw_port_id);
+void ask_hw_g4_resume_port(u8 hw_port_id);
+int  ask_hw_g4_detach_port(u8 hw_port_id);
+bool ask_hw_port_has_g4(u8 hw_port_id);
+bool ask_hw_port_wants_g4_restore(u8 hw_port_id);
+int  ask_hw_l2_class_attach(u8 hw_port_id, const u8 macs[][6], u8 mac_cnt);
+int  ask_hw_l2_class_detach(u8 hw_port_id);
 u8   ask_hw_port_family_mask(u8 hw_port_id);
+u8   ask_hw_get_udp_class(u8 hw_port_id);
 int  ask_bridge_port_quiesce(u8 hw_port_id);
 int  ask_bridge_dev_quiesce(u8 hw_port_id, int ifindex);
 int  ask_flow_port_withdraw(u8 hw_port_id, int ifindex);
@@ -396,6 +406,7 @@ struct ask_hw_flow_cookie {
         struct fman              *fm;           /* ingress port's FMan */
         u8                        port_id;      /* ingress BMI hwport id */
         int                       sink_ifindex;
+        int                       sink_slot;    /* G10: noconf_tx slot index (-1 if unknown) */
         u32                       sink_fqid;
 };
 
@@ -509,11 +520,15 @@ int  ask_hw_flow_insert(const struct ask_flow_key *key,
 int  ask_hw_flow_remove(u32 hw_flow_id);
 int  ask_hw_flow_get_sink_fqid(u32 hw_flow_id, u32 *fqid);
 int  ask_hw_flow_query_stats(u32 hw_flow_id, u64 *packets, u64 *bytes);
+int  ask_hw_egress_ceetm_event(struct net_device *dev, int ev, u32 fqid);
+bool ask_hw_dev_has_soft_qdisc(u32 ifindex);
+bool ask_hw_set_dev_soft_qdisc(u32 ifindex, bool soft);
 
 /* ------------------------------------------------------------------------- */
 /* ask_genl_attr.c — nla_policy tables shared across nested attribute sets    */
 /* ------------------------------------------------------------------------- */
 extern const struct nla_policy ask_top_policy[];
+extern const struct nla_policy ask_fallback_policy[];
 extern const struct nla_policy ask_info_policy[];
 extern const struct nla_policy ask_muram_policy[];
 extern const struct nla_policy ask_flow_policy[];
@@ -592,6 +607,7 @@ u16 vlan_id;
  * _v6() -- see ASK_FE_KEY_SIZE comment.
  */
 u8  port_id;
+u8  table_idx;      /* G4 multi-table dispatch: 0 = primary, 1..3 = class */
 u8  src_ip[16];     /* v4 packs into first 4, last 12 zero */
 u8  dst_ip[16];
 
@@ -620,11 +636,7 @@ u8  egress_mac[ETH_ALEN];   /* src MAC = peer port's own MAC */
  * parameters in the FE opcode chain. ask_flow_rht_params hashes by cookie,
  * so widening this struct does not perturb flow lookup.
  */
-u8     nat_flags;
-#define ASK_NATF_SNAT	BIT(0)
-#define ASK_NATF_DNAT	BIT(1)
-#define ASK_NATF_SPAT	BIT(2)
-#define ASK_NATF_DPAT	BIT(3)
+u8     nat_flags; /* ASK_NATF_* bits from <uapi/linux/ask/ask.h> */
 	u8     nat_src_ip[16];
 	u8     nat_dst_ip[16];
 	__be16 nat_sport;
@@ -699,6 +711,9 @@ u8     nat_flags;
 	u64    pppoe_session_epoch;
 	/* Software-only family policy snapshot; never serialized into the FE key. */
 	u64    family_policy_seq;
+	/* G10 Phase 2: conntrack mark / HTB classid for CEETM multi-class egress
+	 * steering; software-only metadata, never serialized into the FE key. */
+	u32    ceetm_classid;
 } __packed;
 
 /*
@@ -927,12 +942,14 @@ u8  dir;
  * rcu_read_lock() alongside @hw_flow_id.
  */
 bool hw_backed;
+int hw_fallback_rc; /* -ENODEV / -EOPNOTSUPP when !hw_backed; immutable */
 /*
  * T-M6-A3: the ownership generation this flow was published under. Set once
  * at insert, immutable, read under rcu_read_lock alongside hw_flow_id. A
  * DESTROY/worker carrying an older generation must not act on this flow.
  */
 u64 generation;
+u64 first_seen_ns; /* host ktime_get_ns() at flow insert; immutable */
 struct ask_flow_stats stats;
 /*
  * T-M8-3: baseline of the silicon FE ehash record's cumulative
@@ -1330,6 +1347,9 @@ void ask_bridge_exit(void);
 void ask_bridge_kick(void);
 void ask_bridge_forget_port(u8 hw_port_id);
 enum fman_pcd_fe_profile ask_bridge_port_profile(struct net_device *dev);
+bool ask_bridge_port_wants_l2_class(struct net_device *dev);
+int  ask_bridge_sync_port_class(struct net_device *dev);
+int  ask_bridge_sync_classes(void);
 struct fman_pcd_fe_flow_action;
 void ask_bridge_key(u8 *key, const u8 *da, const u8 *sa, u16 tci,
 		    __be16 eth_type);
@@ -1393,6 +1413,32 @@ void ask_op_exit(void);
 /* (board patch 0171).                                                        */
 /* ------------------------------------------------------------------------- */
 struct rtnl_link_stats64;
+
+enum ask_fallback_reason {
+	ASK_FALLBACK_ADMISSION_GATE = 0,
+	ASK_FALLBACK_POLICY_FENCED,
+	ASK_FALLBACK_UNSUPPORTED_PROTO,
+	ASK_FALLBACK_UNSUPPORTED_ACTION,
+	ASK_FALLBACK_NEIGH_UNRESOLVED,
+	ASK_FALLBACK_PORT_UNENGAGED,
+	ASK_FALLBACK_MAX_FLOWS,
+	ASK_FALLBACK_HW_ERROR,
+	ASK_FALLBACK_REASON_NR,
+};
+
+struct ask_fallback_stats {
+	u64 admission_gate;
+	u64 policy_fenced;
+	u64 unsupported_proto;
+	u64 unsupported_action;
+	u64 neigh_unresolved;
+	u64 port_unengaged;
+	u64 max_flows;
+	u64 hw_error;
+};
+
+void ask_fallback_inc(enum ask_fallback_reason reason);
+void ask_fallback_snapshot(struct ask_fallback_stats *out);
 
 int  ask_stats_init(void);
 void ask_stats_exit(void);

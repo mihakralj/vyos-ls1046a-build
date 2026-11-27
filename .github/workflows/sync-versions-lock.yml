@@ -1,0 +1,46 @@
+name: Sync versions.lock with upstream vyos-build
+
+# Keeps versions.lock synchronized with upstream vyos/vyos-build
+# rolling/data/defaults.toml on main and dpaa1 between CI releases.
+# Runs on ubuntu-latest (no self-hosted ARM64 VM wake-up or cost).
+# A push triggers nothing: CI builds run only on explicit workflow_dispatch.
+
+on:
+  schedule:
+    - cron: "0 7 * * *"   # Daily at 07:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [main, dpaa1]
+    concurrency:
+      group: sync-versions-lock-${{ matrix.branch }}
+      cancel-in-progress: false
+    name: "sync (${{ matrix.branch }})"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 1
+
+      - name: Sync versions.lock from upstream vyos-build
+        id: sync
+        run: |
+          set -euo pipefail
+          bash kernel/common/scripts/sync-kernel-version.sh --fetch --update
+          . versions.lock
+          echo "kernel_release=${KERNEL_VERSION}-${KERNEL_REVISION}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit updated versions.lock
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          branch: ${{ matrix.branch }}
+          commit_message: "chore: sync versions.lock to upstream kernel ${{ steps.sync.outputs.kernel_release }}"
+          commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          file_pattern: 'versions.lock'

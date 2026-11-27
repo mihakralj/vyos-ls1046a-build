@@ -99,6 +99,22 @@ static bool is_zero_ether_addr(const u8 *a)
 struct net { int id; };
 static struct net init_net = { .id = 1 };
 struct net_device { int ifindex; };
+static struct net_device *dev_get_by_index_rcu(struct net *net, int ifindex)
+{
+	(void)net;
+	(void)ifindex;
+	return NULL;
+}
+static bool netif_is_bridge_port(const struct net_device *dev)
+{
+	(void)dev;
+	return false;
+}
+static struct net_device *netdev_master_upper_dev_get_rcu(struct net_device *dev)
+{
+	(void)dev;
+	return NULL;
+}
 struct dst_entry { struct net_device *dev; bool valid; };
 static struct net_device *dst_dev_rcu(const struct dst_entry *dst) { return dst ? dst->dev : NULL; }
 

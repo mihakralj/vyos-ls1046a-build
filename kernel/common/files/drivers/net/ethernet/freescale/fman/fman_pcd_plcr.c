@@ -103,6 +103,15 @@
 #define FMAN_PLCR_PAR_R			0x40000000u	/* read (clear = write) */
 #define FMAN_PLCR_PAR_PNUM_SHIFT	16
 #define FMAN_PLCR_PAR_PWSEL_MASK	0x0000FFFFu	/* select all 16 words  */
+#define FMAN_PLCR_PAR_PWSEL_PEGNIA	0x00004000u	/* word 1: green  NIA   */
+#define FMAN_PLCR_PAR_PWSEL_PEYNIA	0x00002000u	/* word 2: yellow NIA   */
+#define FMAN_PLCR_PAR_PWSEL_PEGPC	0x00000010u	/* word 11: green  cnt  */
+#define FMAN_PLCR_PAR_PWSEL_PEYPC	0x00000008u	/* word 12: yellow cnt  */
+#define FMAN_PLCR_PAR_PWSEL_PERPC	0x00000004u	/* word 13: red    cnt  */
+
+/* Upper bound for safe 64-bit rate arithmetic (100 Gbps; prevents bps*39 and
+ * 16.16 fixed-point overflow in plcr_get_inforate() / plcr_calc_rates()). */
+#define FMAN_PLCR_MAX_BPS		100000000000ULL
 
 /*
  * Per-port relative->absolute profile-mapping window (SDK
@@ -194,6 +203,7 @@ static DEFINE_SPINLOCK(plcr_hw_lock);
  * @pcd:         owning PCD subsystem (back-pointer)
  * @port_id:     the FMan port this profile was installed for
  * @profile_id:  physical FMPL profile slot id (0..255)
+ * @drop_yellow: true when yellow frames are discarded instead of passed
  *
  * The profile contents live entirely in silicon (FMPL profile @profile_id);
  * this node exists only so fman_pcd_release() can reap profiles on unbind
@@ -205,6 +215,7 @@ struct fman_pcd_plcr_profile {
 	struct fman_pcd	*pcd;
 	u8		port_id;
 	u8		profile_id;
+	bool		drop_yellow;
 };
 
 /* The 16-word staged profile image, in window order. */
@@ -352,9 +363,13 @@ static void plcr_build_profile(const struct fman_pcd_plcr_hw_profile *hw,
 	pemode |= FMAN_PLCR_PEMODE_FLS_L2;
 	pemode |= (fpp << FMAN_PLCR_PEMODE_FPP_SHIFT);
 
+	u32 pass_nia = hw->next_nia ?
+		(FMAN_PLCR_NIA_VALID | (hw->next_nia & 0x00FFFFFFu)) :
+		FMAN_PLCR_NIA_ENQUEUE;
+
 	r->pemode	= pemode;
-	r->pegnia	= FMAN_PLCR_NIA_ENQUEUE;
-	r->peynia	= FMAN_PLCR_NIA_ENQUEUE;
+	r->pegnia	= pass_nia;
+	r->peynia	= hw->drop_yellow ? FMAN_PLCR_NIA_DISCARD : pass_nia;
 	r->pernia	= FMAN_PLCR_NIA_DISCARD;
 	r->pecir	= cir;
 	r->pecbs	= cbs;
@@ -545,23 +560,42 @@ plcr_find_locked(struct fman_pcd *pcd, u8 port_id, u8 profile_id)
  *
  * Port of SDK fm_plcr.c FM_PCD_PlcrProfileSet().
  */
+/* Find an installed profile occupying physical @profile_id (any port).
+ * Caller holds pcd->lock.
+ */
+static struct fman_pcd_plcr_profile *
+plcr_find_slot_locked(struct fman_pcd *pcd, u8 profile_id)
+{
+	struct list_head *head = fman_pcd_get_plcr_list(pcd);
+	struct fman_pcd_plcr_profile *p;
+
+	if (!head)
+		return NULL;
+	list_for_each_entry(p, head, node)
+		if (p->profile_id == profile_id)
+			return p;
+	return NULL;
+}
+
 int fman_pcd_plcr_install(struct fman_pcd *pcd, u8 port_id, u8 profile_id,
 			  const struct fman_pcd_plcr_hw_profile *hw)
 {
-	struct fman_pcd_plcr_profile *p, *old;
+	struct fman_pcd_plcr_profile *p, *old, *clash;
 	struct plcr_profile_regs regs;
 	struct mutex *pcd_lock;
 
 	if (!pcd || !hw)
 		return -EINVAL;
-
-	/* Reject a zero committed rate (the silicon would never pass a
-	 * frame); the dpaa-side bridge also screens this, belt-and-braces.
-	 */
-	if (hw->cir_bps == 0)
+	if (port_id < 1 || port_id > 63)
 		return -EINVAL;
-	/* RFC2698 requires PIR >= CIR. */
-	if (hw->trtcm && hw->pir_bps < hw->cir_bps)
+
+	/* Reject zero/out-of-range rates and zero bursts before touching HW. */
+	if (hw->cir_bps == 0 || hw->cbs_bytes == 0)
+		return -EINVAL;
+	if (hw->cir_bps > FMAN_PLCR_MAX_BPS || hw->pir_bps > FMAN_PLCR_MAX_BPS)
+		return -ERANGE;
+	/* RFC2698 requires PIR >= CIR and non-zero PBS when trTCM is active. */
+	if (hw->trtcm && (hw->pir_bps < hw->cir_bps || hw->pbs_bytes == 0))
 		return -ERANGE;
 
 	p = kzalloc(sizeof(*p), GFP_KERNEL);
@@ -571,27 +605,26 @@ int fman_pcd_plcr_install(struct fman_pcd *pcd, u8 port_id, u8 profile_id,
 	p->pcd = pcd;
 	p->port_id = port_id;
 	p->profile_id = profile_id;
+	p->drop_yellow = hw->drop_yellow;
 
-	/* Encode then commit the silicon profile. */
+	/* Encode the 16-word silicon image before locking. */
 	plcr_build_profile(hw, &regs);
-	plcr_commit_profile(pcd, profile_id, &regs);
 
-	/* Master-enable the policer engine (PEN|STEN) - mainline fman left it
-	 * disabled, which drops every routed frame pre-meter (BUG 3a).
-	 */
-	plcr_enable_block(pcd);
-
-	/* Open the per-port relative->absolute profile window so the RELATIVE
-	 * id KeyGen selects (KGSE_PPC, ABSOLUTE bit clear) resolves to this
-	 * absolute profile.  base = profile_id, num = 1 (single per-port
-	 * profile).  Without this the BMI drops every frame BEFORE metering
-	 * (BUG 3a).  Mirrors SDK FmPcdPlcrAllocProfiles(port, profile_id, 1).
-	 */
-	plcr_set_port_window(pcd, port_id, profile_id, 1);
-
-	/* Publish: replace any existing bookkeeping for this (port, slot). */
+	/* Serialize slot ownership + HW programming under pcd->lock so a
+	 * concurrent destroy or cross-port install cannot race or collide. */
 	pcd_lock = fman_pcd_get_lock(pcd);
 	mutex_lock(pcd_lock);
+	clash = plcr_find_slot_locked(pcd, profile_id);
+	if (clash && clash->port_id != port_id) {
+		mutex_unlock(pcd_lock);
+		kfree(p);
+		return -EBUSY;
+	}
+
+	plcr_commit_profile(pcd, profile_id, &regs);
+	plcr_enable_block(pcd);
+	plcr_set_port_window(pcd, port_id, profile_id, 1);
+
 	old = plcr_find_locked(pcd, port_id, profile_id);
 	if (old) {
 		list_del(&old->node);
@@ -627,19 +660,201 @@ void fman_pcd_plcr_destroy(struct fman_pcd *pcd, u8 port_id, u8 profile_id)
 	pcd_lock = fman_pcd_get_lock(pcd);
 	mutex_lock(pcd_lock);
 	p = plcr_find_locked(pcd, port_id, profile_id);
-	if (p)
+	if (p) {
 		list_del(&p->node);
+		/* Close the per-port profile window (VALID -> 0) and disarm
+		 * the silicon profile while still holding pcd->lock. */
+		plcr_clear_port_window(pcd, port_id);
+		plcr_invalidate_profile(pcd, profile_id);
+	}
 	mutex_unlock(pcd_lock);
 
-	if (!p)
-		return;
-
-	/* Close the per-port profile window (VALID -> 0) so KeyGen stops
-	 * resolving the relative id, then disarm the silicon profile and free
-	 * bookkeeping.  Mirrors SDK FmPcdPlcrFreeProfiles().
-	 */
-	plcr_clear_port_window(pcd, port_id);
-	plcr_invalidate_profile(pcd, profile_id);
 	kfree(p);
 }
 EXPORT_SYMBOL_GPL(fman_pcd_plcr_destroy);
+
+/**
+ * fman_pcd_plcr_destroy_all() - reap all installed policer profiles on unbind.
+ * @pcd: the PCD subsystem being released
+ */
+void fman_pcd_plcr_destroy_all(struct fman_pcd *pcd)
+{
+	struct fman_pcd_plcr_profile *p, *tmp;
+	struct list_head *head;
+	struct mutex *pcd_lock;
+
+	if (!pcd)
+		return;
+
+	pcd_lock = fman_pcd_get_lock(pcd);
+	mutex_lock(pcd_lock);
+	head = fman_pcd_get_plcr_list(pcd);
+	if (head) {
+		list_for_each_entry_safe(p, tmp, head, node) {
+			list_del(&p->node);
+			plcr_clear_port_window(pcd, p->port_id);
+			plcr_invalidate_profile(pcd, p->profile_id);
+			kfree(p);
+		}
+	}
+	mutex_unlock(pcd_lock);
+}
+EXPORT_SYMBOL_GPL(fman_pcd_plcr_destroy_all);
+
+/**
+ * fman_pcd_plcr_update_next_nia() - update green/yellow pass NIA on a live profile.
+ * @pcd:        the PCD subsystem
+ * @port_id:    owning FMan RX port id (1..63)
+ * @profile_id: physical FMPL profile slot id (0..255)
+ * @next_nia:   24-bit downstream NIA (e.g. NIA_ENG_HWK or NIA_ENG_HWK|NIA_KG_CC_EN)
+ *
+ * Uses selective FMPL_PAR[PWSEL] word masks (PEGNIA = 0x4000, PEYNIA = 0x2000,
+ * SDK fm_plcr.h) so hardware atomically updates only the NIA word(s) without
+ * touching live token buckets, timestamps, or packet counters.
+ */
+int fman_pcd_plcr_update_next_nia(struct fman_pcd *pcd, u8 port_id,
+				  u8 profile_id, u32 next_nia)
+{
+	struct fman_pcd_plcr_profile *p;
+	struct mutex *pcd_lock;
+	void __iomem *fmpl;
+	unsigned long flags;
+	u32 pass_nia, pwsel;
+	bool drop_yellow;
+
+	if (!pcd || !next_nia)
+		return -EINVAL;
+
+	pcd_lock = fman_pcd_get_lock(pcd);
+	mutex_lock(pcd_lock);
+	p = plcr_find_locked(pcd, port_id, profile_id);
+	if (!p) {
+		mutex_unlock(pcd_lock);
+		return -ENOENT;
+	}
+	drop_yellow = p->drop_yellow;
+
+	pass_nia = FMAN_PLCR_NIA_VALID | (next_nia & 0x00FFFFFFu);
+	pwsel = FMAN_PLCR_PAR_PWSEL_PEGNIA;
+	if (!drop_yellow)
+		pwsel |= FMAN_PLCR_PAR_PWSEL_PEYNIA;
+	fmpl = plcr_fmpl_base(pcd);
+
+	spin_lock_irqsave(&plcr_hw_lock, flags);
+	iowrite32be(pass_nia, fmpl + FMAN_PLCR_PE_PEGNIA);
+	if (!drop_yellow)
+		iowrite32be(pass_nia, fmpl + FMAN_PLCR_PE_PEYNIA);
+	plcr_write_par(fmpl,
+		       FMAN_PLCR_PAR_GO |
+		       ((u32)profile_id << FMAN_PLCR_PAR_PNUM_SHIFT) |
+		       pwsel);
+	spin_unlock_irqrestore(&plcr_hw_lock, flags);
+
+	mutex_unlock(pcd_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(fman_pcd_plcr_update_next_nia);
+
+/**
+ * fman_pcd_plcr_read_nias() - read back hardware PEGNIA/PEYNIA words via PAR_R.
+ * @pcd:        the PCD subsystem
+ * @port_id:    owning FMan RX port id (1..63)
+ * @profile_id: physical FMPL profile slot id (0..255)
+ * @pegnia:     optional output for FMPL_PEGNIA
+ * @peynia:     optional output for FMPL_PEYNIA
+ */
+int fman_pcd_plcr_read_nias(struct fman_pcd *pcd, u8 port_id, u8 profile_id,
+			    u32 *pegnia, u32 *peynia)
+{
+	struct fman_pcd_plcr_profile *p;
+	struct mutex *pcd_lock;
+	void __iomem *fmpl;
+	unsigned long flags;
+	u32 gn, yn;
+
+	if (!pcd)
+		return -EINVAL;
+
+	pcd_lock = fman_pcd_get_lock(pcd);
+	mutex_lock(pcd_lock);
+	p = plcr_find_locked(pcd, port_id, profile_id);
+	if (!p) {
+		mutex_unlock(pcd_lock);
+		return -ENOENT;
+	}
+
+	fmpl = plcr_fmpl_base(pcd);
+	spin_lock_irqsave(&plcr_hw_lock, flags);
+	plcr_write_par(fmpl,
+		       FMAN_PLCR_PAR_GO | FMAN_PLCR_PAR_R |
+		       ((u32)profile_id << FMAN_PLCR_PAR_PNUM_SHIFT) |
+		       FMAN_PLCR_PAR_PWSEL_PEGNIA |
+		       FMAN_PLCR_PAR_PWSEL_PEYNIA);
+	gn = ioread32be(fmpl + FMAN_PLCR_PE_PEGNIA);
+	yn = ioread32be(fmpl + FMAN_PLCR_PE_PEYNIA);
+	spin_unlock_irqrestore(&plcr_hw_lock, flags);
+
+	mutex_unlock(pcd_lock);
+
+	if (pegnia)
+		*pegnia = gn;
+	if (peynia)
+		*peynia = yn;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(fman_pcd_plcr_read_nias);
+
+/**
+ * fman_pcd_plcr_read_counters() - read green/yellow/red packet counters from HW.
+ * @pcd:        the PCD subsystem
+ * @port_id:    owning FMan RX port id (1..63)
+ * @profile_id: physical FMPL profile slot id (0..255)
+ * @green:      optional output for FMPL_PEGPC
+ * @yellow:     optional output for FMPL_PEYPC
+ * @red:        optional output for FMPL_PERPC
+ */
+int fman_pcd_plcr_read_counters(struct fman_pcd *pcd, u8 port_id,
+				u8 profile_id, u32 *green, u32 *yellow,
+				u32 *red)
+{
+	struct fman_pcd_plcr_profile *p;
+	struct mutex *pcd_lock;
+	void __iomem *fmpl;
+	unsigned long flags;
+	u32 g, y, r;
+
+	if (!pcd)
+		return -EINVAL;
+
+	pcd_lock = fman_pcd_get_lock(pcd);
+	mutex_lock(pcd_lock);
+	p = plcr_find_locked(pcd, port_id, profile_id);
+	if (!p) {
+		mutex_unlock(pcd_lock);
+		return -ENOENT;
+	}
+
+	fmpl = plcr_fmpl_base(pcd);
+	spin_lock_irqsave(&plcr_hw_lock, flags);
+	plcr_write_par(fmpl,
+		       FMAN_PLCR_PAR_GO | FMAN_PLCR_PAR_R |
+		       ((u32)profile_id << FMAN_PLCR_PAR_PNUM_SHIFT) |
+		       FMAN_PLCR_PAR_PWSEL_PEGPC |
+		       FMAN_PLCR_PAR_PWSEL_PEYPC |
+		       FMAN_PLCR_PAR_PWSEL_PERPC);
+	g = ioread32be(fmpl + FMAN_PLCR_PE_PEGPC);
+	y = ioread32be(fmpl + FMAN_PLCR_PE_PEYPC);
+	r = ioread32be(fmpl + FMAN_PLCR_PE_PERPC);
+	spin_unlock_irqrestore(&plcr_hw_lock, flags);
+
+	mutex_unlock(pcd_lock);
+
+	if (green)
+		*green = g;
+	if (yellow)
+		*yellow = y;
+	if (red)
+		*red = r;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(fman_pcd_plcr_read_counters);

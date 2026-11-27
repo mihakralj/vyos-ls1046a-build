@@ -66,6 +66,8 @@ typedef int64_t ktime_t;
 #define smp_store_release(p, v) (*(p) = (v))
 #define smp_mb__before_atomic() do { } while (0)
 #define smp_mb__after_atomic() do { } while (0)
+#define smp_wmb() do { } while (0)
+#define smp_rmb() do { } while (0)
 #define IS_ENABLED(x) 0
 #define ASSERT_RTNL() do { assert(rtnl_held); } while (0)
 #define cpu_relax() do { } while (0)
@@ -106,6 +108,13 @@ static inline int atomic_cmpxchg(atomic_t *a, int o, int n)
 #define atomic_cmpxchg_relaxed(a, o, n) atomic_cmpxchg((a), (o), (n))
 #define WGFP_MAX_BPIDS 64
 static struct device *wgfp_bpid_dev[WGFP_MAX_BPIDS];
+static u8 wgfp_bpid_need_sync[WGFP_MAX_BPIDS];
+static bool mock_dma_need_sync;
+static bool dma_dev_need_sync(const struct device *dev)
+{
+	(void)dev;
+	return mock_dma_need_sync;
+}
 static inline int64_t atomic64_read(const atomic64_t *a) { return a->counter; }
 #define atomic64_read_acquire(a) atomic64_read(a)
 static inline void atomic64_set(atomic64_t *a, int64_t v) { a->counter = v; }
@@ -236,6 +245,7 @@ struct wgfp_egress_pc {
 struct wgfp_egress {
 	struct net_device *dev;
 	struct device *tx_dma_dev;
+	bool tx_dma_need_sync;
 	int ifindex;
 	u32 tx_fqid;
 	unsigned int ncpus;
@@ -721,6 +731,25 @@ int main(void)
 		enq_fail_mode = 0;
 		assert(wgfp_txb.end != 0 && wgfp_eg_inflight_sum(&wgfp_egresses[eg5]) == 0);
 		wgfp_txb.active = false;
+		wgfp_bman_rel.active = false;
+
+		/* 16. In-NAPI threaded=1 with tx_batch <= 1 (b->active == false)
+		 * must still use the shared poll deadline (&b->end) rather than
+		 * falling back to the short per-frame wait path. */
+		u64 poll_fail_before = (u64)atomic64_read(&wgfp_xmit_poll_wait_fail);
+		u64 frame_fail_before = (u64)atomic64_read(&wgfp_xmit_frame_wait_fail);
+		wgfp_bman_rel.active = true;
+		wgfp_txb.active = false;
+		wgfp_txb.threaded = true;
+		wgfp_txb.end = 0;
+		enq_fail_mode = 1;
+		assert(dpaa_wgfp_tx_alloc(eg5, 5, 200, &tx));
+		dpaa_wgfp_tx_submit(NULL, &tx, DPAA_WGFP_TX_HEADROOM, 200);
+		enq_fail_mode = 0;
+		assert(wgfp_txb.end != 0);
+		assert((u64)atomic64_read(&wgfp_xmit_poll_wait_fail) == poll_fail_before + 1);
+		assert((u64)atomic64_read(&wgfp_xmit_frame_wait_fail) == frame_fail_before);
+		assert(wgfp_eg_inflight_sum(&wgfp_egresses[eg5]) == 0);
 		wgfp_bman_rel.active = false;
 	}
 

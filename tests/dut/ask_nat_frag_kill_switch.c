@@ -142,18 +142,21 @@ int main(void)
 	check_switch(ask_nat66_offload_set, &ask_nat66_offload,
 		     &ask_nat66_disable_incomplete,
 		     &nat66_flush_calls, &nat66_flush_rc, false);
-	/* A1: ipv6_hw_frag defaults OFF (RFC 8200 safe); writing 0 while already 0
-	 * must be a no-op (must not flush IPv6 SW flows). Opt in before testing 1->0. */
-	assert(!ask_ipv6_hw_frag);
-	{
-		struct kernel_param kp = { .arg = &ask_ipv6_hw_frag };
-		assert(ask_ipv6_hw_frag_set("0", &kp) == 0 && !ask_ipv6_hw_frag);
-		assert(v6_frag_flush_calls == 0);
-		assert(ask_ipv6_hw_frag_set("1", &kp) == 0 && ask_ipv6_hw_frag);
-	}
+	/* Vendor NXP ASK parity: ipv6_hw_frag defaults ON (=1); opt-out 1->0 flushes
+	 * live records, and a subsequent 0->0 write must be a no-op (no extra flush). */
+	assert(ask_ipv6_hw_frag);
 	check_switch(ask_ipv6_hw_frag_set, &ask_ipv6_hw_frag,
 		     &ask_ipv6_hw_frag_disable_incomplete,
 		     &v6_frag_flush_calls, &v6_frag_flush_rc, true);
+	{
+		struct kernel_param kp = { .arg = &ask_ipv6_hw_frag };
+		int prev_flushes = v6_frag_flush_calls;
+		assert(ask_ipv6_hw_frag_set("0", &kp) == 0 && !ask_ipv6_hw_frag);
+		assert(v6_frag_flush_calls == prev_flushes + 1);
+		assert(ask_ipv6_hw_frag_set("0", &kp) == 0 && !ask_ipv6_hw_frag);
+		assert(v6_frag_flush_calls == prev_flushes + 1);
+		assert(ask_ipv6_hw_frag_set("1", &kp) == 0 && ask_ipv6_hw_frag);
+	}
 	assert(!ask_killswitch_mutex.held);
 	puts("ask_nat_frag_kill_switch: OK");
 	return 0;

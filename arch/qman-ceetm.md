@@ -194,22 +194,25 @@ Three independent mechanisms:
 ## 7. CEETM — egress traffic management
 
 **CEETM** (Customer Edge Egress Traffic Management) is QMan's hierarchical class-based shaping +
-scheduling mode for WAN-facing egress. On LS1046A there is **one CEETM instance, on DCP0 (FMan)
-only**, the **8-channel** variant.
+scheduling mode for WAN-facing egress. On LS1046A (QMan Rev 3.2.1, `0a01,03,02,01`) there is
+**one CEETM instance, on DCP0 (FMan) only**, with **32 channels** and **4096 LFQIDs** (verified
+from live LS1046A DT `fsl,ceetm-channel-range = <0 0x20>`, `fsl,ceetm-lfqid-range = <0xf00000 0x1000>`,
+and live debugfs `query_cq_fields 0x1ff` / `query_ceetm_ccgr 0x1ff`).
 
 | Resource | Value | ⚠ |
 |---|---|---|
-| Channels | 8 | |
+| Channels | 32 | |
 | LNIs | 8 | |
+| Sub-portals (SP) | 16 | |
 | Class queues / channel | 16 (8 independent + 8 grouped) | |
-| **Total CQs** | **128** | |
-| **XSFDRs** | **1024** | **NOT 4096** (that's the 32-ch variant) |
-| LFQIDs | 1 K (0xF0_0000–0xF0_03FF) | |
-| LFQMT entries | 1 K | |
+| **Total CQs** | **512** | |
+| **XSFDRs** | **1024** | Budget frame-mode CCGRs tightly (`≤ 512`/port) so backlogged CQs cannot starve XSFDRs or BMan RX pools |
+| LFQIDs | 4 K (0xF0_0000–0xF0_0FFF) | |
+| LFQMT entries | 4 K | |
 
 ```mermaid
 flowchart TD
-    EQ["enqueue (same EQCR interface)"] --> CQ["Class Queue (128 total)"]
+    EQ["enqueue (same EQCR interface)"] --> CQ["Class Queue (512 total)"]
     CQ --> CS["Class Scheduler<br/>(per channel: strict + WBFS grouped)"]
     CS --> SHAPER["dual-rate token-bucket shaper<br/>(CR + ER per channel)"]
     SHAPER --> LNI["LNI (8) → sub-portal"]
@@ -218,14 +221,15 @@ flowchart TD
 
 - CEETM is an **alternate mode** per DCP sub-portal (switch only when traffic is stopped). Enqueue
   uses the *same* EQCR interface as a normal FQ — semantically compatible.
-- Each CQ buffers up to 8 frames in **XSFDRs** (1024 shared across all 128 CQs). Monitor live usage at
+- Each CQ buffers frames in **XSFDRs** (shared across active CQs). Monitor live usage at
   `CEETM_XSFDR_IN_USE` (CCSR 0x908, 13-bit, min 1).
-- Class congestion via **CCGRs** (≥128). Shaping is dual-rate (committed + excess) token bucket per
-  channel; LNIs aggregate channels onto a sub-portal.
+- Class congestion via **CCGRs** (frame-count mode recommended so thresholds match XSFDR and BMan
+  buffer budgets). Shaping is dual-rate (committed + excess) token bucket per channel; LNIs
+  aggregate channels onto a sub-portal.
 
 > **ASK2:** CEETM is how you give the WAN port real HQoS (per-subscriber/per-class shaping) on the
-> egress side, instead of the flat 8-WQ scheduler. The **1024-XSFDR** ceiling (not 4096) limits how
-> many CQs can be simultaneously backlogged — size accordingly.
+> egress side, instead of the flat 8-WQ scheduler. Size frame-mode CCGR thresholds conservatively per
+> port to protect both XSFDRs and BMan RX buffer pools.
 
 ---
 

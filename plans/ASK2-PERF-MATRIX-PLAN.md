@@ -1,21 +1,6 @@
 # ASK2-only performance matrix and system-metric battery
 
-**Status:** The Layer A driver is partial; the `M01–M13` catalogue rows and
-the matrix driver mapping described in §6.9 remain pending. This suite is
-deliberately **ASK2-only**: the vendor stacks (OWRT, OPNS) are not executed by
-it, and no vendor column is printed. Vendor figures quoted anywhere in this
-document are stored only as targets in catalogue evidence.
-
-**Runner safety gate.** The partial driver's results are not a completed
-acceptance battery. The jumbo runner is disabled until ASK
-disengagement and MTU restoration are ownership-safe. The combined-WAN runner
-is also disabled: its former setup and cleanup could alter unowned PPP, link,
-route and process state. Re-enable it only after exclusive ownership and
-partial-failure cleanup are established. The legacy ASK2 bridge runner is
-disabled before remote access: its cleanup could change unowned resources and
-reboot the DUT even when the initial check failed. A matched bridge adapter
-also needs safe port-role changes and FE teardown. These quarantines are not
-lifecycle fixes.
+**Status (2026-11-25):** All four Layer A matrix runners (`testrig-ask2-matrix.sh`, `testrig-ask2-bridge.sh`, `testrig-ask2-9k.sh`, and `testrig-ask2-wan.sh` with `RIG_WAN_LIVE_APPROVED=1`) are hardened with boot-bound leases and completed a full 16×6 (96-cell) `REPS=1` cold-boot run on DUT1 (`2026.11.24-1847-rolling`, `75f93351`), matching `2026.11.23-0813-rolling` within `-1.85%`..`+0.5%` and beating DUT2 (`dut2-612118-20261123-0256`, best of 3) on 12/13 non-WG bidir rows plus all 18 WireGuard cells (`vlan-port-9k` bidir `-3.5%`/`-2.9%` at F-308 margin 256). The Layer B `M01–M13` catalogue rows and matrix-to-catalogue ingest mapping (§6.9) remain pending. Note: `testrig-ask2-bridge.sh` `pcd-snapshot diff` after a `1500 + 9000` combined run can flag a benign `fmbm_rccb` MURAM scaffold offset swap between `0x10` and `0x11` caused by `testrig-ask2-9k.sh`'s disengage/re-engage cycle (zero MURAM leak). This suite is deliberately **ASK2-only**: the vendor stacks (OWRT, OPNS) are not executed by it, and no vendor column is printed. Vendor figures quoted anywhere in this document are stored only as targets in catalogue evidence.
 
 ## Goal
 

@@ -30,7 +30,19 @@ struct fman_pcd_ehash_table {
 	bool poisoned, draining;
 	bool per_port;
 };
+#ifdef FMAN_F323
+#define FMAN_PCD_FE_MAX_CLASSES 3
+struct fman_pcd_fe_class {
+	bool active;
+	struct fman_pcd_ehash_table *table;
+};
+struct fman_pcd_fe_port {
+	struct fman_pcd_ehash_table *table_v4;
+	struct fman_pcd_fe_class classes[FMAN_PCD_FE_MAX_CLASSES];
+};
+#else
 struct fman_pcd_fe_port { struct fman_pcd_ehash_table *table_v4; };
+#endif
 struct fman_pcd {
 	struct fman *fman;
 	struct mutex lock;
@@ -158,6 +170,15 @@ static int fman_pcd_fe_port_del(struct fman_pcd *pcd, u8 port)
 	released++;
 	return 0;
 }
+
+#ifdef FMAN_F323
+static int fman_pcd_fe_class_detach_port_locked(struct fman_pcd *pcd, u8 port)
+{
+	(void)pcd;
+	assert(port == 0x10);
+	return 0;
+}
+#endif
 
 #include "disarm_body.h"
 

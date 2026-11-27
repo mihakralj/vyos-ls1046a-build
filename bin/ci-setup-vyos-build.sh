@@ -662,8 +662,10 @@ chmod +x "$CHROOT/usr/local/bin/support-bundle"
 ### board PCD substrate is in the common patch set on every image).
 cp board/scripts/pcd-snapshot "$CHROOT/usr/local/bin/pcd-snapshot"
 cp board/scripts/vyos-offload-ask "$CHROOT/usr/local/bin/vyos-offload-ask"
+cp board/scripts/ask-ipfix-exporter.py "$CHROOT/usr/local/bin/ask-ipfix-exporter"
 chmod +x "$CHROOT/usr/local/bin/vyos-offload-ask"
 chmod +x "$CHROOT/usr/local/bin/pcd-snapshot"
+chmod +x "$CHROOT/usr/local/bin/ask-ipfix-exporter"
 
 ### ASK2 op-mode transport: the vendored YNL Python client (board/ynl/) + the
 ### `ask` genl spec, so `show interfaces ethernet eth<n> offload ask flows`

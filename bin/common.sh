@@ -40,13 +40,13 @@ if [[ -f "$KERNEL_SCRIPTS_DIR/sync-kernel-version.sh" ]]; then
     # shellcheck source=../kernel/common/scripts/sync-kernel-version.sh
     . "$KERNEL_SCRIPTS_DIR/sync-kernel-version.sh"
 fi
-export KERNEL_VERSION KERNEL_SERIES
+export KERNEL_VERSION KERNEL_SERIES KERNEL_REVISION
 
 # Now safe to source versions.lock for its other pins (e.g. ARCH): its
 # `: "${KERNEL_VERSION:=...}"` form is a no-op since KERNEL_VERSION is
 # already exported above.
 [[ -f "$REPO_ROOT/versions.lock" ]] && . "$REPO_ROOT/versions.lock"
-export KERNEL_VERSION KERNEL_SERIES
+export KERNEL_VERSION KERNEL_SERIES KERNEL_REVISION
 
 # ── Status banner (only when sourced from an interactive script) ──────
 if [[ "${BC_QUIET:-0}" != "1" ]]; then

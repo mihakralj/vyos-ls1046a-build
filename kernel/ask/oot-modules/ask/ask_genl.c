@@ -299,6 +299,35 @@ goto nla_put_failure;
 	if (nla_put_u32(skb, ASK_INFO_ATTR_UNRESOLVED_FLOWS, unresolved_flows))
 		goto nla_put_failure;
 }
+{
+	struct ask_fallback_stats fb;
+	struct nlattr *fb_nest;
+
+	ask_fallback_snapshot(&fb);
+	fb_nest = nla_nest_start(skb, ASK_INFO_ATTR_FALLBACK);
+	if (!fb_nest)
+		goto nla_put_failure;
+	if (nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_ADMISSION_GATE,
+			      fb.admission_gate, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_POLICY_FENCED,
+			      fb.policy_fenced, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_UNSUPPORTED_PROTO,
+			      fb.unsupported_proto, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_UNSUPPORTED_ACTION,
+			      fb.unsupported_action, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_NEIGH_UNRESOLVED,
+			      fb.neigh_unresolved, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_PORT_UNENGAGED,
+			      fb.port_unengaged, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_MAX_FLOWS,
+			      fb.max_flows, ASK_FALLBACK_ATTR_UNSPEC) ||
+	    nla_put_u64_64bit(skb, ASK_FALLBACK_ATTR_HW_ERROR,
+			      fb.hw_error, ASK_FALLBACK_ATTR_UNSPEC)) {
+		nla_nest_cancel(skb, fb_nest);
+		goto nla_put_failure;
+	}
+	nla_nest_end(skb, fb_nest);
+}
 
 nla_nest_end(skb, nest);
 return 0;
@@ -440,61 +469,13 @@ err:
 /* ------------------------------------------------------------------------- */
 static int ask_genl_set_policer_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct fman_pcd_plcr_hw_profile hw;
-	struct fman *fman;
-	struct fman_pcd *pcd;
-	struct nlattr *nest;
-	struct nlattr *tb[ASK_POLICER_ATTR_MAX + 1];
-	struct nlattr **attrs;
-	u8 port_id;
-	u32 rate_bps;
-	u32 burst_bytes;
-	int rc;
-
-	nest = info->attrs[ASK_ATTR_POLICER];
-	if (nest) {
-		rc = nla_parse_nested(tb, ASK_POLICER_ATTR_MAX, nest,
-				      ask_policer_policy, info->extack);
-		if (rc)
-			return rc;
-		attrs = tb;
-	} else {
-		attrs = info->attrs;
-	}
-
-	if (!attrs[ASK_POLICER_ATTR_PORT_ID] ||
-	    !attrs[ASK_POLICER_ATTR_RATE_BPS] ||
-	    !attrs[ASK_POLICER_ATTR_BURST_BYTES])
-		return -EINVAL;
-
-	port_id     = nla_get_u8(attrs[ASK_POLICER_ATTR_PORT_ID]);
-	rate_bps    = nla_get_u32(attrs[ASK_POLICER_ATTR_RATE_BPS]);
-	burst_bytes = nla_get_u32(attrs[ASK_POLICER_ATTR_BURST_BYTES]);
-
-	fman = ask_hw_get_fman();
-	pcd = fman ? fman_get_pcd(fman) : NULL;
-	if (!pcd)
-		return -ENODEV;
-
-	memset(&hw, 0, sizeof(hw));
-	hw.trtcm       = false;	       /* srTCM: single-rate two-color */
-	hw.color_aware = false;	       /* colour-blind */
-	hw.cir_bps     = rate_bps;
-	hw.cbs_bytes   = burst_bytes;
-	hw.pir_bps     = 0;	       /* N/A for srTCM */
-	hw.pbs_bytes   = 0;	       /* N/A for srTCM */
-
-	/* profile_id == port_id (one srTCM policer slot per port). */
-	rc = fman_pcd_plcr_install(pcd, port_id, port_id, &hw);
-	if (rc) {
-		ask_pr_err("genl: set_policer port 0x%02x failed: %d\n",
-			   port_id, rc);
-		return rc;
-	}
-
-	ask_pr_info("genl: set_policer port 0x%02x rate=%u bps burst=%u\n",
-		    port_id, rate_bps, burst_bytes);
-	return 0;
+	/* G10 Phase 4: port-wide ingress policing is owned by the DPAA tc
+	 * matchall offload (HWP->PLCR->downstream, per-port slot = port_id).
+	 * Refuse direct genl writes so nothing clobbers FMPL_PMR or installs a
+	 * pir_bps=0 profile behind tc's back. */
+	NL_SET_ERR_MSG_MOD(info->extack,
+			   "ingress policing is configured via tc ingress matchall action police");
+	return -EOPNOTSUPP;
 }
 int ask_genl_register(void)
 {
@@ -651,6 +632,31 @@ goto nla_put_failure;
 if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_LAST_SEEN_NS, last_seen_ns,
       ASK_FLOW_ATTR_UNSPEC))
 goto nla_put_failure;
+if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_FIRST_SEEN_NS, f->first_seen_ns,
+      ASK_FLOW_ATTR_UNSPEC))
+goto nla_put_failure;
+
+/*
+ * Phase 1.1 telemetry: emit NAT/PAT rewrite metadata carried on the stored
+ * flow (original 5-tuple remains in src-ip/dst-ip/sport/dport; translated
+ * values are conditional on ASK_NATF_* bits so non-NAT dumps stay compact).
+ */
+if (f->key.nat_flags) {
+	if (nla_put_u8(skb, ASK_FLOW_ATTR_NAT_FLAGS, f->key.nat_flags))
+		goto nla_put_failure;
+	if ((f->key.nat_flags & ASK_NATF_SNAT) &&
+	    nla_put(skb, ASK_FLOW_ATTR_NAT_SRC_IP, iplen, f->key.nat_src_ip))
+		goto nla_put_failure;
+	if ((f->key.nat_flags & ASK_NATF_DNAT) &&
+	    nla_put(skb, ASK_FLOW_ATTR_NAT_DST_IP, iplen, f->key.nat_dst_ip))
+		goto nla_put_failure;
+	if ((f->key.nat_flags & ASK_NATF_SPAT) &&
+	    nla_put_be16(skb, ASK_FLOW_ATTR_NAT_SPORT, f->key.nat_sport))
+		goto nla_put_failure;
+	if ((f->key.nat_flags & ASK_NATF_DPAT) &&
+	    nla_put_be16(skb, ASK_FLOW_ATTR_NAT_DPORT, f->key.nat_dport))
+		goto nla_put_failure;
+}
 
 /*
  * VLAN CC-path flows have no per-key silicon counters, so their per-flow
@@ -904,14 +910,17 @@ static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
 	if (!fam_mask || (fam_mask & ~(ASK_FAM_V4 | ASK_FAM_V6)))
 		return -EINVAL;	/* engage with no/unknown family is nonsensical */
 
-	/* T-M6-2 B3a (bridge plan D1): a bridge member engages as L2_DA, any
-	 * other port ROUTED. rtnl keeps membership stable across the decision
-	 * and the engage; a port armed with the other profile is switched. */
+	/* T-M6-2 B3a / G5b: mixed-profile IRB engages bridge members as ROUTED
+	 * on row 0 and attaches a secondary 16B L2_DA class on ETH HXS slot 0;
+	 * legacy irb_mixed_profile=0 falls back to pure L2_DA on row 0. rtnl
+	 * keeps membership and MACs stable across engage + class sync. */
 	rtnl_lock();
 	dev = ask_hw_port_netdev(port_id);
 	rc = ask_hw_offload_engage_role(port_id,
 			dev ? ask_bridge_port_profile(dev) :
 			      FMAN_PCD_FE_PROFILE_ROUTED, false, fam_mask);
+	if (!rc && dev)
+		ask_bridge_sync_port_class(dev);
 	rtnl_unlock();
 	if (rc) {
 		ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);

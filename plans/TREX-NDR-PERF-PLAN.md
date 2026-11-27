@@ -2,7 +2,7 @@
 
 Goal: a report per run in the style of performance.vyos.dev (bitrate, packet rate, drop rate at the no-drop rate), for the three dataplanes of one ISO: **S0 kernel**, **S1 ASK2**, **S2 VPP**. Mode definitions: `plans/DUAL-DATAPLANE.md`. VPP setup: `plans/VPP.md`.
 
-Status: plan only. Nothing here has been measured. The tables in §8 are a mockup of the report layout, not data.
+Status: **S1 ASK2 measured** (`2026-11-27`, `VyOS 2026.11.27-0330-rolling`, Dual-TRex v3.08 X710 `vfio-pci`, zero-recable topology; NDR/PDR/MRR across 64/512/1518 B × 1/1024 flows and 64 B flow ladder + lossless bisect `303,104` + `ZONE_DMA` collapse ceiling `~837,356` published in [`benchmarks.md`](../benchmarks.md)). **S0 kernel** and **S2 VPP** matched NDR matrices remain open. The tables in §8 are the original report-layout mockup.
 
 ## 1. Rig
 

@@ -55,9 +55,13 @@ struct dpaa_wgfp_frame {
 };
 
 /* WGFP-v2 owned TX slot (pre-mapped order-0 DMA_TO_DEVICE page).
- * Bytes [0..63] hold internal completion metadata; packet data starts at >= 64. */
+ * Bytes [0..63] hold internal completion metadata; packet data starts at >= 64.
+ * DPAA order-0 RX buffers are 3584 B with 256 B headroom (~3314 B max single-
+ * buffer IP MTU); ports above DPAA_WGFP_MAX_CONTIG_MTU produce scatter/gather
+ * FDs that WGFP sinks do not reassemble, so WGFP stays in software there. */
 #define DPAA_WGFP_TX_HEADROOM	64
 #define DPAA_WGFP_TX_BUF_SIZE	(PAGE_SIZE - DPAA_WGFP_TX_HEADROOM)
+#define DPAA_WGFP_MAX_CONTIG_MTU 3300
 
 struct dpaa_wgfp_tx_buf {
 	u8 *buf;		/* page base virtual address; write at offset >= 64 */
@@ -97,6 +101,8 @@ struct dpaa_wgfp_tuple {
 	u8 proto;
 	u8 family;		/* AF_INET or AF_INET6 */
 	u8 _pad[2];
+	__be16 vlan_vid;	/* 802.1Q VID (1..4095) in BE, 0 if untagged */
+	__be16 pppoe_sid;	/* PPPoE session ID in BE, 0 if none */
 };
 
 /*

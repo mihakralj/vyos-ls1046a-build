@@ -51,4 +51,11 @@ def test_enqueue_backpressure_and_wgfp_no_real_bpid_ownership(tmp_path):
                    "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_xmit)")
     assert "qman_enqueue" not in xmit
     assert "qman_enqueue_fqid" not in xmit
-    assert "dev_queue_xmit(skb)" in xmit
+    assert "dpaa_wgfp_tx_submit(" in xmit
+    assert "dpaa_wgfp_xmit_skb(" in xmit
+    submit = extract(wgfp, "void dpaa_wgfp_tx_submit(",
+                     "\nEXPORT_SYMBOL_GPL(dpaa_wgfp_tx_submit)")
+    assert "fd.bpid = WGFP_BPID_INV;" in submit
+    submit_skb = extract(wgfp, "static void wgfp_submit_skb(",
+                         "\nvoid dpaa_wgfp_xmit(")
+    assert "dev_queue_xmit(skb)" in submit_skb

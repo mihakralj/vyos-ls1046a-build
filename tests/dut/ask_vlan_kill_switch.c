@@ -93,6 +93,7 @@ static u8 ask_hw_port_family_get(u8 port) { return ask_hw_port_family[port]; }
 static int ask_vlan_cc_teardown_port(u8 port) { legacy_teardowns++; return 0; }
 static int ask_hw_fe_reengage(u8 port) { legacy_reengages++; return 0; }
 static void ask_bridge_kick(void) { bridge_kicks++; }
+static int ask_bridge_sync_classes(void) { return 0; }
 static void ask_bridge_vlan_pause(void) { bridge_paused = true; }
 static void ask_bridge_vlan_resume(void) { bridge_paused = false; bridge_kicks++; }
 

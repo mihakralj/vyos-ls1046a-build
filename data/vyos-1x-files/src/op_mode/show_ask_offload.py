@@ -31,6 +31,7 @@
 import argparse
 import json
 import socket
+import time
 from ipaddress import ip_address
 
 from tabulate import tabulate
@@ -77,12 +78,64 @@ def _fmt_ip(val):
         raw = bytes(val)
     else:
         return str(val)
-    # v4 packs into the first 4 bytes; v6 uses all 16.
-    if len(raw) >= 16 and any(raw[4:16]):
-        return str(ip_address(raw[:16]))
-    if len(raw) >= 4:
-        return str(ip_address(raw[:4]))
+    if len(raw) == 16:
+        return str(ip_address(raw))
+    if len(raw) == 4:
+        return str(ip_address(raw))
     return raw.hex()
+
+
+# NAT/PAT rewrite bitmask matching include/uapi/linux/ask/ask.h.
+_ASK_NATF_SNAT = 1 << 0
+_ASK_NATF_DNAT = 1 << 1
+_ASK_NATF_SPAT = 1 << 2
+_ASK_NATF_DPAT = 1 << 3
+
+
+def _fmt_endpoint(val, port):
+    ip = _fmt_ip(val)
+    if port is None:
+        port = '-'
+    return f'[{ip}]:{port}' if ':' in ip else f'{ip}:{port}'
+
+
+def _fmt_nat(flow: dict) -> str:
+    """Render translated NAT/PAT endpoints from ASK_FLOW_ATTR_NAT_*."""
+    flags = _get(flow, 'nat-flags', default=0) or 0
+    if not flags:
+        return '-'
+    parts = []
+    if flags & (_ASK_NATF_SNAT | _ASK_NATF_SPAT):
+        nsip = _get(flow, 'nat-src-ip') if (flags & _ASK_NATF_SNAT) else None
+        nspt = _get(flow, 'nat-sport') if (flags & _ASK_NATF_SPAT) else None
+        if nsip is not None and nspt is not None:
+            parts.append(f'snat {_fmt_endpoint(nsip, nspt)}')
+        elif nsip is not None:
+            parts.append(f'snat {_fmt_ip(nsip)}')
+        elif nspt is not None:
+            parts.append(f'spat :{nspt}')
+    if flags & (_ASK_NATF_DNAT | _ASK_NATF_DPAT):
+        ndip = _get(flow, 'nat-dst-ip') if (flags & _ASK_NATF_DNAT) else None
+        ndpt = _get(flow, 'nat-dport') if (flags & _ASK_NATF_DPAT) else None
+        if ndip is not None and ndpt is not None:
+            parts.append(f'dnat {_fmt_endpoint(ndip, ndpt)}')
+        elif ndip is not None:
+            parts.append(f'dnat {_fmt_ip(ndip)}')
+        elif ndpt is not None:
+            parts.append(f'dpat :{ndpt}')
+    return ', '.join(parts) if parts else f'0x{int(flags):x}'
+
+
+def _fmt_age(first_seen_ns, now_ns: int) -> str:
+    """Format host-observed flow age from CLOCK_MONOTONIC nanoseconds."""
+    if not first_seen_ns:
+        return '-'
+    sec = max(0, (now_ns - int(first_seen_ns)) // 1_000_000_000)
+    if sec < 60:
+        return f'{sec}s'
+    if sec < 3600:
+        return f'{sec // 60}m{sec % 60:02d}s'
+    return f'{sec // 3600}h{(sec % 3600) // 60:02d}m'
 
 
 def _fetch_flows():
@@ -117,6 +170,7 @@ def show_flows(intf: str):
         return 1
 
     flows = _fetch_flows()
+    now_ns = time.monotonic_ns()
     rows = []
     for f in flows:
         iif = _get(f, 'iif')
@@ -127,9 +181,8 @@ def show_flows(intf: str):
         proto = _L4.get(l4, str(l4) if l4 is not None else '-')
         sport = _get(f, 'sport', default='-')
         dport = _get(f, 'dport', default='-')
-        # `offloaded` (u8) was added 2026-07-26. Absent on older images, in
-        # which case we cannot tell hardware-backed from software-fallback
-        # flows and say so rather than implying hardware.
+        # `offloaded` (u8) distinguishes hardware-backed from software-fallback
+        # flows; absent on older images.
         off = _get(f, 'offloaded')
         if off is None:
             offload = '?'
@@ -137,11 +190,13 @@ def show_flows(intf: str):
             offload = 'hw' if int(off) else 'sw'
         rows.append([
             proto,
-            f'{_fmt_ip(_get(f, "src-ip"))}:{sport}',
-            f'{_fmt_ip(_get(f, "dst-ip"))}:{dport}',
+            _fmt_endpoint(_get(f, 'src-ip'), sport),
+            _fmt_endpoint(_get(f, 'dst-ip'), dport),
+            _fmt_nat(f),
             _get(f, 'iif', default='-'),
             _get(f, 'oif', default='-'),
             offload,
+            _fmt_age(_get(f, 'first-seen-ns'), now_ns),
             _get(f, 'packets', default=0),
             _get(f, 'bytes', default=0),
         ])
@@ -150,13 +205,9 @@ def show_flows(intf: str):
         print(f'No flows tracked by ASK on {intf}')
         return 0
 
-    # Not every tracked flow is in silicon: the hardware insert rejects IPv6
-    # and any non-TCP/UDP IPv4 flow, and those fall back to the kernel
-    # software path. Report both, distinguished by the Offload column,
-    # instead of captioning everything as "ASK-offloaded".
-    n_hw = sum(1 for r in rows if r[5] == 'hw')
-    headers = ['Proto', 'Source', 'Destination', 'IIF', 'OIF',
-               'Offload', 'Packets', 'Bytes']
+    n_hw = sum(1 for r in rows if r[6] == 'hw')
+    headers = ['Proto', 'Source', 'Destination', 'NAT', 'IIF', 'OIF',
+               'Offload', 'Age', 'Packets', 'Bytes']
     print(f'ASK flows on {intf} ({len(rows)} tracked, {n_hw} in hardware):\n')
     print(tabulate(rows, headers=headers, tablefmt='simple'))
     return 0

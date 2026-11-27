@@ -125,6 +125,8 @@ jobs:
       PREVIOUS_SUCCESS_BUILD_TIMESTAMP: ${{ steps.set_env_variables.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}
       image_iso: ${{ steps.build_iso.outputs.image_iso }}
       image_name: ${{ steps.build_iso.outputs.image_name }}
+      kernel_version: ${{ steps.resolve_kernel_version.outputs.kernel_version }}
+      kernel_revision: ${{ steps.resolve_kernel_version.outputs.kernel_revision }}
 
     steps:
       - name: Verify Hardware
@@ -246,6 +248,14 @@ jobs:
           # as normal, so the patch-apply step remains idempotent.
           clean: false
 
+      - name: Resolve upstream kernel version
+        id: resolve_kernel_version
+        run: |
+          . kernel/common/scripts/sync-kernel-version.sh
+          echo "kernel_version=${KERNEL_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "kernel_revision=${KERNEL_REVISION}" >> "$GITHUB_OUTPUT"
+          echo "### Upstream kernel pin: ${KERNEL_VERSION}-${KERNEL_REVISION}-vyos (source: ${_SOURCE})"
+
       - name: Install vyos-1x build dependencies (VyOS apt repo)
         # All package installs live in bin/ci-install-vyos1x-deps.sh so the
         # Cobalt 100 dev loop (bin/local-build.sh) can reproduce it without
@@ -319,8 +329,7 @@ jobs:
 
       - name: Clone Linux Kernel (git repo, not tarball)
         run: |
-          KVER="${KERNEL_VERSION:-$(awk -F'"' '/^[[:space:]]*kernel_version[[:space:]]*=/{print $2; exit}' vyos-build/data/defaults.toml 2>/dev/null)}"
-          [ -n "$KVER" ] || KVER="6.18.38"
+          KVER="${{ steps.resolve_kernel_version.outputs.kernel_version }}"
           echo "### Cloning kernel v${KVER} (source of truth: vyos-build/data/defaults.toml)"
           bin/clone-kernel.sh "${KVER}"
           # The clone goes to vyos-build/scripts/package-build/linux-kernel/linux/
@@ -681,6 +690,8 @@ jobs:
           BUILD_VERSION: ${{ needs.build_iso.outputs.build_version }}
           IMAGE_ISO: ${{ needs.build_iso.outputs.image_iso }}
           TIMESTAMP: ${{ needs.build_iso.outputs.TIMESTAMP }}
+          KERNEL_VERSION: ${{ needs.build_iso.outputs.kernel_version }}
+          KERNEL_REVISION: ${{ needs.build_iso.outputs.kernel_revision }}
           REPO: ${{ github.repository }}
         run: |
           set -e
@@ -697,6 +708,9 @@ jobs:
           EOF
             echo "### Wrote canonical version.json"
             cat version.json
+            if [ -n "${KERNEL_VERSION:-}" ]; then
+              bash kernel/common/scripts/sync-kernel-version.sh --update
+            fi
           elif [[ "${{ github.ref_name }}" == nxp-sdk* ]]; then
             URL="https://github.com/${REPO}/releases/download/nxp-ask/${IMAGE_ISO}"
             cat > version-nxp.json <<EOF
@@ -718,7 +732,7 @@ jobs:
           set -e
           sudo chown -R $(whoami):$(whoami) ./*
           if [ "${{ github.ref_name }}" = "main" ]; then
-            FEEDS="version.json"
+            FEEDS="version.json versions.lock"
           else
             FEEDS="version-nxp.json"
           fi
@@ -741,7 +755,7 @@ jobs:
           tagging_message: ${{ github.ref_name == 'main' && needs.build_iso.outputs.build_version || '' }}
           commit_message: ${{ needs.build_iso.outputs.build_version }}
           commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
-          file_pattern: ${{ github.ref_name == 'main' && 'version.json' || 'version-nxp.json' }}
+          file_pattern: ${{ github.ref_name == 'main' && 'version.json versions.lock' || 'version-nxp.json' }}
 
       - name: "Release publishing: update git tag for nxp-ask"
         if: startsWith(github.ref_name, 'nxp-sdk')

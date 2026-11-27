@@ -29,6 +29,18 @@ const struct nla_policy ask_top_policy[ASK_ATTR_MAX + 1] = {
 [ASK_ATTR_FAMILY_MASK] = { .type = NLA_U8 },
 };
 
+const struct nla_policy ask_fallback_policy[ASK_FALLBACK_ATTR_MAX + 1] = {
+[ASK_FALLBACK_ATTR_ADMISSION_GATE]     = { .type = NLA_U64 },
+[ASK_FALLBACK_ATTR_POLICY_FENCED]      = { .type = NLA_U64 },
+[ASK_FALLBACK_ATTR_UNSUPPORTED_PROTO]  = { .type = NLA_U64 },
+[ASK_FALLBACK_ATTR_UNSUPPORTED_ACTION] = { .type = NLA_U64 },
+[ASK_FALLBACK_ATTR_NEIGH_UNRESOLVED]   = { .type = NLA_U64 },
+[ASK_FALLBACK_ATTR_PORT_UNENGAGED]     = { .type = NLA_U64 },
+[ASK_FALLBACK_ATTR_MAX_FLOWS]          = { .type = NLA_U64 },
+[ASK_FALLBACK_ATTR_HW_ERROR]           = { .type = NLA_U64 },
+};
+EXPORT_SYMBOL_GPL(ask_fallback_policy);
+
 const struct nla_policy ask_info_policy[ASK_INFO_ATTR_MAX + 1] = {
 [ASK_INFO_ATTR_DRIVER_VERSION] = { .type = NLA_NUL_STRING, .len = 31 },
 [ASK_INFO_ATTR_GENL_VERSION]   = { .type = NLA_U32 },
@@ -43,6 +55,7 @@ const struct nla_policy ask_info_policy[ASK_INFO_ATTR_MAX + 1] = {
 [ASK_INFO_ATTR_POLICY_EPOCH]   = { .type = NLA_U64 },
 [ASK_INFO_ATTR_REVOKE_STATE]   = { .type = NLA_U8 },
 [ASK_INFO_ATTR_UNRESOLVED_FLOWS] = { .type = NLA_U32 },
+[ASK_INFO_ATTR_FALLBACK]       = NLA_POLICY_NESTED(ask_fallback_policy),
 };
 EXPORT_SYMBOL_GPL(ask_info_policy);
 
@@ -84,8 +97,14 @@ const struct nla_policy ask_flow_policy[ASK_FLOW_ATTR_MAX + 1] = {
  */
 [ASK_FLOW_ATTR_OFFLOADED]   = { .type = NLA_U8 },
 [ASK_FLOW_ATTR_PORT_ID]     = { .type = NLA_U8 },
-[ASK_FLOW_ATTR_AGG_PACKETS] = { .type = NLA_U64 },
-[ASK_FLOW_ATTR_AGG_BYTES]   = { .type = NLA_U64 },
+[ASK_FLOW_ATTR_AGG_PACKETS]   = { .type = NLA_U64 },
+[ASK_FLOW_ATTR_AGG_BYTES]     = { .type = NLA_U64 },
+[ASK_FLOW_ATTR_FIRST_SEEN_NS] = { .type = NLA_U64 },
+[ASK_FLOW_ATTR_NAT_FLAGS]     = { .type = NLA_U8 },
+[ASK_FLOW_ATTR_NAT_SRC_IP]    = { .type = NLA_BINARY, .len = 16 },
+[ASK_FLOW_ATTR_NAT_DST_IP]    = { .type = NLA_BINARY, .len = 16 },
+[ASK_FLOW_ATTR_NAT_SPORT]     = { .type = NLA_U16 },
+[ASK_FLOW_ATTR_NAT_DPORT]     = { .type = NLA_U16 },
 };
 
 const struct nla_policy ask_sa_policy[ASK_SA_ATTR_MAX + 1] = {

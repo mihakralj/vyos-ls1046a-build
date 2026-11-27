@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/debugfs.h>
+#include <linux/rtnetlink.h>
 #include <linux/uaccess.h>
 #include <linux/string.h>
 

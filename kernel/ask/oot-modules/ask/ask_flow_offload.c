@@ -43,6 +43,7 @@
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
+#include <net/sch_generic.h>
 #include <linux/if_arp.h>		/* ARPHRD_PPP: T-M6-SP4 session-down flush */
 #include <linux/if_pppox.h>		/* PPPOE_SES_HLEN: decap MTU bound */
 #include <linux/inetdevice.h>
@@ -55,6 +56,7 @@
 #include <linux/jiffies.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
+#include <net/tcx.h>
 #include <net/arp.h>
 #include <net/ndisc.h>
 #include <net/neighbour.h>
@@ -145,7 +147,7 @@ bool ask_vlan_push_only_enabled(void)
 	return READ_ONCE(ask_vlan_push_only);
 }
 
-static bool ask_ipv6_hw_frag = false;
+static bool ask_ipv6_hw_frag = true;
 static bool ask_ipv6_hw_frag_disable_incomplete;
 static int ask_flow_v6_frag_flush_sync(void);
 
@@ -188,10 +190,10 @@ static const struct kernel_param_ops ask_ipv6_hw_frag_ops = {
 module_param_cb(ipv6_hw_frag, &ask_ipv6_hw_frag_ops, &ask_ipv6_hw_frag, 0644);
 MODULE_PARM_DESC(ipv6_hw_frag,
 		 "Offload IPv6 flows whose egress MTU is below the ingress port MTU "
-		 "with the microcode fragmenter (default 0, RFC 8200 safe: keeps such "
-		 "flows in software so the kernel sends Packet Too Big; opt-in 1 "
-		 "enables vendor hardware fragmentation, and switching 1->0 revokes "
-		 "both SW flowtable entries and live HW records)");
+		 "with the microcode fragmenter (default 1 for vendor NXP ASK parity; "
+		 "clearing to 0 keeps such flows in software so the kernel sends "
+		 "Packet Too Big per RFC 8200, revoking both SW flowtable entries "
+		 "and live HW records)");
 
 /*
  * Offload only flows that have lived offload_delay_ms. Short connections then
@@ -1117,6 +1119,10 @@ static int ask_flow_pending_enqueue(u64 cookie,
 		 * silicon.  PR14z6 (future) can capture the dir at
 		 * defer time and replay it here.
 		 */
+		/* F-323/G5b: resample G4 UDP class index in case the port
+		 * attached/detached a class while this flow waited for neigh. */
+		if (p->key.l4_proto == IPPROTO_UDP)
+			p->key.table_idx = ask_hw_get_udp_class(p->key.port_id);
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
 		rc = ask_neigh_republish_fenced(t, p->cookie, &p->key, p->oif,
 						p->action_flags, p->dir,
@@ -1279,6 +1285,7 @@ static int ask_flow_fe_owner_status(struct ask_flow_table *t, u64 cookie,
 {
 	struct ask_flow *fl;
 	bool matches, hw_backed;
+	int fallback_rc = -EOPNOTSUPP;
 
 	if (!ask_flow_gen_is_current(t, cookie, generation))
 		return -ESTALE;
@@ -1287,10 +1294,12 @@ static int ask_flow_fe_owner_status(struct ask_flow_table *t, u64 cookie,
 	matches = fl && fl->generation == generation &&
 		  fl->fe_token == fe_token && fe_token;
 	hw_backed = matches && fl->hw_backed;
+	if (matches && !hw_backed && fl->hw_fallback_rc)
+		fallback_rc = fl->hw_fallback_rc;
 	rcu_read_unlock();
 	if (!matches)
 		return -ESTALE;
-	return hw_backed ? 0 : -EOPNOTSUPP;
+	return hw_backed ? 0 : fallback_rc;
 }
 
 static int ask_flow_withdraw_owned(struct ask_flow_table *t, u64 cookie,
@@ -1380,7 +1389,8 @@ static int ask_neigh_republish_fenced(struct ask_flow_table *t, u64 cookie,
 	rc = ask_flow_fe_install(key, hw_id, NULL, cookie, fe_token);
 	if (rc) {
 		int wrc = ask_flow_withdraw_owned(t, cookie, generation,
-						  fe_token, key, hw_backed,
+						  fe_token, key,
+						  hw_backed && rc != -EAGAIN,
 						  "neigh republish rollback",
 						  NULL);
 
@@ -1599,6 +1609,10 @@ bool ask_flow_neigh_mac_changed(struct net_device *dev, const u8 *dst_ip,
 						 &old_mac_overflow, fx->old_mac);
 			goto neigh_next;
 		}
+		/* F-323/G5b: resample G4 UDP class index after withdrawing
+		 * old_key so SW+HW stay synchronized with current class state. */
+		if (fx->key.l4_proto == IPPROTO_UDP)
+			fx->key.table_idx = ask_hw_get_udp_class(fx->key.port_id);
 		rc = ask_neigh_republish(t, fx->cookie, &fx->key, fx->oif,
 					 fx->action_flags, fx->dir,
 					 fx->generation, policy_epoch);
@@ -1798,6 +1812,10 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
 					    p->cookie);
 			goto poll_next;
 		}
+		/* F-323/G5b: resample G4 UDP class index in case the port
+		 * attached/detached a class while this flow waited for neigh. */
+		if (p->key.l4_proto == IPPROTO_UDP)
+			p->key.table_idx = ask_hw_get_udp_class(p->key.port_id);
 		/* Publish the SW entry AND the FE ehash record, like REPLACE. */
 		rc = ask_neigh_republish_fenced(t, p->cookie, &p->key, p->oif,
 						p->action_flags, p->dir,
@@ -2831,6 +2849,28 @@ EXPORT_SYMBOL_GPL(ask_fe_build_key_v6);
  */
 /* F-259: one routed key size across the kernel and ask.ko (spec 10.3). */
 static_assert(ASK_FE_KEY_SIZE_DUAL == FMAN_PCD_FE_ROUTED_KEY_SIZE);
+/* F-323 (G4): 49-byte secondary UDP class key (family+v4+v6+ports+vlan+pppoe). */
+#define ASK_FE_KEY_SIZE_G4_UDP 49
+static_assert(ASK_FE_KEY_SIZE_G4_UDP <= ASK_FE_KEY_SIZE_DUAL);
+
+static void ask_fe_build_key_g4_udp(const struct ask_flow_key *key,
+				    u8 k[ASK_FE_KEY_SIZE_G4_UDP])
+{
+	memset(k, 0, ASK_FE_KEY_SIZE_G4_UDP);
+	if (key->l3_proto == ASK_FLOW_L3_IPV6) {
+		k[0] = ASK_FE_FAMILY_V6;
+		memcpy(&k[9],  key->src_ip, 16);
+		memcpy(&k[25], key->dst_ip, 16);
+	} else {
+		k[0] = ASK_FE_FAMILY_V4;
+		memcpy(&k[1], key->src_ip, 4);
+		memcpy(&k[5], key->dst_ip, 4);
+	}
+	memcpy(&k[41], &key->sport, sizeof(key->sport));
+	memcpy(&k[43], &key->dport, sizeof(key->dport));
+	put_unaligned_be16(key->vlan_ingress_vid & VLAN_VID_MASK, &k[45]);
+	put_unaligned_be16(key->pppoe_sid, &k[47]);
+}
 /* T-M6-SP4: ask.ko's L2-edit flag is handed to the emitter unchanged. */
 static_assert(ASK_VLANF_PPPOE_STRIP == FMAN_PCD_VLANF_PPPOE_STRIP);
 static_assert(ASK_VLANF_PPPOE_INSERT == FMAN_PCD_VLANF_PPPOE_INSERT);
@@ -3057,6 +3097,7 @@ static bool ask_pppoe_path_current(const struct ask_flow_key *key)
 	int i;
 
 	if (!info.session_ifindex || !info.ifindex || !info.sid ||
+	    ask_hw_dev_has_soft_qdisc(info.session_ifindex) ||
 	    !ask_pppoe_session_is_current(key->pppoe_session_epoch) ||
 	    !ask_pppoe_port_armed(info.ifindex, key->l3_proto))
 		return false;
@@ -3147,10 +3188,16 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	 * absent lane keep v4 and v6 records disjoint in the one per-port table
 	 * (table_idx 0), so no second scheme / parser LCV split. */
 	ask_fe_build_key_dual(key, key_buf);
-	memcpy(action.key, key_buf, ASK_FE_KEY_SIZE_DUAL);
-	action.key_size = ASK_FE_KEY_SIZE_DUAL;
+	if (key->table_idx) {
+		table_idx = key->table_idx;
+		ask_fe_build_key_g4_udp(key, action.key);
+		action.key_size = ASK_FE_KEY_SIZE_G4_UDP;
+	} else {
+		table_idx = 0;
+		memcpy(action.key, key_buf, ASK_FE_KEY_SIZE_DUAL);
+		action.key_size = ASK_FE_KEY_SIZE_DUAL;
+	}
 	action.owner_token = fe_token;
-	table_idx = 0;
 	action.enq_off   = enq_off;
 	/* F-204 / T-M6-1 Phase 2a: explicit ehash selector. This is SEPARATE
 	 * from key->port_id, which remains the ingress FMan port for F-195's
@@ -3260,6 +3307,32 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 		action.pppoe_sid = key->pppoe_push_sid;	/* F-261 */
 	}
 
+	/* G10 Phase 3: on flows without a live CEETM class match egressing the
+	 * port that owns the 210.10.1 MURAM DSCP->CEETM table, enable per-packet
+	 * DSCP lookup in ENQUEUE_PKT word2 (live ct->mark / ceetm_classid
+	 * strictly outranks DSCP; unrelated non-HTB marks still consult DSCP,
+	 * matching dpaa_ceetm_select_queue()). Also resolve oif_phys_ifindex
+	 * when egress_dev is NULL (ARP-deferred / neigh-rebuilt paths). */
+	if ((action.tx_fqid & 0x00F00000U) == 0x00F00000U) {
+		rcu_read_lock();
+		{
+			const struct net_device *odev = egress_dev;
+			const struct net_device *phys;
+
+			if (!odev && key->oif_phys_ifindex)
+				odev = dev_get_by_index_rcu(&init_net,
+							    key->oif_phys_ifindex);
+			phys = (odev && is_vlan_dev(odev)) ?
+			       vlan_dev_real_dev(odev) : odev;
+			if (phys &&
+			    !dpaa_ceetm_classid_is_live((struct net_device *)phys,
+							key->ceetm_classid) &&
+			    dpaa_ceetm_dscp_map_active((struct net_device *)phys))
+				action.dscp_fq_map = true;
+		}
+		rcu_read_unlock();
+	}
+
 	/* F-195/F-204 contract: the second argument remains exclusively the
 	 * ingress FMan port for own-port miss-FQID resolution (eth3=0x200,
 	 * eth4=0x300). Never overload it with a table index — that historical
@@ -3274,6 +3347,17 @@ static int ask_fe_flow_insert(const struct ask_flow_key *key,
 	if (!ask_hw_tx_fqid_live_locked(guard, action.tx_fqid)) {
 		ask_hw_flow_publish_end(guard);
 		return -ENODEV;
+	}
+	/* F-323: re-validate G4 class binding in both directions under h->lock
+	 * (closes engage/disengage/pending/neigh-rebuild races). */
+	if (key->l4_proto == IPPROTO_UDP) {
+		if (key->table_idx != ask_hw_get_udp_class(key->port_id)) {
+			ask_hw_flow_publish_end(guard);
+			return -EAGAIN;
+		}
+	} else if (key->table_idx) {
+		ask_hw_flow_publish_end(guard);
+		return -EINVAL;
 	}
 	ask_pr_dbg("F-195 flow-add call fm=%px action=%px hw_port=0x%02x table_idx=%d key_size=%u sizeof_action=%zu key_size_off=%zu key=%*phN\n",
 		   fm, &action, key->port_id, table_idx, action.key_size,
@@ -3312,14 +3396,19 @@ static int ask_fe_flow_remove(const struct ask_flow_key *key, u64 fe_token)
 	 * families now share the one 46-byte key/table (the family byte +
 	 * zeroed absent lane keep them distinct).
 	 */
-	ask_fe_build_key_dual(key, k);
-	klen = ASK_FE_KEY_SIZE_DUAL;
-	/* Phase 1 (per-port tables): pass the ingress hw port so the delete
-	 * selects THIS port's routed-IPv4 table instance (F-220/F-221), matching
-	 * the insert side which passed key->port_id. v6 delete still selects the
-	 * global table by key length; the port arg is harmless there. */
-	return fman_pcd_fe_flow_del_identified(fm, key->port_id, k, klen,
-					       FMAN_PCD_FE_OWNER_ASK, fe_token);
+	if (key->table_idx) {
+		ask_fe_build_key_g4_udp(key, k);
+		klen = ASK_FE_KEY_SIZE_G4_UDP;
+	} else {
+		ask_fe_build_key_dual(key, k);
+		klen = ASK_FE_KEY_SIZE_DUAL;
+	}
+	/* Phase 1 (per-port tables) + F-323 (G4 class dispatch): pass ingress
+	 * hw port and key->table_idx (0 = primary 50B, 1..3 = G4 class). */
+	return fman_pcd_fe_class_flow_del_identified(fm, key->port_id,
+						     key->table_idx, k, klen,
+						     FMAN_PCD_FE_OWNER_ASK,
+						     fe_token);
 }
 
 
@@ -3667,6 +3756,33 @@ static u16 ask_flow_cookie_mtu(unsigned long cookie)
 	if (t->dir >= FLOW_OFFLOAD_DIR_MAX)
 		return 0;
 	return t->mtu;
+}
+
+/* G10 Phase 2: read conntrack mark for symmetric SW/HW CEETM class steering. */
+static u32 ask_flow_cookie_mark(unsigned long cookie)
+{
+#if IS_ENABLED(CONFIG_NF_CONNTRACK_MARK)
+	const struct flow_offload_tuple *t;
+	const struct flow_offload_tuple_rhash *rh;
+	const struct flow_offload *flow;
+	const struct nf_conn *ct;
+
+	if (!cookie || !virt_addr_valid((void *)cookie))
+		return 0;
+	t = (const struct flow_offload_tuple *)cookie;
+	if (t->dir >= FLOW_OFFLOAD_DIR_MAX)
+		return 0;
+	rh = container_of(t, struct flow_offload_tuple_rhash, tuple);
+	flow = container_of(rh, struct flow_offload, tuplehash[t->dir]);
+	if (!virt_addr_valid(flow))
+		return 0;
+	ct = READ_ONCE(flow->ct);
+	if (!ct || !virt_addr_valid(ct))
+		return 0;
+	return READ_ONCE(ct->mark);
+#else
+	return 0;
+#endif
 }
 
 /*
@@ -4070,8 +4186,11 @@ static int ask_flow_v6_frag_flush_sync(void)
 
 	if (READ_ONCE(ask_ipv6_hw_frag))
 		return -EINVAL;
-	/* Patch 155: revoke SW flowtable entries before ask_flow_lifecycle_lock
-	 * (preserving conntrack/NAT) so subsequent packets traverse ip6_forward. */
+	/* Patch 155: fence SW flowtable admission and drain in-flight adds so
+	 * live IPv6 traffic cannot re-admit flows inside the settle loop
+	 * (-EBUSY) before ask_flow_lifecycle_lock withdraws HW records. */
+	nf_flow_table_fence_begin();
+	synchronize_rcu();
 	ft_rc = nf_flow_table_revoke_match(&init_net, ask_v6_frag_sw_match,
 					   NULL, true, &ft_unres);
 	mutex_lock(&ask_flow_lifecycle_lock);
@@ -4080,6 +4199,7 @@ static int ask_flow_v6_frag_flush_sync(void)
 				      &ask_v6_frag_withdraw_unresolved,
 				      ASK_FE_CAP_V6_FRAG);
 	mutex_unlock(&ask_flow_lifecycle_lock);
+	nf_flow_table_fence_end();
 	if (!rc && (ft_rc || ft_unres))
 		rc = ft_rc ? ft_rc : -EBUSY;
 	return rc;
@@ -4573,6 +4693,16 @@ static struct notifier_block ask_fib_nb = {
 	.notifier_call = ask_fib_event,
 };
 
+static void ask_devchg_queue_bridge_lowers(struct net_device *br)
+{
+	struct net_device *lower;
+	struct list_head *iter;
+
+	ask_devchg_queue(br->ifindex);
+	netdev_for_each_lower_dev(br, lower, iter)
+		ask_devchg_queue(lower->ifindex);
+}
+
 static int ask_pppoe_netdev_event(struct notifier_block *nb,
 				  unsigned long event, void *ptr)
 {
@@ -4585,20 +4715,38 @@ static int ask_pppoe_netdev_event(struct notifier_block *nb,
 	if ((event == NETDEV_CHANGEMTU || event == NETDEV_CHANGEADDR) &&
 	    ask_flow_default_table()) {
 		ask_devchg_queue(dev->ifindex);
-		if (is_vlan_dev(dev))
-			ask_devchg_queue(vlan_dev_real_dev(dev)->ifindex);
+		if (is_vlan_dev(dev)) {
+			struct net_device *real = vlan_dev_real_dev(dev);
+
+			if (netif_is_bridge_master(real))
+				ask_devchg_queue_bridge_lowers(real);
+			else
+				ask_devchg_queue(real->ifindex);
+		} else if (netif_is_bridge_master(dev)) {
+			/* G5b: IRB flows anchor key.iif/oif on bridge member
+			 * ports, so a bridge MAC/MTU change must retire flows
+			 * on all lower devices too. */
+			ask_devchg_queue_bridge_lowers(dev);
+		}
 	}
 	/*
-	 * T1: a VLAN vif going down or away. nf_flow_table_cleanup() matches
-	 * the flow's iifidx, which is the physical lower device on VLAN paths,
-	 * so it never sees these flows; without this the POP/PUSH records of
-	 * the deleted VID keep forwarding in hardware. Retire records whose
-	 * ingress (key.iif is the owning vif), egress or next-hop device is the
-	 * vif; only the vif, not its real device, whose other flows are fine.
+	 * T1 / G5b: a VLAN vif (including bridge VLAN SVI br0.<vid>) or bridge
+	 * master going down or away. nf_flow_table_cleanup() matches the flow's
+	 * iifidx (the physical lower device), so retire IRB/VLAN records
+	 * anchored on bridge lowers too.
 	 */
 	if ((event == NETDEV_DOWN || event == NETDEV_UNREGISTER) &&
-	    is_vlan_dev(dev) && ask_flow_default_table())
-		ask_devchg_queue(dev->ifindex);
+	    ask_flow_default_table()) {
+		if (is_vlan_dev(dev)) {
+			struct net_device *real = vlan_dev_real_dev(dev);
+
+			ask_devchg_queue(dev->ifindex);
+			if (netif_is_bridge_master(real))
+				ask_devchg_queue_bridge_lowers(real);
+		} else if (netif_is_bridge_master(dev)) {
+			ask_devchg_queue_bridge_lowers(dev);
+		}
+	}
 	return NOTIFY_DONE;
 }
 
@@ -4665,29 +4813,39 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 	lockdep_assert_held(&ask_flow_lifecycle_lock);
 	if (!t) {
+		ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
 		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (no default table) cookie=0x%lx\n",
 				    f->cookie);
 		return -EOPNOTSUPP;
 	}
 
 	rc = ask_flow_retained_owner(t, f);
-	if (rc)
+	if (rc) {
+		ask_fallback_inc(ASK_FALLBACK_POLICY_FENCED);
 		return rc;
+	}
 
 	/* software until offload_delay_ms and the S6 volume; nf_flowtable retries */
-	if (ask_offload_too_young(f->cookie) || ask_offload_too_small(f->cookie))
+	if (ask_offload_too_young(f->cookie) || ask_offload_too_small(f->cookie)) {
+		ask_fallback_inc(ASK_FALLBACK_ADMISSION_GATE);
 		return -EAGAIN;
+	}
 
 	rc = ask_hw_flow_policy_snapshot(&family_policy_seq);
-	if (rc)
+	if (rc) {
+		ask_fallback_inc(ASK_FALLBACK_POLICY_FENCED);
 		return rc;
+	}
 	rc = ask_policy_epoch_snapshot(&policy_epoch);
-	if (rc)
+	if (rc) {
+		ask_fallback_inc(ASK_FALLBACK_POLICY_FENCED);
 		return rc;
+	}
 	pppoe_session_epoch = ask_pppoe_session_snapshot();
 	pppoe = ask_flow_cookie_pppoe(f->cookie, &pppoe_info);
 	if (pppoe < 0 || (pppoe > 0 && !ask_pppoe_nb_ok) ||
 	    (pppoe > 0 && !ask_pppoe_session_is_current(pppoe_session_epoch))) {
+		ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE flow not offloaded (T-M6-SP4 %s) - SW fallback cookie=0x%lx\n",
 				    pppoe < 0 ? "unsupported" :
 				    "session notifier unavailable or changed",
@@ -4697,6 +4855,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 	rc = ask_parse_match(f, &key);
 	if (rc) {
+		ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_PROTO);
 		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_match=%d) cookie=0x%lx\n",
 				    rc, f->cookie);
 		return rc;
@@ -4707,6 +4866,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		key.pppoe_session = pppoe_info;
 		key.pppoe_session_epoch = pppoe_session_epoch;
 		if (!ask_pppoe_path_current(&key)) {
+			ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 			pr_info_ratelimited("ask: flow_offload: PPPoE session path changed or is unavailable cookie=0x%lx\n",
 					    f->cookie);
 			return -EOPNOTSUPP;
@@ -4847,6 +5007,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 	rc = ask_parse_action(f, &key, &action_flags, &oif, &egress_dev);
 	if (rc) {
+		ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 		pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
 				    rc, f->cookie);
 		return rc;
@@ -4883,6 +5044,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		    push != !!pppoe_info.vid ||
 		    (push && (ntohs(key.vlan_push_tci) & VLAN_VID_MASK) !=
 			     pppoe_info.vid)) {
+			ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 			pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE encap mismatch (push sid %u, tuple sid %u, flags 0x%x) - SW fallback cookie=0x%lx\n",
 					    key.pppoe_push_sid, pppoe_info.sid,
 					    key.vlan_edit_flags, f->cookie);
@@ -4890,6 +5052,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		}
 		key.vlan_ingress_vid = 0;
 	} else if (key.vlan_edit_flags & ASK_VLANF_PPPOE_INSERT) {
+		ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE insert without encap tuple - SW fallback flags=0x%x cookie=0x%lx\n",
 				    key.vlan_edit_flags, f->cookie);
 		return -EOPNOTSUPP;
@@ -4899,6 +5062,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	if (pppoe == ASK_PPPOE_DECAP &&
 	    ((key.vlan_edit_flags & ASK_VLANF_PUSH) ||
 	     !!(key.vlan_edit_flags & ASK_VLANF_POP) != !!pppoe_info.vid)) {
+		ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 		pr_info_ratelimited("ask: flow_offload: REPLACE PPPoE decap with VLAN edit - SW fallback flags=0x%x cookie=0x%lx\n",
 				    key.vlan_edit_flags, f->cookie);
 		return -EOPNOTSUPP;
@@ -4942,6 +5106,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 				ask_resolve_ingress_vlan_vid(key.iif, peer_v4);
 		}
 		if (!key.vlan_ingress_vid) {
+			ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_ACTION);
 			pr_info_ratelimited("ask: VLAN POP unresolved ingress VID cookie=0x%lx iif=%u peer=%pI4; software fallback\n",
 					    f->cookie, key.iif, &peer_v4);
 			return -EOPNOTSUPP;
@@ -5019,6 +5184,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			}
 		}
 		if (direct_mac && is_zero_ether_addr(direct_dst_mac)) {
+			ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
 			pr_info_ratelimited("ask: flow_offload: DIRECT tuple has no resolved destination MAC cookie=0x%lx — SW fallback\n",
 					    f->cookie);
 			return -EAGAIN;
@@ -5230,6 +5396,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 */
 	generation = ask_flow_gen_next(t, (u64)f->cookie);
 	if (generation == 0) {
+		ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
 		pr_info_ratelimited("ask: flow_offload: REPLACE cookie=0x%lx gen-alloc failed — SW fallback\n",
 				    f->cookie);
 		return -EOPNOTSUPP;
@@ -5253,46 +5420,96 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 * port/TX-FQ stay physical. If the neigh isn't cached yet the flow
 	 * parks pending and the poll (also vif-aware) drains it later.
 	 */
+	/*
+	 * G5b / T-M6-8: resolve the L3 neighbour device (where Linux ARP/ND
+	 * entries live). For FLOW_OFFLOAD_XMIT_DIRECT through a bridge VLAN SVI
+	 * (br0.<vid>, both v4/v6 and both trunk/access), the kernel's
+	 * tuple->out.ifidx names the VLAN SVI directly; for a plain bridge
+	 * (br0), egress_dev is the physical member port and ARP/ND lives on its
+	 * bridge master upper. Falling through handles non-bridge VLAN PUSH
+	 * flows (eth3.<vid>).
+	 */
 	neigh_dev = egress_dev;
-	if (!is_v6 && (key.vlan_edit_flags & ASK_VLANF_PUSH) &&
-	    egress_dev && !is_vlan_dev(egress_dev)) {
-		struct net_device *vdev;
-		u16 vid = ntohs(key.vlan_push_tci) & VLAN_VID_MASK;
+	{
+		bool neigh_dev_held = false;
 
-		rcu_read_lock();
-		vdev = __vlan_find_dev_deep_rcu(egress_dev,
-						key.vlan_push_tpid, vid);
-		if (vdev)
-			dev_hold(vdev);
-		rcu_read_unlock();
-		if (vdev)
-			neigh_dev = vdev;
-	}
+		if (direct_mac && virt_addr_valid((void *)f->cookie)) {
+			const struct flow_offload_tuple *dt =
+				(const struct flow_offload_tuple *)f->cookie;
 
-	if (neigh_dev) {
-		key.nh_ifindex = neigh_dev->ifindex;
+			if (dt->xmit_type == FLOW_OFFLOAD_XMIT_DIRECT &&
+			    dt->out.ifidx) {
+				struct net_device *odev;
+
+				rcu_read_lock();
+				odev = dev_get_by_index_rcu(&init_net,
+							    dt->out.ifidx);
+				if (odev && is_vlan_dev(odev) &&
+				    odev != egress_dev) {
+					dev_hold(odev);
+					neigh_dev = odev;
+					neigh_dev_held = true;
+				}
+				rcu_read_unlock();
+			}
+		}
+		if (!neigh_dev_held && egress_dev &&
+		    netif_is_bridge_port(egress_dev)) {
+			struct net_device *br;
+
+			rcu_read_lock();
+			br = netdev_master_upper_dev_get_rcu(egress_dev);
+			if (br && netif_is_bridge_master(br)) {
+				dev_hold(br);
+				neigh_dev = br;
+				neigh_dev_held = true;
+			}
+			rcu_read_unlock();
+		}
+		if (!neigh_dev_held && !is_v6 &&
+		    (key.vlan_edit_flags & ASK_VLANF_PUSH) &&
+		    egress_dev && !is_vlan_dev(egress_dev)) {
+			struct net_device *vdev;
+			u16 vid = ntohs(key.vlan_push_tci) & VLAN_VID_MASK;
+
+			rcu_read_lock();
+			vdev = __vlan_find_dev_deep_rcu(egress_dev,
+							key.vlan_push_tpid,
+							vid);
+			if (vdev) {
+				dev_hold(vdev);
+				neigh_dev = vdev;
+				neigh_dev_held = true;
+			}
+			rcu_read_unlock();
+		}
+
+		if (neigh_dev) {
+			key.nh_ifindex = neigh_dev->ifindex;
+			if (is_v6)
+				memcpy(key.nh_ip, &dst_ip6, sizeof(dst_ip6));
+			else
+				memcpy(key.nh_ip, &dst_ip, sizeof(dst_ip));
+			neigh_epoch = ask_neigh_epoch_read(key.nh_ifindex,
+							   key.l3_proto,
+							   key.nh_ip);
+		}
+
 		if (is_v6)
-			memcpy(key.nh_ip, &dst_ip6, sizeof(dst_ip6));
+			ask_resolve_neigh_v6(neigh_dev, &dst_ip6,
+					     key.next_hop_mac, key.egress_mac);
 		else
-			memcpy(key.nh_ip, &dst_ip, sizeof(dst_ip));
-		neigh_epoch = ask_neigh_epoch_read(key.nh_ifindex, key.l3_proto,
-						   key.nh_ip);
+			ask_resolve_neigh_v4(neigh_dev, dst_ip,
+					     key.next_hop_mac, key.egress_mac);
+
+		if (egress_dev)
+			key.oif_phys_ifindex = is_vlan_dev(egress_dev) ?
+				vlan_dev_real_dev(egress_dev)->ifindex :
+				egress_dev->ifindex;
+
+		if (neigh_dev_held)
+			dev_put(neigh_dev);
 	}
-
-	if (is_v6)
-		ask_resolve_neigh_v6(neigh_dev, &dst_ip6,
-				     key.next_hop_mac, key.egress_mac);
-	else
-		ask_resolve_neigh_v4(neigh_dev, dst_ip,
-				     key.next_hop_mac, key.egress_mac);
-
-	if (egress_dev)
-		key.oif_phys_ifindex = is_vlan_dev(egress_dev) ?
-			vlan_dev_real_dev(egress_dev)->ifindex :
-			egress_dev->ifindex;
-
-	if (neigh_dev != egress_dev)
-		dev_put(neigh_dev);
 
 	/* T-M6-SP4: a LAN->PPPoE flow's next hop is the concentrator, which no
 	 * neighbour table knows; the kernel's DIRECT xmit tuple carries both
@@ -5302,8 +5519,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		ether_addr_copy(key.egress_mac, pppoe_info.src_mac);
 	} else if (direct_mac) {
 		if (!is_zero_ether_addr(key.next_hop_mac) &&
-		    !ether_addr_equal(key.next_hop_mac, direct_dst_mac))
+		    !ether_addr_equal(key.next_hop_mac, direct_dst_mac)) {
+			ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
 			return -EAGAIN;
+		}
 		ether_addr_copy(key.next_hop_mac, direct_dst_mac);
 		if (!is_zero_ether_addr(direct_src_mac))
 			ether_addr_copy(key.egress_mac, direct_src_mac);
@@ -5316,8 +5535,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	 * on the wire.  Return -EAGAIN so the kernel SW fastpath handles
 	 * the flow (SW forwarding correctly handles multicast/broadcast).
 	 */
-	if (is_multicast_ether_addr(key.next_hop_mac))
+	if (is_multicast_ether_addr(key.next_hop_mac)) {
+		ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
 		return -EAGAIN;
+	}
 
 	/* T-M6-1 first v6 insert iteration: if NDISC is unresolved, trigger a
 	 * neighbour probe and fall back to software. The legacy pending queue
@@ -5335,6 +5556,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			neigh_event_send(n, NULL);
 			neigh_release(n);
 		}
+		ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
 		pr_info_ratelimited("ask: flow_offload: T-M6-1 v6 neigh unresolved cookie=0x%lx dst=%pI6c dev=%s — SW fallback\n",
 				    f->cookie, &dst_ip6,
 				    netdev_name(egress_dev));
@@ -5460,6 +5682,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 					if (emtu && emtu < in_mtu)
 						key.egress_mtu = emtu;
 				}
+				key.ceetm_classid = ask_flow_cookie_mark(f->cookie);
 
 				/*
 				 * Race-free first-arrival latch:
@@ -5491,6 +5714,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 				prc = ask_hw_port_bind(pid, __dir, bind_dev);
 				if (prc) {
+					ask_fallback_inc(ASK_FALLBACK_PORT_UNENGAGED);
 					if (prc == -EBUSY)
 						ask_pr_dbg("flow_offload: REPLACE %s pid=%u dir=%u: pipeline busy, SW fallback\n",
 							   netdev_name(bind_dev),
@@ -5503,6 +5727,12 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 						dev_put(true_iif_dev);
 					return prc;
 				}
+				/* F-323 (G4): sample active UDP class AFTER port-bind
+				 * (which may lazily engage the port and attach G4).
+				 * The 49B G4 UDP key includes VLAN1 TCI + PPPoE SID so
+				 * all routed UDP flows (plain/NAT/VLAN/PPPoE) route here. */
+				if (key.l4_proto == IPPROTO_UDP)
+					key.table_idx = ask_hw_get_udp_class(pid);
 			} else if (prc != -ENODEV && prc != -ERANGE) {
 				ask_pr_dbg("flow_offload: REPLACE port-id resolve(%s) failed: %d\n",
 					   netdev_name(bind_dev), prc);
@@ -5513,15 +5743,30 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
 		if (pppoe > 0 &&
 		    (!ask_pppoe_session_is_current(pppoe_session_epoch) ||
-		     !ask_pppoe_port_armed(pppoe_info.ifindex, key.l3_proto)))
+		     !ask_pppoe_port_armed(pppoe_info.ifindex, key.l3_proto))) {
+			ask_fallback_inc(ASK_FALLBACK_PORT_UNENGAGED);
 			return -EOPNOTSUPP;
-		if (!ask_hw_flow_policy_current(&key))
+		}
+		if (!ask_hw_flow_policy_current(&key)) {
+			if (key.l4_proto != IPPROTO_TCP &&
+			    key.l4_proto != IPPROTO_UDP)
+				ask_fallback_inc(ASK_FALLBACK_UNSUPPORTED_PROTO);
+			else if (ask_hw_flow_family_ok(key.port_id, &key))
+				ask_fallback_inc(ASK_FALLBACK_PORT_UNENGAGED);
+			else
+				ask_fallback_inc(ASK_FALLBACK_POLICY_FENCED);
 			return -ESTALE;
-		if (!ask_policy_epoch_is_current(policy_epoch) ||
-		    (!defer_nh && key.nh_ifindex &&
-		     !ask_neigh_epoch_current(key.nh_ifindex, key.l3_proto,
-					      key.nh_ip, neigh_epoch)))
+		}
+		if (!ask_policy_epoch_is_current(policy_epoch)) {
+			ask_fallback_inc(ASK_FALLBACK_POLICY_FENCED);
 			return -EAGAIN;
+		}
+		if (!defer_nh && key.nh_ifindex &&
+		    !ask_neigh_epoch_current(key.nh_ifindex, key.l3_proto,
+					     key.nh_ip, neigh_epoch)) {
+			ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
+			return -EAGAIN;
+		}
 
 		/*
 		 * Next hop unresolved: park the cookie, but only now that the
@@ -5542,6 +5787,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 							   policy_epoch);
 
 			if (qrc == 0) {
+				ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
 				pr_info_ratelimited("ask: flow_offload: PR14z10 defer cookie=0x%lx oif=%u eg_if=%d in_if=%d dst=%pI4 (neigh unresolved, ARP probed)\n",
 						    f->cookie, oif,
 						    egress_dev->ifindex,
@@ -5549,6 +5795,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 						    &dst_ip);
 				return 0;
 			}
+			ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
 			pr_info_ratelimited("ask: flow_offload: PR14z2 queue full (%d) — declining HW offload, kernel SW flowtable retains cookie=0x%lx\n",
 					    qrc, f->cookie);
 			return -EOPNOTSUPP;
@@ -5570,6 +5817,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		return 0;
 	}
 	if (rc) {
+		if (rc == -EAGAIN)
+			ask_fallback_inc(ASK_FALLBACK_NEIGH_UNRESOLVED);
+		else if (rc != -ENOSPC)
+			ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
 		pr_info_ratelimited("ask: flow_offload: REPLACE flow_insert=%d cookie=0x%lx oif=%u nh=%pM em=%pM\n",
 				    rc, f->cookie, oif,
 				    key.next_hop_mac, key.egress_mac);
@@ -5590,6 +5841,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 		int rrc = ask_flow_remove_owned_identified(t, (u64)f->cookie,
 							 generation, fe_token);
 
+		if (rc != -ESTALE)
+			ask_fallback_inc(rc == -ENODEV ?
+					 ASK_FALLBACK_PORT_UNENGAGED :
+					 ASK_FALLBACK_UNSUPPORTED_ACTION);
 		if (rrc && rrc != -ENOENT && rrc != -ESTALE) {
 			ask_pr_warn("flow_offload: REPLACE owner cleanup=%d cookie=0x%lx\n",
 				    rrc, f->cookie);
@@ -5602,9 +5857,11 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 	rc = ask_flow_fe_install(&key, hw_id, egress_dev, f->cookie, fe_token);
 	if (rc) {
 		int rrc = ask_flow_withdraw_owned(t, (u64)f->cookie, generation,
-						  fe_token, &key, true,
+						  fe_token, &key,
+						  rc != -EAGAIN,
 						  "REPLACE rollback", NULL);
 
+		ask_fallback_inc(ASK_FALLBACK_HW_ERROR);
 		ask_pr_warn("flow_offload: REPLACE rollback cookie=0x%lx fe_flow_insert=%d\n",
 			    f->cookie, rc);
 		if (rrc && rrc != -ENOENT && rrc != -ESTALE) {
@@ -5653,6 +5910,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 			return -EINPROGRESS;
 		}
 		ask_flow_gen_release(t, (u64)f->cookie, generation);
+		ask_fallback_inc(ask_policy_epoch_is_current(policy_epoch) ?
+				 ASK_FALLBACK_NEIGH_UNRESOLVED :
+				 ASK_FALLBACK_POLICY_FENCED);
 		return -EAGAIN;
 	}
 
@@ -5908,12 +6168,23 @@ static bool ask_fe_flow_refresh_hw_stats(struct ask_flow_table *t, u64 cookie,
 		if (!fm)
 			return false;
 
-		ask_fe_build_key_dual(&key, kbuf);
-		if (fman_pcd_fe_flow_get_stats_identified(fm, port_id, kbuf,
-							  ASK_FE_KEY_SIZE_DUAL,
-							  FMAN_PCD_FE_OWNER_ASK,
-							  fe_token, &hw_pkts,
-							  &hw_bytes, NULL) != 0)
+		u8 klen;
+
+		if (key.table_idx) {
+			ask_fe_build_key_g4_udp(&key, kbuf);
+			klen = ASK_FE_KEY_SIZE_G4_UDP;
+		} else {
+			ask_fe_build_key_dual(&key, kbuf);
+			klen = ASK_FE_KEY_SIZE_DUAL;
+		}
+		if (fman_pcd_fe_class_flow_get_stats_identified(fm, port_id,
+								key.table_idx,
+								kbuf, klen,
+								FMAN_PCD_FE_OWNER_ASK,
+								fe_token,
+								&hw_pkts,
+								&hw_bytes,
+								NULL) != 0)
 			return false;
 	}
 
@@ -6318,8 +6589,10 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 		    !ask_flow_cookie_unsettled(ask_flow_default_table(),
 					       f->cookie))
 			return -EOPNOTSUPP;	/* S8: non-ingress echo */
-		if (ask_flow_replace_deferred_unlocked(cb_priv, f))
+		if (ask_flow_replace_deferred_unlocked(cb_priv, f)) {
+			ask_fallback_inc(ASK_FALLBACK_ADMISSION_GATE);
 			return -EAGAIN;	/* S7: never-installed, too young */
+		}
 		mutex_lock(&ask_flow_lifecycle_lock);
 		rc = ask_flow_owned_replace(cb_priv, dev, f);
 		mutex_unlock(&ask_flow_lifecycle_lock);
@@ -6468,6 +6741,22 @@ static bool ask_neigh_sw_match(const struct flow_offload *flow, void *data)
 		    (t->out.ifidx == (u32)ctx->ifindex ||
 		     t->out.hw_ifidx == (u32)ctx->ifindex))
 			dev_hit = true;
+		/* G5b: plain-bridge IRB DIRECT tuples have out.ifidx and
+		 * out.hw_ifidx set to the bridge member port while ARP/ND
+		 * events arrive on the bridge master. */
+		if (!dev_hit && ctx->ifindex > 0 && t->out.hw_ifidx) {
+			struct net_device *hw_dev =
+				dev_get_by_index_rcu(&init_net,
+						     t->out.hw_ifidx);
+
+			if (hw_dev && netif_is_bridge_port(hw_dev)) {
+				struct net_device *br =
+					netdev_master_upper_dev_get_rcu(hw_dev);
+
+				if (br && br->ifindex == ctx->ifindex)
+					dev_hit = true;
+			}
+		}
 		if (!dev_hit) {
 			dst = READ_ONCE(t->dst_cache);
 			if (dst) {
@@ -6965,6 +7254,11 @@ int ask_flow_port_withdraw(u8 hw_port_id, int ifindex)
 	bool identity_lost = false;
 	int ft_rc = 0, rc;
 
+	/* Fence SW flowtable admission and drain in-flight adds across revoke
+	 * and HW flush so live traffic on this or a peer port cannot re-admit
+	 * matching flows inside patch 155's settle loop (-EBUSY). */
+	nf_flow_table_fence_begin();
+	synchronize_rcu();
 	if (ifindex > 0)
 		ft_rc = nf_flow_table_revoke_match(&init_net,
 						   ask_port_withdraw_sw_match,
@@ -6979,6 +7273,7 @@ int ask_flow_port_withdraw(u8 hw_port_id, int ifindex)
 	ask_port_withdraw_pid = 0xff;
 	ask_port_withdraw_ifindex = 0;
 	mutex_unlock(&ask_flow_lifecycle_lock);
+	nf_flow_table_fence_end();
 
 	if (rc)
 		return rc;
@@ -7252,10 +7547,262 @@ static void ask_flow_offload_stats_cb(struct net_device *dev,
 		ask_port_stats_get(dev->ifindex, hw);
 }
 
+static bool ask_tc_qdisc_is_soft(struct net_device *dev);
+static bool ask_tc_qdisc_withdraw_dev(struct net_device *dev);
+static bool ask_tc_qdisc_withdraw_retry;
+
+static int ask_flow_offload_egress_change(struct net_device *dev,
+					  enum dpaa_egress_event ev, u32 fqid)
+{
+	int rc;
+
+	/* G10 Phase 3 / Phase 5a: synchronously refresh soft-qdisc state BEFORE
+	 * lifting ceetm_transitioning on POST_CHANGE; if a qdisc replacement
+	 * (e.g. offloaded RED -> cake/fq_codel/red-ecn) transitioned the port
+	 * to soft_qdisc == true, withdraw existing HW flows synchronously and
+	 * arm retry on any incomplete withdrawal (P0-1 fix). */
+	if (ev == DPAA_EGRESS_CEETM_POST_CHANGE && dev) {
+		bool soft = ask_tc_qdisc_is_soft(dev);
+		bool changed = ask_hw_set_dev_soft_qdisc(dev->ifindex, soft);
+
+		if (soft && changed && !ask_tc_qdisc_withdraw_dev(dev))
+			WRITE_ONCE(ask_tc_qdisc_withdraw_retry, true);
+	}
+	rc = ask_hw_egress_ceetm_event(dev, (int)ev, fqid);
+	if (ev == DPAA_EGRESS_CEETM_PRE_CHANGE && rc)
+		WRITE_ONCE(ask_tc_qdisc_withdraw_retry, true);
+	return rc;
+}
+
+/*
+ * G10 software-qdisc bypass guard: runs once a second under RTNL to detect
+ * non-offload software egress qdiscs (cake, fq_codel root, non-offload htb,
+ * tbf, netem, etc.) or egress tcx/clsact filters on DPAA ports and stacked
+ * VLAN vifs. Flows egressing such a device are kept in software (and existing
+ * HW records are retired) so ASK2 never silently bypasses an operator's qdisc.
+ */
+#ifdef CONFIG_NET_XGRESS
+struct ask_tc_egress_walk_ctx {
+	struct tcf_walker w;
+	struct net_device *dev;
+	bool unoffloaded;
+};
+
+static int ask_tc_egress_walk_fn(struct tcf_proto *tp, void *fh,
+				 struct tcf_walker *arg)
+{
+	struct ask_tc_egress_walk_ctx *ctx =
+		container_of(arg, struct ask_tc_egress_walk_ctx, w);
+
+	if (!dpaa_ceetm_dscp_cookie_offloaded(ctx->dev, (unsigned long)fh)) {
+		ctx->unoffloaded = true;
+		arg->stop = 1;
+		return -ECANCELED;
+	}
+	return 0;
+}
+#endif
+
+static bool ask_tc_qdisc_is_soft(struct net_device *dev)
+{
+	struct Qdisc *q;
+	unsigned int i;
+
+	ASSERT_RTNL();
+	if (!dev)
+		return false;
+#ifdef CONFIG_NET_XGRESS
+	{
+		struct bpf_mprog_entry *entry =
+			rcu_dereference_rtnl(dev->tcx_egress);
+
+		if (entry) {
+			struct tcx_entry *tcx = tcx_entry(entry);
+			struct tcf_block *block;
+			struct mini_Qdisc *miniq;
+
+			if (bpf_mprog_total(entry))
+				return true;
+			/* clsact + flower are DOIT_UNLOCKED: snapshot block
+			 * under RCU and walk chains/protos with refcounted
+			 * iterators, draining to NULL so refs always drop. */
+			rcu_read_lock();
+			miniq = rcu_dereference(tcx->miniq);
+			block = miniq ? miniq->block : NULL;
+			rcu_read_unlock();
+			if (block) {
+				struct tcf_chain *chain;
+				bool soft = false;
+
+				for (chain = tcf_get_next_chain(block, NULL);
+				     chain;
+				     chain = tcf_get_next_chain(block, chain)) {
+					struct tcf_proto *tp;
+
+					for (tp = tcf_get_next_proto(chain, NULL);
+					     tp;
+					     tp = tcf_get_next_proto(chain, tp)) {
+						struct ask_tc_egress_walk_ctx ctx = {
+							.w = { .fn = ask_tc_egress_walk_fn },
+							.dev = dev,
+						};
+
+						if (soft)
+							continue;
+						if (!tp->ops ||
+						    strcmp(tp->ops->kind, "flower") ||
+						    !tp->ops->walk) {
+							soft = true;
+							continue;
+						}
+						tp->ops->walk(tp, &ctx.w, true);
+						if (ctx.unoffloaded)
+							soft = true;
+					}
+				}
+				if (soft)
+					return true;
+			}
+		}
+	}
+#endif
+	q = rtnl_dereference(dev->qdisc);
+	/* Linux noqueue_qdisc_ops clears q->enqueue=NULL without setting
+	 * TCQ_F_BUILTIN (used by VLAN vifs, PPPoE, and bridges by default). */
+	if (!q || !q->enqueue || (q->flags & TCQ_F_BUILTIN) ||
+	    !strcmp(q->ops->id, "noqueue"))
+		return false;
+	if ((q->flags & TCQ_F_MQROOT) && q->handle == 0) {
+		for (i = 0; i < dev->num_tx_queues; i++) {
+			struct Qdisc *cq;
+
+			cq = rtnl_dereference(netdev_get_tx_queue(dev, i)->qdisc_sleeping);
+			if (cq && cq->enqueue && !(cq->flags & TCQ_F_BUILTIN) &&
+			    cq->handle != 0)
+				return true;
+		}
+		return false;
+	}
+	if ((!strcmp(q->ops->id, "pfifo_fast") ||
+	     !strcmp(q->ops->id, "fq_codel") ||
+	     !strcmp(q->ops->id, "fq")) && q->handle == 0)
+		return false;
+	if (!strcmp(q->ops->id, "htb") && (q->flags & TCQ_F_OFFLOADED) &&
+	    dpaa_ceetm_is_active(dev)) {
+		/* Fail closed if a rejected leaf RED (e.g. ECN) is pending
+		 * graft before dev_queue->qdisc_sleeping is updated (P0-2). */
+		if (dpaa_ceetm_red_soft_pending(dev))
+			return true;
+		/* An offloaded HTB root is safe only if no user-configured
+		 * software child qdisc (non-zero handle) sits on its leaves;
+		 * hardware-offloaded CEETM WRED (sch_red) leaves stay HW. */
+		for (i = 0; i < dev->num_tx_queues; i++) {
+			struct Qdisc *cq;
+
+			cq = rtnl_dereference(netdev_get_tx_queue(dev, i)->qdisc_sleeping);
+			if (cq && cq->enqueue && !(cq->flags & TCQ_F_BUILTIN) &&
+			    cq->handle != 0 &&
+			    !(cq->ops && !strcmp(cq->ops->id, "red") &&
+			      dpaa_ceetm_red_qdisc_offloaded(dev, cq->handle)))
+				return true;
+		}
+		return false;
+	}
+	return true;
+}
+
+static bool ask_tc_qdisc_stopped;
+static void ask_tc_qdisc_workfn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(ask_tc_qdisc_work, ask_tc_qdisc_workfn);
+
+static bool ask_tc_qdisc_withdraw_dev(struct net_device *dev)
+{
+	int brc, frc;
+
+	brc = ask_bridge_dev_quiesce(0xff, dev->ifindex);
+	frc = ask_flow_port_withdraw(0xff, dev->ifindex);
+	if (brc || frc) {
+		ask_pr_warn("flow_offload: G10 soft-qdisc withdraw on %s incomplete (bridge=%d flow=%d); will retry\n",
+			    netdev_name(dev), brc, frc);
+		return false;
+	}
+	return true;
+}
+
+static void ask_tc_qdisc_workfn(struct work_struct *work)
+{
+	struct net_device *dev;
+	bool need_retry = false;
+	bool retry_pass = xchg(&ask_tc_qdisc_withdraw_retry, false);
+	u8 pid;
+
+	if (READ_ONCE(ask_tc_qdisc_stopped))
+		return;
+
+	rtnl_lock();
+	if (!READ_ONCE(ask_tc_qdisc_stopped)) {
+		for_each_netdev(&init_net, dev) {
+			struct net_device *phys = is_vlan_dev(dev) ?
+						  vlan_dev_real_dev(dev) : dev;
+			bool is_dpaa = phys && !ask_hw_dev_port(phys, &pid);
+			bool is_br = netif_is_bridge_master(dev) ||
+				     (is_vlan_dev(dev) && phys &&
+				      netif_is_bridge_master(phys));
+			bool is_ppp = (dev->type == ARPHRD_PPP);
+			bool soft, changed;
+
+			if (!is_dpaa && !is_br && !is_ppp)
+				continue;
+			soft = ask_tc_qdisc_is_soft(dev);
+			if (!soft && is_dpaa) {
+				struct net_device *master = netdev_master_upper_dev_get(phys);
+
+				if (master && netif_is_bridge_master(master) &&
+				    ask_tc_qdisc_is_soft(master))
+					soft = true;
+			}
+			changed = ask_hw_set_dev_soft_qdisc(dev->ifindex, soft);
+			if (changed) {
+				ask_pr_info("flow_offload: G10 %s %s software egress qdisc; flows egressing it %s\n",
+					    netdev_name(dev),
+					    soft ? "runs" : "no longer runs",
+					    soft ? "stay in software" : "may offload again");
+			}
+			if (soft && (changed || retry_pass)) {
+				if (is_ppp) {
+					ask_flow_pppoe_flush();
+				} else if (is_br) {
+					struct net_device *br = netif_is_bridge_master(dev) ? dev : phys;
+					struct net_device *lower;
+					struct list_head *iter;
+
+					if (!ask_tc_qdisc_withdraw_dev(dev))
+						need_retry = true;
+					netdev_for_each_lower_dev(br, lower, iter) {
+						if (!ask_hw_dev_port(lower, &pid) &&
+						    !ask_tc_qdisc_withdraw_dev(lower))
+							need_retry = true;
+					}
+				} else if (!ask_tc_qdisc_withdraw_dev(dev)) {
+					need_retry = true;
+				}
+			}
+		}
+	}
+	rtnl_unlock();
+
+	if (need_retry)
+		WRITE_ONCE(ask_tc_qdisc_withdraw_retry, true);
+
+	if (!READ_ONCE(ask_tc_qdisc_stopped))
+		queue_delayed_work(system_unbound_wq, &ask_tc_qdisc_work, HZ);
+}
+
 static const struct dpaa_flow_offload_ops ask_flow_offload_ops = {
 	.owner          = THIS_MODULE,
 	.setup_tc_block = ask_flow_offload_setup_tc_block,
 	.offload_stats  = ask_flow_offload_stats_cb,
+	.egress_change  = ask_flow_offload_egress_change,
 };
 
 static bool ask_flow_offload_registered;
@@ -7324,6 +7871,10 @@ int ask_flow_offload_init(void)
 	WRITE_ONCE(ask_stats_scan_stopped, false);
 	queue_delayed_work(system_unbound_wq, &ask_stats_scan_work, HZ);
 
+	/* G10: 1-Hz software-qdisc bypass guard. */
+	WRITE_ONCE(ask_tc_qdisc_stopped, false);
+	queue_delayed_work(system_unbound_wq, &ask_tc_qdisc_work, HZ);
+
 	/* T-M6-SP4: PPPoE session-down flush. */
 	spin_lock_bh(&ask_flow_pending_lock);
 	ask_pppoe_events_live = true;
@@ -7368,6 +7919,10 @@ void ask_flow_offload_exit(void)
 	 */
 	WRITE_ONCE(ask_stats_scan_stopped, true);
 	cancel_delayed_work_sync(&ask_stats_scan_work);
+
+	/* G10: stop the software-qdisc bypass guard before unregistering. */
+	WRITE_ONCE(ask_tc_qdisc_stopped, true);
+	cancel_delayed_work_sync(&ask_tc_qdisc_work);
 
 	/*
 	 * PR14z9: stop the active poller before unregistering the

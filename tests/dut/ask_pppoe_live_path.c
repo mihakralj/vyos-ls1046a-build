@@ -26,6 +26,7 @@ typedef uint64_t u64;
 #define ASK_PPPOE_DECAP 1
 #define ASK_PPPOE_ENCAP 2
 #define ASK_FE_KEY_SIZE_DUAL 50
+#define ASK_FE_KEY_SIZE_G4_UDP 49
 #define ASK_FLOW_L3_IPV4 0
 #define ASK_FLOW_L3_IPV6 1
 #define ASK_FAM_V4 1
@@ -76,7 +77,7 @@ struct net_device_path_stack {
 #include "ask_pppoe_info.h"
 
 struct ask_flow_key {
-	u8 l3_proto, port_id, nat_flags, vlan_edit_flags;
+	u8 l3_proto, l4_proto, port_id, nat_flags, vlan_edit_flags, table_idx;
 	u8 next_hop_mac[ETH_ALEN], egress_mac[ETH_ALEN];
 	u8 nat_src_ip[16], nat_dst_ip[16];
 	u32 nh_ifindex;
@@ -237,6 +238,12 @@ static int ask_hw_flow_get_sink_fqid(u32 hw_id, u32 *fqid)
 {
 	*fqid = 2;
 	return 0;
+}
+static u8 ask_hw_get_udp_class(u8 port) { (void)port; return 0; }
+static void ask_fe_build_key_g4_udp(const struct ask_flow_key *key, u8 *buf)
+{
+	(void)key;
+	memset(buf, 0, ASK_FE_KEY_SIZE_G4_UDP);
 }
 static void ask_fe_build_key_dual(const struct ask_flow_key *key, u8 *buf)
 {

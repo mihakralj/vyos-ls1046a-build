@@ -14,7 +14,17 @@
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
+typedef uint64_t u64;
+typedef struct { uint64_t counter; } atomic64_t;
+typedef struct { int counter; } atomic_t;
 
+#define ATOMIC64_INIT(v) { (v) }
+#define ATOMIC_INIT(v) { (v) }
+#define atomic64_read(a) ((a)->counter)
+#define atomic_read(a) ((a)->counter)
+#define HZ 250UL
+#define time_after(a, b) ((long)((b) - (a)) < 0)
+#define DPAA_WGFP_MAX_CONTIG_MTU 3300
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86dd
 #define GFP_ATOMIC 0
@@ -48,6 +58,7 @@ struct sk_buff {
 
 struct net_device {
 	int ifindex;
+	unsigned int mtu;
 };
 
 struct wg_device {
@@ -59,7 +70,35 @@ struct dpaa_wgfp_tuple {
 	union { u32 daddr; struct in6_addr daddr6; };
 	u16 sport, dport;
 	u8 proto, family, pad[2];
+	u16 vlan_vid, pppoe_sid;
 };
+
+#define ETH_ALEN 6
+#define VLAN_VID_MASK 0x0fff
+#define rcu_read_lock() do { } while (0)
+#define rcu_read_unlock() do { } while (0)
+static inline void ether_addr_copy(u8 *dst, const u8 *src) { memcpy(dst, src, ETH_ALEN); }
+static inline bool ether_addr_equal(const u8 *a, const u8 *b) { return !memcmp(a, b, ETH_ALEN); }
+
+struct wgfp_l2_path {
+	int phys_ifindex;
+	u8 peer_mac[6];
+	u8 src_mac[6];
+	u16 vlan_vid;
+	u16 pppoe_sid;
+	bool has_vlan;
+	bool has_pppoe;
+};
+
+static bool wgfp_resolve_l2_path(struct net_device *dev,
+				 struct wgfp_l2_path *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (!dev)
+		return false;
+	out->phys_ifindex = dev->ifindex;
+	return true;
+}
 
 struct endpoint {
 	union {
@@ -87,6 +126,7 @@ struct wgfp_flow {
 	struct wgfp_pst *pst;
 	int ifindex, node, state;
 	u32 hash;
+	u8 dst_mac[ETH_ALEN];
 	unsigned long since;
 	bool rx, del;
 };
@@ -122,7 +162,7 @@ static void *kzalloc(size_t size, int flags)
 	return calloc(1, size);
 }
 static int init_net;
-static struct net_device fake_dev;
+static struct net_device fake_dev = { .mtu = 1500 };
 static struct net_device *dev_get_by_index(void *net, int ifindex)
 {
 	(void)net;
@@ -151,6 +191,7 @@ static void obs_put(struct net_device *dev, struct dpaa_wgfp_tuple *t,
 	o->wg_ifindex = dev->ifindex;
 	o->ifindex = ifindex;
 	o->jiffies = jiffies;
+	o->epoch = atomic64_read(&wgfp_obs_epoch);
 	ring->seq++;
 }
 
@@ -216,5 +257,17 @@ int main(void)
 		fprintf(stderr, "disabled receive offload admitted a flow\n");
 		return 5;
 	}
+
+	/* jumbo ingress MTU (> DPAA_WGFP_MAX_CONTIG_MTU) must stay in software
+	 * because WGFP sinks drop multi-buffer scatter/gather RX FDs (J0). */
+	wgfp_rx = true;
+	fake_dev.mtu = 9000;
+	obs_put(&eth4, &t, eth4.ifindex);
+	wgfp_pst_rx_sync(&pst);
+	if (pst.rxfl) {
+		fprintf(stderr, "jumbo-MTU port admitted a WGFP RX record\n");
+		return 6;
+	}
+	fake_dev.mtu = 1500;
 	return 0;
 }

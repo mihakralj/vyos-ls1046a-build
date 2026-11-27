@@ -20,7 +20,19 @@ struct fman_pcd_ehash_table {
 	bool poisoned, draining;
 	bool per_port;
 };
+#ifdef FMAN_F323
+#define FMAN_PCD_FE_MAX_CLASSES 3
+struct fman_pcd_fe_class {
+	bool active;
+	struct fman_pcd_ehash_table *table;
+};
+struct fman_pcd_fe_port {
+	struct fman_pcd_ehash_table *table_v4;
+	struct fman_pcd_fe_class classes[FMAN_PCD_FE_MAX_CLASSES];
+};
+#else
 struct fman_pcd_fe_port { struct fman_pcd_ehash_table *table_v4; };
+#endif
 struct fman_pcd {
 	struct mutex fe_lock;
 	unsigned long fe_port_armed[1], fe_port_faulted[1];

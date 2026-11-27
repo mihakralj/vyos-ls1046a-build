@@ -156,7 +156,7 @@ if [ -f vyos-build/data/defaults.toml ]; then
         vyos-build/data/defaults.toml | awk -F. '{print $1"."$2}')
 fi
 if [ -z "$KSERIES_FOR_PATCH" ] && [ -f versions.lock ]; then
-    KSERIES_FOR_PATCH=$(awk -F= '/KERNEL_SERIES/{gsub(/[" ]/,"",$2); print $2}' versions.lock)
+    KSERIES_FOR_PATCH=$(. versions.lock >/dev/null 2>&1; printf '%s' "$KERNEL_SERIES")
 fi
 
 # INA234 hwmon patch (formerly kernel/ask/patches/fixes/4002-*) was
@@ -3159,6 +3159,37 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # F-322: WGFP-v2 confirmed TX FQ on offload_cgr, batched BMan release, and bpid=0xff guards.
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_322.py" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-f322-fixup.py" "$(pwd)" 2>&1
+    # F-323: G4 multi-table dispatch via soft-parser $nia + secondary KG schemes + CCOBASE rows 1..3.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_323.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f323-fixup.py" "$(pwd)" 2>&1
+    # F-324: G5b full mixed-profile Bridge IRB via ETH HXS (slot 0) DA-MAC exclusion dispatch.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_324.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f324-g5b-fixup.py" "$(pwd)" 2>&1
+    # F-325: fix upstream fman_memac memac_set_allmulti(false) wiping active multicast buckets.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_325.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f325-memac-allmulti.py" "$(pwd)" 2>&1
+    # F-326: sleepable SRCU for dpaa_setup_tc_flow_block() (fixes PROVE_LOCKING Invalid wait context).
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_326.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-f326-dpaa-srcu.py" "$(pwd)" 2>&1
+    # F-327: G10 Phase 1 CEETM + ASK2 coexistence hooks (SRCU egress notify, CQ pop, MTU budget).
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_327.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-g10-ceetm-ask.py" 2>&1
+    # F-328: G10 Phase 3 single-port MURAM DSCP->CEETM CQ map + clsact egress dispatch.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_328.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-g10-phase3-dscp.py" 2>&1
+    # F-329: G10 Phase 4 HWP->PLCR->downstream ingress policer coexistence + per-port slots.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_329.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-g10-phase4-policer.py" 2>&1
+    # F-330: G10 Phase 5a frame-mode CEETM WRED (TC_SETUP_QDISC_RED) + A458 plain-FQ drain.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_330.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-g10-phase5-wred.py" 2>&1
+    # F-331: G10 Phase 5b QMan CEETM WBFS group/weight API + 5-tuple hash spreading.
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_331.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-g10-phase5b-wbfs.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fman-disarm.py" "$(pwd)" --only fman_disarm,fman_prepared_disarm,fman_arm_table 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-fe-stats-lock.py" "$(pwd)" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/test-keygen-window.py" "$(pwd)" 2>&1
+    echo "### fman_pcd/fman_keygen: F-323/F-324 G4+G5b multi-table dispatch verified"
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-lifetime.py" "$(pwd)" --verify-fq-lifetime 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-dpaa-offload-fq.py" "$(pwd)" 2>&1
     python3 "${GITHUB_WORKSPACE}/bin/test-qman-cgr-containment.py" "$(pwd)" --require-offload-cgr 2>&1

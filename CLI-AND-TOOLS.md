@@ -194,9 +194,9 @@ with "MCP is not enabled" until `api mcp` is configured).
 
 | Command | Shows |
 |---------|-------|
-| `show offload config` | Per-port IPv4/IPv6 offload intent vs. live FMan armed state. |
-| `show offload flow` | Flows the FMan has learned (via `ynl --family ask`). |
-| `show interfaces ethernet eth<n> offload ask flows` | Offloaded flows for one port. |
+| `show offload config` | Per-port IPv4/IPv6/NAT44/NAT66/policer offload intent vs. live FMan armed state, active/max flow directions, and per-cause software fallback counters. |
+| `show offload flow` | Flows the FMan has learned (via `ynl --family ask`), including NAT44/NAT66 translations, flow age, packet/byte totals, and software fallback summary. |
+| `show interfaces ethernet eth<n> offload ask flows` | Offloaded flows for one port, including NAT translations, offload state (`hw`/`sw`), age, and packet/byte totals. |
 | `show hardware dpaa` / `… ports` / `… fman` / `… raw` | DPAA1 complex, MEMAC↔interface map, FMan + MURAM, JSON. |
 | `show hardware crypto` / `… all` / `… raw` | CAAM SEC 5.4 status, all registered algorithms, JSON. |
 | `show hardware fan` | Thermal zones and EMC2305 fan controller. |
@@ -221,6 +221,7 @@ Installed in `/usr/local/bin/`. Diagnostics use exit codes **0** healthy,
 | `pcd-snapshot capture\|diff\|show` | Capture/diff FMan PCD register state (reversibility gate; mutate eth3 only, never eth0). |
 | `vyos-offload-ask` | Low-level ASK engage/disengage helper called by the CLI; avoid direct use. |
 | `ynl --family ask …` | Vendored YNL client talking straight to `ask.ko`. |
+| `ask-ipfix-exporter` | RFC 7011 IPFIX v10 UDP exporter polling `ask.ko` via YNL (IPv4/IPv6 flows, NAT44/NAT66, EOF records, and SW-fallback coverage options). Use `sudo`. |
 | `led` | RGBW status LED: `led 17`, `led R G B W`, `led '#33003300'`, `led off`. See [HWCTL.md §1.6](HWCTL.md). |
 | `fan-pid` / `monoledd` / `fman-fq-qdisc` | Daemons (systemd): PID fan control, load-driven LED, `fq` qdisc on 10G ports. |
 | `vyos-postinstall` | Writes U-Boot env and `/boot/vyos.env` (runs automatically). |

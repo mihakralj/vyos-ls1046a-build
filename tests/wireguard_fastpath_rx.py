@@ -28,6 +28,8 @@ def test_rx_lifetime_and_udp_checksums(tmp_path):
 def test_rx_admission_requires_stack_observation_and_port(tmp_path):
     source = SOURCE.read_text()
     assert "module_param(wgfp_rx, bool, 0600)" in source
+    assert "DPAA_WGFP_MAX_CONTIG_MTU" in source
+    assert "NETDEV_CHANGEMTU" in source
     start = source.index("#define WGFP_OBS_PER_CPU")
     mid = source.index("\nstatic bool wgfp_ct_admitted", start)
     fstart = source.index("static bool wgfp_endpoint_is(")

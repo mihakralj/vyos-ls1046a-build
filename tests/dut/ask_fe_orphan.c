@@ -349,13 +349,32 @@ struct flow_offload_tuple_rhash { struct flow_offload_tuple tuple; };
 struct flow_offload { struct flow_offload_tuple_rhash tuplehash[FLOW_OFFLOAD_DIR_MAX]; };
 struct net { int id; };
 static struct net init_net;
+static int nf_fence_depth;
+static int nf_fence_rcu_syncs;
+static int nf_fence_depth_at_revoke;
+static void nf_flow_table_fence_begin(void) { nf_fence_depth++; }
+static void nf_flow_table_fence_end(void)
+{
+	assert(nf_fence_depth > 0);
+	nf_fence_depth--;
+}
+static void synchronize_rcu(void)
+{
+	if (nf_fence_depth > 0)
+		nf_fence_rcu_syncs++;
+}
 static int nf_flow_table_revoke_match(struct net *net,
 				      bool (*match)(const struct flow_offload *, void *),
 				      void *data, bool wait_hw,
 				      unsigned int *unresolved_out)
 {
-	(void)net; (void)match; (void)data; (void)wait_hw;
+	(void)net; (void)match; (void)data;
 	assert(!ask_flow_lifecycle_lock.held);
+	if (wait_hw) {
+		nf_fence_depth_at_revoke = nf_fence_depth;
+		assert(nf_fence_depth > 0);
+		assert(nf_fence_rcu_syncs > 0);
+	}
 	if (unresolved_out)
 		*unresolved_out = 0;
 	return 0;
@@ -1030,6 +1049,20 @@ int main(int argc, char **argv)
 	assert(ask_fe_flow_remove_retain(&c, 81, 200, "current") == 0);
 	assert(!replacement_present[8] && ask_fe_orphan_count == 5);
 
+	/* ask_flow_v6_frag_flush_sync fences SW admission across revoke + flush
+	 * and never leaks the fence on early -EINVAL, -EBUSY, or success. */
+	nf_fence_depth = 0;
+	nf_fence_rcu_syncs = 0;
+	nf_fence_depth_at_revoke = 0;
+	ask_ipv6_hw_frag = true;
+	assert(ask_flow_v6_frag_flush_sync() == -EINVAL);
+	assert(nf_fence_depth == 0 && nf_fence_rcu_syncs == 0);
+	ask_ipv6_hw_frag = false;
+	flush_owner_present = false;
+	assert(ask_flow_v6_frag_flush_sync() == -EBUSY);
+	assert(nf_fence_depth == 0 && nf_fence_depth_at_revoke == 1 &&
+	       nf_fence_rcu_syncs == 1);
+
 	/* Exit must not attempt a key-only delete of either replacement. */
 	calls = del_calls[1] + del_calls[2] + del_calls[3] +
 		del_calls[4] + del_calls[5];
@@ -1038,6 +1071,13 @@ int main(int argc, char **argv)
 	       del_calls[4] + del_calls[5] == calls);
 	assert(replacement_present[1] && ask_fe_orphan_count == 0);
 	assert(live_allocs == 0 && !module_refs);
+
+	/* With orphans cleared, ask_flow_v6_frag_flush_sync succeeds and un-fences. */
+	nf_fence_rcu_syncs = 0;
+	nf_fence_depth_at_revoke = 0;
+	assert(ask_flow_v6_frag_flush_sync() == 0);
+	assert(nf_fence_depth == 0 && nf_fence_depth_at_revoke == 1 &&
+	       nf_fence_rcu_syncs == 1);
 
 	printf("ask_fe_orphan: all checks passed\n");
 	return 0;

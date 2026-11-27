@@ -49,12 +49,19 @@ struct net_device {
 struct wgfp_egress {
 	struct net_device *dev;
 	struct device *tx_dma_dev;
+	bool tx_dma_need_sync;
 	int ifindex;
 	u32 tx_fqid;
 	bool active;
 	bool retired;
 	bool quarantined;
 };
+
+static bool dma_dev_need_sync(struct device *dev)
+{
+	(void)dev;
+	return false;
+}
 
 static struct net_device *wgfp_eg_dev[WGFP_MAX_EGRESS];
 static struct wgfp_egress wgfp_egresses[WGFP_MAX_EGRESS];
@@ -106,12 +113,32 @@ struct ask_hw_pcd {
 	struct {
 		u32 ifindex;
 		u32 fqid;
+		u32 ceetm_fqid;
+		bool ceetm_transitioning;
 		bool unregistered;
 		bool retained;
 		int dev_tracker;
 		struct net_device *dev;
 	} noconf_tx[ASK_HW_NOCONF_SLOTS];
 };
+static bool ask_hw_ifindex_ceetm_transitioning_locked(const struct ask_hw_pcd *h,
+						      u32 ifindex)
+{
+	(void)h; (void)ifindex;
+	return false;
+}
+static bool ask_hw_dev_has_soft_qdisc(u32 ifindex)
+{
+	(void)ifindex;
+	return false;
+}
+static int dpaa_ceetm_offload_egress_fqid_hashed(struct net_device *dev,
+						 u32 classid, u32 flow_hash,
+						 u32 *out_fqid)
+{
+	(void)dev; (void)classid; (void)flow_hash; (void)out_fqid;
+	return -ENOENT;
+}
 static void netdev_hold(struct net_device *dev, int *tracker, int gfp)
 {
 	(void)dev; (void)tracker; (void)gfp;
@@ -190,12 +217,12 @@ static int check_ask_reused_index(void)
 	reset_egress();
 	memset(&hardware, 0, sizeof(hardware));
 	lookup_dev = &virtual;
-	if (ask_hw_resolve_oif_fqid(5, &after_move, false, NULL) >= 0) {
+	if (ask_hw_resolve_oif_fqid(5, 0, 0, &after_move, false, NULL) >= 0) {
 		puts("ASK cold non-DPAA control: FAILED");
 		return 1;
 	}
 	lookup_dev = &old;
-	if (ask_hw_resolve_oif_fqid(5, &old_fqid, true, NULL)) {
+	if (ask_hw_resolve_oif_fqid(5, 0, 0, &old_fqid, true, NULL)) {
 		puts("ASK physical egress allocation control: FAILED");
 		return 1;
 	}
@@ -205,7 +232,7 @@ static int check_ask_reused_index(void)
 #ifdef LIFETIME_ORACLE_CONTROLS
 	memset(hardware.noconf_tx, 0, sizeof(hardware.noconf_tx));
 #endif
-	rc = ask_hw_resolve_oif_fqid(5, &after_move, false, NULL);
+	rc = ask_hw_resolve_oif_fqid(5, 0, 0, &after_move, false, NULL);
 	if (!rc) {
 		printf("ASK reused ifindex: NOT CONTAINED (non-DPAA device returned FQ %u%s)\n",
 		       after_move, after_move == old_fqid ? " from old device" : "");

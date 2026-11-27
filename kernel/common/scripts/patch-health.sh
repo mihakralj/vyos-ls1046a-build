@@ -45,13 +45,15 @@ export SCRIPTS_DIR="$SCRIPT_DIR"
 export WORK_DIR="$REPO_ROOT/work"
 mkdir -p "$WORK_DIR"
 
-# ── Pin resolution (auto-track upstream vyos-1x) ─────────────────────
-# 1. versions.lock provides fallback defaults.
-# 2. sync-kernel-version.sh overrides from vyos-build/data/defaults.toml when
-#    that checkout is present (env KERNEL_VERSION still wins).
-[[ -f "$REPO_ROOT/versions.lock" ]] && . "$REPO_ROOT/versions.lock"
+# ── Pin resolution (auto-track upstream vyos-build) ───────────────────
+# 1. sync-kernel-version.sh resolves from vyos-build/data/defaults.toml when
+#    present, falling back to versions.lock (env KERNEL_VERSION still wins).
+#    Must run BEFORE sourcing versions.lock so its export does not poison
+#    KERNEL_VERSION as an explicit caller env override.
 # shellcheck source=sync-kernel-version.sh
 . "$SCRIPT_DIR/sync-kernel-version.sh"
+# 2. versions.lock provides remaining fallback defaults (e.g. ARCH).
+[[ -f "$REPO_ROOT/versions.lock" ]] && . "$REPO_ROOT/versions.lock"
 
 need git find jq
 
@@ -75,8 +77,9 @@ COMMON_DIR="$REPO_ROOT/kernel/common"
     || err "kernel/common/patches/ not found at $COMMON_DIR/patches (in-tree layout)"
 
 # ── Ensure kernel source is present ────────────────────────────────────
-if [[ -n "$VERSION_ARG" || ! -f "$WORK_DIR/.kernel-version" ]]; then
-    "$SCRIPTS_DIR/fetch-kernel.sh" $VERSION_ARG
+TARGET_KVER="${VERSION_ARG:-$KERNEL_VERSION}"
+if [[ -n "$VERSION_ARG" || ! -f "$WORK_DIR/.kernel-version" || "$(cat "$WORK_DIR/.kernel-version")" != "$TARGET_KVER" ]]; then
+    "$SCRIPTS_DIR/fetch-kernel.sh" "$TARGET_KVER"
 fi
 KVER=$(cat "$WORK_DIR/.kernel-version")
 KDIR="$WORK_DIR/linux-$KVER"

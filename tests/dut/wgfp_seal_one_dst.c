@@ -29,8 +29,18 @@ typedef uint64_t u64;
 #define POLY1305_DIGEST_SIZE 16
 #define min_t(t, a, b) ((t)(a) < (t)(b) ? (t)(a) : (t)(b))
 #define max_t(t, a, b) ((t)(a) > (t)(b) ? (t)(a) : (t)(b))
+#define ALIGN(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
+#define WGFP_OPEN_HEAD (4 * CHACHA_BLOCK_SIZE)
 #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 #define round_down(x, y) ((x) & ~((y) - 1))
+static int crypto_memneq(const void *a, const void *b, size_t n)
+{
+	const u8 *x = a, *y = b;
+	u8 diff = 0;
+	for (size_t i = 0; i < n; i++)
+		diff |= x[i] ^ y[i];
+	return diff != 0;
+}
 #define cpu_to_le64(x) (x)
 #define asmlinkage
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
@@ -264,7 +274,7 @@ int main(void)
 	static const u32 lens[] = { 1, 15, 16, 17, 20, 40, 63, 64, 65, 127, 128, 129,
 				    191, 192, 255, 256, 257, 319, 320, 321,
 				    576, 577, 1280, 1419, 1420, 1424, 1440, 1472, 1500 };
-	u8 key[32], src[1500], src_copy[1500], pt[1500], ref[1516];
+	u8 key[32], src[1500], src_copy[1516], pt[1500], ref[1516];
 	u8 out_buf[16 + CHACHA_BLOCK_SIZE + 1516 + 16];
 	u8 *out = out_buf + 16 + CHACHA_BLOCK_SIZE;
 	u8 guard_a5[16], zero64[CHACHA_BLOCK_SIZE];
@@ -371,6 +381,53 @@ int main(void)
 						      CHACHA_BLOCK_SIZE) == 0);
 				}
 			}
+		}
+	}
+	/* Verify wgfp_open_one_dst() (valid decrypt, forged-tag dst invariance,
+	 * no scratch writes before dst, and read-only src invariance) */
+	for (size_t li = 0; li < ARRAY_SIZE(lens); li++) {
+		u32 plain = lens[li];
+		u64 nonce = 0x7766554433221100ULL + plain;
+
+		for (u32 j = 0; j < plain; j++)
+			pt[j] = (u8)(j * 19 + plain);
+		ref_aead_encrypt(ref, pt, plain, nonce, key);
+		memcpy(src_copy, ref, plain + 16);
+
+		for (int nm = 0; nm < 2; nm++) {
+			unsigned int neon_min = nm ? UINT_MAX : 0;
+			int prev_sec = neon_sections;
+			bool ok;
+
+			memset(out_buf, 0xa5, sizeof(out_buf));
+			memset(out, 0x5a, plain);
+			ok = wgfp_open_one_dst(out, ref, plain, nonce, key,
+					       neon_min);
+			assert(ok);
+			assert(neon_depth == 0);
+			assert(neon_sections == prev_sec + (nm ? 0 : 1));
+			assert(memcmp(out, pt, plain) == 0);
+			assert(memcmp(ref, src_copy, plain + 16) == 0);
+			assert(memcmp(out_buf, guard_a5, 16) == 0);
+			assert(memcmp(out + plain, guard_a5, 16) == 0);
+			for (int k = 0; k < CHACHA_BLOCK_SIZE; k++)
+				assert(out_buf[16 + k] == 0xa5);
+
+			/* Forged tag: must fail and leave dst + src untouched */
+			ref[plain] ^= 0x01;
+			memset(out_buf, 0xa5, sizeof(out_buf));
+			memset(out, 0x5a, plain);
+			ok = wgfp_open_one_dst(out, ref, plain, nonce, key,
+					       neon_min);
+			assert(!ok);
+			assert(neon_depth == 0);
+			assert(memcmp(out_buf, guard_a5, 16) == 0);
+			assert(memcmp(out + plain, guard_a5, 16) == 0);
+			for (int k = 0; k < CHACHA_BLOCK_SIZE; k++)
+				assert(out_buf[16 + k] == 0xa5);
+			for (u32 k = 0; k < plain; k++)
+				assert(out[k] == 0x5a);
+			ref[plain] ^= 0x01;
 		}
 	}
 	puts("wgfp_seal_one_dst: ok");

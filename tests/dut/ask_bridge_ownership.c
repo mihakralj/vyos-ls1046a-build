@@ -160,11 +160,14 @@ static void rtnl_unlock(void)
 	assert(!pthread_mutex_unlock(&rtnl_native));
 }
 static void ask_bridge_kick(void) { bridge_kicks++; }
+static int ask_bridge_sync_classes(void) { return 0; }
+static int ask_bridge_sync_classes_rtnl(void) { return 0; }
 
 struct fman { int unused; };
 struct ask_hw_pcd { struct mutex lock; struct fman *fman; };
 struct fman_pcd_fe_flow_action {
 	u8 key[FMAN_PCD_FE_L2_DA_KEY_SIZE];
+	u8 table_idx;
 	u64 owner_token;
 };
 static struct fman fman;
@@ -196,9 +199,12 @@ static struct ask_hw_pcd *ask_hw_pcd_get(void)
 	return hw_available ? &hardware : NULL;
 }
 
-static struct ask_hw_pcd *ask_hw_l2_port(struct ask_hw_pcd *h, u8 port)
+static struct ask_hw_pcd *ask_hw_l2_port_tbl(struct ask_hw_pcd *h, u8 port,
+					     u8 *table_idx_out)
 {
 	assert(h->lock.held && port == 0x10);
+	if (table_idx_out)
+		*table_idx_out = 0;
 	return l2_available ? h : NULL;
 }
 
@@ -297,6 +303,26 @@ static int fman_pcd_fe_flow_get_stats_identified(struct fman *fm, u8 port,
 	*bytes = 0;
 	*ts = 0;
 	return 0;
+}
+
+static int fman_pcd_fe_class_flow_del_identified(struct fman *fm, u8 port,
+						 u8 table_idx, const u8 *key,
+						 u8 len, u32 owner, u64 token)
+{
+	assert(table_idx == 0);
+	return fman_pcd_fe_flow_del_identified(fm, port, key, len, owner, token);
+}
+
+static int fman_pcd_fe_class_flow_get_stats_identified(struct fman *fm, u8 port,
+						       u8 table_idx,
+						       const u8 *key, u8 len,
+						       u32 owner, u64 token,
+						       u64 *pkts, u64 *bytes,
+						       u32 *ts)
+{
+	assert(table_idx == 0);
+	return fman_pcd_fe_flow_get_stats_identified(fm, port, key, len, owner,
+						     token, pkts, bytes, ts);
 }
 
 #include "bridge_hw.h"

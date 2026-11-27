@@ -518,8 +518,8 @@ fi
 hdr '7) Scope and verdict'
 # ---------------------------------------------------------------------------
 
-note 'hardware scope: routed IPv4/IPv6 unicast TCP/UDP with TTL/hop-limit + L2 rewrite'
-note 'software fallback: NAT/PAT, VLAN actions, bridge, multicast, IPsec'
+note 'hardware scope: routed IPv4/IPv6 unicast TCP/UDP, NAT44/NAT66/PAT, 802.1Q VLAN, PPPoE, bridge/IRB, CEETM QoS, ingress policer'
+note 'software fallback: multicast, IPsec, QinQ, 6in4/4in6 tunnels'
 note 'debugfs and KUnit are debug-build tools and are intentionally not tested'
 
 hdr 'Summary'
