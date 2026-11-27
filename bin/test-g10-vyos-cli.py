@@ -45,6 +45,9 @@ def pinned_commit() -> str:
 def prepare_patched_tree(tmpdir: Path) -> Path:
     tree = tmpdir / "vyos-1x"
     commit = pinned_commit()
+    # Mirror CI's build.py git clone (upstream vyos-1x history available for
+    # legacy 3-way patches) while verifying 061 applies directly without 3-way
+    # fallback and never perturbs earlier patch blob chains (e.g. 025 -> 031).
     subprocess.run(
         ["git", "clone", "-q", "--no-checkout", str(UPSTREAM_REPO), str(tree)],
         check=True,
@@ -54,6 +57,12 @@ def prepare_patched_tree(tmpdir: Path) -> Path:
     if files_dir.is_dir():
         shutil.copytree(files_dir, tree, dirs_exist_ok=True)
     for patch in sorted((ROOT / "data").glob("vyos-1x-*.patch")):
+        if patch.name == "vyos-1x-061-qos-ceetm-offload.patch":
+            # Verify 061 applies directly cleanly (zero 3-way drift).
+            subprocess.run(
+                ["git", "-C", str(tree), "apply", "--check", "--whitespace=nowarn", str(patch)],
+                check=True,
+            )
         subprocess.run(
             ["git", "-C", str(tree), "apply", "--3way", "--whitespace=nowarn", str(patch)],
             check=True,

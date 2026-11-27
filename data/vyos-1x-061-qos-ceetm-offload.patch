@@ -15,6 +15,109 @@ index 5f3e76c2c..9b4022638 100644
                <tagNode name="class">
                  <properties>
                    <help>Class ID</help>
+diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+index d393ebd21..52a9a8310 100644
+--- a/python/vyos/ifconfig/ethernet.py
++++ b/python/vyos/ifconfig/ethernet.py
+@@ -466,11 +466,12 @@ def set_ingress_policer(self, config):
+         single-rate (srTCM) policer; additionally supplying 'peak-bandwidth'
+         installs a two-rate (trTCM) policer.
+ 
+-        'config' is the per-interface configuration dictionary. The policer is
+-        attached as a matchall filter (pref 50) on the classic 'ffff: ingress'
+-        qdisc so it coexists with any mirror/redirect filter on the same qdisc.
+-        This must be called AFTER the base-class mirror/redirect setup, which
+-        may tear the ingress qdisc down and rebuild it.
++        'config' is the per-interface configuration dictionary. Prefers the
++        'clsact' qdisc (ingress hook, pref 50) so ingress policing coexists
++        with Phase 3 DSCP egress flower filters; falls back to 'parent ffff:'
++        when a legacy 'ffff: ingress' qdisc (mirror/redirect) is already
++        present. Must be called AFTER super().update() so mirror/redirect
++        teardown/rebuild has already run.
+         Example:
+         >>> from vyos.ifconfig import EthernetIf
+         >>> i = EthernetIf('eth0')
+@@ -479,24 +480,30 @@ def set_ingress_policer(self, config):
+         ifname = self.ifname
+         pref = '50'
+ 
+-        # Always remove our own filter first so the call is idempotent and a
+-        # deleted policer leaves no stale hardware profile behind.
++        # Always remove our own filter on both clsact (ingress) and legacy
++        # ffff: ingress qdisc so the call is idempotent across qdisc modes.
++        self._popen(f'tc filter del dev {ifname} ingress pref {pref} 2>/dev/null')
+         self._popen(f'tc filter del dev {ifname} parent ffff: pref {pref} 2>/dev/null')
+ 
+         policer = config.get('ingress_policer')
+         if not policer:
+             # No policer configured: return hw-tc-offload to its default-off
+             # state so a deleted policer leaves no toggled feature behind --
+-            # but only when ASK2 hardware offload isn't also relying on the
+-            # same feature. set_ask_offload() (called earlier in update())
+-            # reapplies hw-tc-offload=on whenever this port has offload
+-            # ipv4/ipv6 engaged; unconditionally forcing it off here ran on
+-            # EVERY commit regardless of whether ingress-policer was ever
+-            # touched, silently undoing that reapply every time. Board-
+-            # confirmed 2026-09-14 on .185 eth1.
+-            ask_active = (dict_search('offload.ipv4', config) is not None or
+-                          dict_search('offload.ipv6', config) is not None)
+-            if not ask_active:
++            # but only when ASK2 hardware offload, explicit hw-tc-offload, or
++            # any in_hw tc filter (e.g. Phase 3 DSCP egress flower) isn't also
++            # relying on the same feature.
++            need_hw_tc = (
++                dict_search('offload.hw_tc_offload', config) is not None
++                or dict_search('offload.ipv4', config) is not None
++                or dict_search('offload.ipv6', config) is not None
++            )
++            if not need_hw_tc:
++                for hook in ('egress', 'ingress', 'parent ffff:'):
++                    out, _ = self._popen(f'tc filter show dev {ifname} {hook} 2>/dev/null')
++                    if 'in_hw' in (out or ''):
++                        need_hw_tc = True
++                        break
++            if not need_hw_tc:
+                 self._popen(f'ethtool -K {ifname} hw-tc-offload off')
+             return None
+ 
+@@ -504,9 +511,15 @@ def set_ingress_policer(self, config):
+         if not rate:
+             return None
+ 
+-        # Ensure the ingress qdisc exists (shared with mirror/redirect). Adding
+-        # an already-present qdisc fails harmlessly - errors are ignored.
+-        self._popen(f'tc qdisc add dev {ifname} handle ffff: ingress 2>/dev/null')
++        # Preserve a legacy ingress qdisc created by mirror/redirect; otherwise
++        # attach clsact so ingress policing coexists with egress DSCP flower.
++        qdiscs, _ = self._popen(f'tc qdisc show dev {ifname} 2>/dev/null')
++        if 'qdisc ingress ffff:' in (qdiscs or ''):
++            hook = 'parent ffff:'
++        else:
++            if 'qdisc clsact ' not in (qdiscs or ''):
++                self._popen(f'tc qdisc add dev {ifname} clsact 2>/dev/null')
++            hook = 'ingress'
+ 
+         # The matchall policer filter below is installed with 'skip_sw' (a
+         # hardware-only filter). The DPAA1 netdev advertises NETIF_F_HW_TC as a
+@@ -519,12 +532,15 @@ def set_ingress_policer(self, config):
+         peak = policer.get('peak_bandwidth')
+ 
+         cmd = (
+-            f'tc filter add dev {ifname} parent ffff: pref {pref} '
++            f'tc filter add dev {ifname} {hook} pref {pref} '
+             f'matchall skip_sw action police rate {rate} burst {burst}'
+         )
+         if peak:
+-            mtu = read_file(f'/sys/class/net/{ifname}/mtu')
+-            cmd += f' peakrate {peak} mtu {mtu}'
++            # FMan policer meters FLS_L2 (Ethernet header without FCS); add
++            # 14 B to the L3 IP MTU so full-size untagged (1514 B) and 802.1Q
++            # VLAN (+4 B in kernel F-329 A460 = 1518 B) frames conform.
++            l2_mtu = int(read_file(f'/sys/class/net/{ifname}/mtu')) + 14
++            cmd += f' peakrate {peak} mtu {l2_mtu}'
+         cmd += ' conform-exceed drop/pipe'
+ 
+         _, err = self._popen(cmd)
 diff --git a/python/vyos/qos/trafficshaper.py b/python/vyos/qos/trafficshaper.py
 index 24e2ca06e..3169e6d8a 100644
 --- a/python/vyos/qos/trafficshaper.py
