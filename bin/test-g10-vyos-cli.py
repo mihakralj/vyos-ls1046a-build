@@ -183,7 +183,8 @@ def install_vyos_stubs(tree: Path):
     sys.modules["vyos.config"].Config = object
     sys.modules["vyos.configdict"].dict_merge = lambda a, b: {**a, **b}
     sys.modules["vyos.configverify"].verify_interface_exists = lambda *a, **k: True
-    sys.modules["vyos.configdep"].set_dependents = lambda *a, **k: None
+    dependents_seen = []
+    sys.modules["vyos.configdep"].set_dependents = lambda t, c, v: dependents_seen.append((t, v))
     sys.modules["vyos.configdep"].call_dependents = lambda *a, **k: None
 
     class Section:
@@ -194,6 +195,12 @@ def install_vyos_stubs(tree: Path):
             if ifname.startswith("br"):
                 return "bridge"
             return "dummy"
+
+        @staticmethod
+        def get_config_path(ifname):
+            if ifname.startswith("eth"):
+                return f"ethernet {ifname}"
+            return None
 
         @staticmethod
         def interfaces(sec=None):
@@ -221,7 +228,7 @@ def install_vyos_stubs(tree: Path):
     sys.modules["vyos.qos"].TrafficShaperHFSC = ts.TrafficShaperHFSC
 
     qos_cm = load_py("conf_mode_qos", "src/conf_mode/qos.py")
-    return ConfigError, warnings_seen, proc_cmds, ts, qos_cm
+    return ConfigError, warnings_seen, proc_cmds, dependents_seen, ts, qos_cm
 
 
 def extract_set_ingress_policer(tree: Path):
@@ -316,7 +323,7 @@ def test_025_ingress_policer(tree: Path):
 
 
 def test_061_qos_rendering_and_verify(tree: Path):
-    ConfigError, warnings_seen, proc_cmds, ts_mod, qos_cm = install_vyos_stubs(tree)
+    ConfigError, warnings_seen, proc_cmds, dependents_seen, ts_mod, qos_cm = install_vyos_stubs(tree)
 
     # Verify zero new XML nodes added beyond existing <leafNode name="offload">
     xml_patch = (ROOT / "data/vyos-1x-061-qos-ceetm-offload.patch").read_text()
@@ -505,7 +512,22 @@ def test_061_qos_rendering_and_verify(tree: Path):
     }
     qos_cm.verify(two_ports_ok)
 
-    print("PASS [2]: vyos-1x-061 Phase 3 DSCP + Phase 5a WRED rendering, guards, and zero new XML")
+    # 4. get_config() must register ethernet dependent for ingress-policer even
+    #    on `delete qos` so apply()'s `tc qdisc del ... parent ffff:` restores it.
+    class FakeConf:
+        def __init__(self, paths):
+            self.paths = set(paths)
+
+        def exists(self, path):
+            key = " ".join(path) if isinstance(path, list) else path
+            return key in self.paths
+
+    dependents_seen.clear()
+    res = qos_cm.get_config(FakeConf({"interfaces ethernet eth3 ingress-policer"}))
+    assert res is None
+    assert ("ethernet", "eth3") in dependents_seen, f"missing ingress-policer dependent on delete qos: {dependents_seen}"
+
+    print("PASS [2]: vyos-1x-061 Phase 3 DSCP + Phase 5a WRED rendering, guards, dependents, and zero new XML")
 
 
 def main() -> int:

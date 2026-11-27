@@ -355,10 +355,53 @@ index 24e2ca06e..3169e6d8a 100644
          if 'class' in config:
              tmp = list(config['class'])
 diff --git a/src/conf_mode/qos.py b/src/conf_mode/qos.py
-index 94802d640..3d60bcda8 100644
+index 94802d640..be30649f8 100644
 --- a/src/conf_mode/qos.py
 +++ b/src/conf_mode/qos.py
-@@ -256,6 +256,123 @@ def _check_shaper_hfsc_rate(cls, cls_conf):
+@@ -132,26 +132,34 @@ def get_config(config=None):
+     else:
+         conf = Config()
+     base = ['qos']
+-    if not conf.exists(base):
+-        return None
+-
+-    qos = conf.get_config_dict(base, key_mangling=('-', '_'),
+-                               get_first_key=True,
+-                               no_tag_node_value_mangle=True)
++    qos_exists = conf.exists(base)
++    qos = (
++        conf.get_config_dict(base, key_mangling=('-', '_'),
++                             get_first_key=True,
++                             no_tag_node_value_mangle=True)
++        if qos_exists else None
++    )
+ 
+     for ifname in interfaces():
+         if_node = Section.get_config_path(ifname)
+ 
+         if not if_node:
+             continue
+ 
+         path = f'interfaces {if_node}'
+-        if conf.exists(f'{path} mirror') or conf.exists(f'{path} redirect'):
++        if (
++            conf.exists(f'{path} mirror')
++            or conf.exists(f'{path} redirect')
++            or conf.exists(f'{path} ingress-policer')
++        ):
+             type_node = path.split(" ")[1] # return only interface type node
+             set_dependents(type_node, conf, ifname.split(".")[0])
+ 
+         # T6393: an ingress policy redirects its traffic after policing it
+-        if 'interface' in qos and ifname in qos['interface'] and conf.exists(f'{path} redirect'):
++        if qos and 'interface' in qos and ifname in qos['interface'] and conf.exists(f'{path} redirect'):
+             qos['interface'][ifname]['redirect'] = conf.return_value(f'{path} redirect')
+ 
++    if not qos_exists:
++        return None
++
+     for policy in qos.get('policy', []):
+@@ -256,6 +264,123 @@ def _check_shaper_hfsc_rate(cls, cls_conf):
          )
  
  
@@ -482,7 +525,7 @@ index 94802d640..3d60bcda8 100644
  def _verify_shaper_hfsc(policy, policy_config):
      _verify_default_policy_exist(policy, policy_config)
  
-@@ -313,6 +430,8 @@ def verify(qos):
+@@ -313,6 +438,8 @@ def verify(qos):
                  if policy_type in ['rate_control']:
                      if 'bandwidth' not in policy_config:
                          raise ConfigError('Bandwidth not defined')
@@ -491,7 +534,7 @@ index 94802d640..3d60bcda8 100644
                  if policy_type in ['shaper_hfsc']:
                      _verify_shaper_hfsc(policy, policy_config)
  
-@@ -322,6 +441,7 @@ def verify(qos):
+@@ -322,6 +449,7 @@ def verify(qos):
  
      # we should check interface ingress/egress configuration after verifying that
      # the policy name is used only once - this makes the logic easier!
@@ -499,7 +542,7 @@ index 94802d640..3d60bcda8 100644
      for interface, interface_config in qos['interface'].items():
          for direction in ['egress', 'ingress']:
              # bail out early if shaper for given direction is not used at all
-@@ -336,6 +456,19 @@ def verify(qos):
+@@ -336,6 +464,19 @@ def verify(qos):
              tmp = shaper_type(interface).get_direction()
              if direction not in tmp:
                  raise ConfigError(f'Selected QoS policy on interface "{interface}" only supports "{tmp}"!')
@@ -519,7 +562,7 @@ index 94802d640..3d60bcda8 100644
  
      if 'traffic_match_group' in qos:
          for group, group_config in qos['traffic_match_group'].items():
-@@ -363,6 +496,7 @@ def apply_interface(qos, ifname):
+@@ -363,6 +504,7 @@ def apply_interface(qos, ifname):
      # ingress redirect/mirror configuration (see set_mirror_redirect()).
      if 'ingress' in interface_config:
          run(f'tc qdisc del dev {ifname} parent ffff:')
