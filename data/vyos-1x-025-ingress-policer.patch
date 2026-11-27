@@ -1,8 +1,8 @@
 diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
-index ddb792b5d..8ab218dd8 100644
+index 051c15c94..d2eb18c1a 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -372,6 +372,69 @@ def set_vlan_strip(self, state):
+@@ -401,6 +401,80 @@ def set_vlan_strip(self, state):
                      'Adapter does not support changing rx-vlan-offload settings!'
                  )
          return False
@@ -14,11 +14,12 @@ index ddb792b5d..8ab218dd8 100644
 +        single-rate (srTCM) policer; additionally supplying 'peak-bandwidth'
 +        installs a two-rate (trTCM) policer.
 +
-+        'config' is the per-interface configuration dictionary. The policer is
-+        attached as a matchall filter (pref 50) on the classic 'ffff: ingress'
-+        qdisc so it coexists with any mirror/redirect filter on the same qdisc.
-+        This must be called AFTER the base-class mirror/redirect setup, which
-+        may tear the ingress qdisc down and rebuild it.
++        'config' is the per-interface configuration dictionary. Prefers the
++        'clsact' qdisc (ingress hook, pref 50) so ingress policing coexists
++        with Phase 3 DSCP egress flower filters; falls back to 'parent ffff:'
++        when a legacy 'ffff: ingress' qdisc (mirror/redirect) is already
++        present. Must be called AFTER super().update() so mirror/redirect
++        teardown/rebuild has already run.
 +        Example:
 +        >>> from vyos.ifconfig import EthernetIf
 +        >>> i = EthernetIf('eth0')
@@ -27,8 +28,9 @@ index ddb792b5d..8ab218dd8 100644
 +        ifname = self.ifname
 +        pref = '50'
 +
-+        # Always remove our own filter first so the call is idempotent and a
-+        # deleted policer leaves no stale hardware profile behind.
++        # Always remove our own filter on both clsact (ingress) and legacy
++        # ffff: ingress qdisc so the call is idempotent across qdisc modes.
++        self._popen(f'tc filter del dev {ifname} ingress pref {pref} 2>/dev/null')
 +        self._popen(f'tc filter del dev {ifname} parent ffff: pref {pref} 2>/dev/null')
 +
 +        policer = config.get('ingress_policer')
@@ -42,9 +44,15 @@ index ddb792b5d..8ab218dd8 100644
 +        if not rate:
 +            return None
 +
-+        # Ensure the ingress qdisc exists (shared with mirror/redirect). Adding
-+        # an already-present qdisc fails harmlessly - errors are ignored.
-+        self._popen(f'tc qdisc add dev {ifname} handle ffff: ingress 2>/dev/null')
++        # Preserve a legacy ingress qdisc created by mirror/redirect; otherwise
++        # attach clsact so ingress policing coexists with egress DSCP flower.
++        qdiscs, _ = self._popen(f'tc qdisc show dev {ifname} 2>/dev/null')
++        if 'qdisc ingress ffff:' in (qdiscs or ''):
++            hook = 'parent ffff:'
++        else:
++            if 'qdisc clsact ' not in (qdiscs or ''):
++                self._popen(f'tc qdisc add dev {ifname} clsact 2>/dev/null')
++            hook = 'ingress'
 +
 +        # The matchall policer filter below is installed with 'skip_sw' (a
 +        # hardware-only filter). The DPAA1 netdev advertises NETIF_F_HW_TC as a
@@ -57,12 +65,15 @@ index ddb792b5d..8ab218dd8 100644
 +        peak = policer.get('peak_bandwidth')
 +
 +        cmd = (
-+            f'tc filter add dev {ifname} parent ffff: pref {pref} '
++            f'tc filter add dev {ifname} {hook} pref {pref} '
 +            f'matchall skip_sw action police rate {rate} burst {burst}'
 +        )
 +        if peak:
-+            mtu = read_file(f'/sys/class/net/{ifname}/mtu')
-+            cmd += f' peakrate {peak} mtu {mtu}'
++            # FMan policer meters FLS_L2 (Ethernet header without FCS); add
++            # 14 B to the L3 IP MTU so full-size untagged (1514 B) and 802.1Q
++            # VLAN (+4 B in kernel F-329 A460 = 1518 B) frames conform.
++            l2_mtu = int(read_file(f'/sys/class/net/{ifname}/mtu')) + 14
++            cmd += f' peakrate {peak} mtu {l2_mtu}'
 +        cmd += ' conform-exceed drop/pipe'
 +
 +        _, err = self._popen(cmd)
@@ -72,7 +83,7 @@ index ddb792b5d..8ab218dd8 100644
  
      def set_rps(self, state):
          if not isinstance(state, bool):
-@@ -670,5 +733,10 @@ def update(self, config):
+@@ -699,5 +773,10 @@ def update(self, config):
          # call base class last
          super().update(config)
  
@@ -84,10 +95,10 @@ index ddb792b5d..8ab218dd8 100644
          # enable/disable EAPoL (Extensible Authentication Protocol over Local Area Network)
          self.set_eapol()
 diff --git a/src/conf_mode/interfaces_ethernet.py b/src/conf_mode/interfaces_ethernet.py
-index 54af3954e..26589728b 100755
+index 1121823ec..7ea777666 100644
 --- a/src/conf_mode/interfaces_ethernet.py
 +++ b/src/conf_mode/interfaces_ethernet.py
-@@ -499,6 +499,25 @@ def verify_vpp_mtu(ethernet: dict):
+@@ -501,6 +501,25 @@ def verify_vpp_mtu(ethernet: dict):
              'supported by the VPP dataplane'
          )
  
@@ -113,7 +124,7 @@ index 54af3954e..26589728b 100755
  def verify(ethernet):
      verify_flowtable(ethernet)
      verify_vpp_remove_vif(ethernet)
-@@ -510,6 +529,7 @@ def verify(ethernet):
+@@ -512,6 +531,7 @@ def verify(ethernet):
      verify_interface_exists(ethernet, ifname, state_required=True)
      verify_eapol(ethernet)
      verify_mirror_redirect(ethernet)

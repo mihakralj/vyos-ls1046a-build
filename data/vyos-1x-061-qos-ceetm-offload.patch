@@ -1,5 +1,5 @@
 diff --git a/interface-definitions/qos.xml.in b/interface-definitions/qos.xml.in
-index 5f3e76c..9b40226 100644
+index 5f3e76c2c..9b4022638 100644
 --- a/interface-definitions/qos.xml.in
 +++ b/interface-definitions/qos.xml.in
 @@ -606,6 +606,12 @@
@@ -16,13 +16,120 @@ index 5f3e76c..9b40226 100644
                  <properties>
                    <help>Class ID</help>
 diff --git a/python/vyos/qos/trafficshaper.py b/python/vyos/qos/trafficshaper.py
-index 24e2ca0..ec8fe79 100644
+index 24e2ca06e..3169e6d8a 100644
 --- a/python/vyos/qos/trafficshaper.py
 +++ b/python/vyos/qos/trafficshaper.py
-@@ -24,8 +24,62 @@ class TrafficShaper(QoSBase):
+@@ -14,18 +14,231 @@
+ # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ from math import ceil
++import re
+ from vyos.qos.base import QoSBase
++from vyos.utils.process import popen
++from vyos.utils.process import run
+ 
+ # Kernel limits on quantum (bytes)
+ MAXQUANTUM = 200000
+ MINQUANTUM = 1000
+ 
++# Pref range reserved for Phase 3 CEETM MURAM DSCP egress flower filters
++# (IPv4: 1000..1063, IPv6: 1100..1163). Surgical cleanup leaves unrelated
++# clsact ingress/egress filters (e.g. ingress-policer at pref 50) intact.
++_CEETM_DSCP_PREF_MIN = 1000
++_CEETM_DSCP_PREF_MAX = 1199
++_CEETM_DSCP_PREF_V4_BASE = 1000
++_CEETM_DSCP_PREF_V6_BASE = 1100
++
++_CEETM_DSCP_NAMES = {
++    'default': 0, 'be': 0, 'cs0': 0,
++    'le': 1, 'reliability': 1,
++    'throughput': 2,
++    'lowdelay': 4,
++    'priority': 8, 'cs1': 8,
++    'af11': 10, 'af12': 12, 'af13': 14,
++    'immediate': 16, 'cs2': 16,
++    'af21': 18, 'af22': 20, 'af23': 22,
++    'flash': 24, 'cs3': 24,
++    'af31': 26, 'af32': 28, 'af33': 30,
++    'flash-override': 32, 'cs4': 32,
++    'af41': 34, 'af42': 36, 'af43': 38,
++    'critical': 40, 'cs5': 40,
++    'va': 44,
++    'ef': 46,
++    'internet': 48, 'cs6': 48,
++    'network': 56, 'cs7': 56,
++}
++
+ class TrafficShaper(QoSBase):
      _parent = 1
      qostype = 'shaper'
  
++    @staticmethod
++    def parse_offload_dscp(raw) -> int:
++        key = str(raw).strip().lower()
++        if key in _CEETM_DSCP_NAMES:
++            return _CEETM_DSCP_NAMES[key]
++        val = int(key, 0)
++        if val < 0 or val > 63:
++            raise ValueError(f'DSCP value {raw!r} out of range 0-63')
++        return val
++
++    @classmethod
++    def collect_offload_dscp(cls, policy_config: dict):
++        """Extract pure ip/ipv6 dscp matches from an offloaded shaper policy.
++
++        Returns (entries, conflicts, invalid, unsupported_by_match):
++          - entries: sorted list of (family, dscp, class_id)
++          - conflicts: list of (family, dscp, first_cls, second_cls)
++          - invalid: list of (cls_str, match_name, family, raw_val)
++          - unsupported_by_match: dict[(cls_str, match_name)] -> list[str]
++        """
++        seen = {}
++        conflicts = []
++        invalid = []
++        unsupported = {}
++
++        classes = policy_config.get('class', {})
++        for cls_str in sorted(classes, key=lambda x: int(x)):
++            cls_id = int(cls_str)
++            cls_cfg = classes[cls_str]
++            for mname, mcfg in cls_cfg.get('match', {}).items():
++                non_supported = []
++                for key, val in mcfg.items():
++                    if key in ('mark', 'description'):
++                        continue
++                    if key in ('ip', 'ipv6') and isinstance(val, dict) and set(val.keys()) == {'dscp'}:
++                        raw_dscp = val['dscp']
++                        try:
++                            dscp = cls.parse_offload_dscp(raw_dscp)
++                        except ValueError:
++                            invalid.append((cls_str, mname, key, raw_dscp))
++                            continue
++                        pair = (key, dscp)
++                        if pair in seen and seen[pair] != cls_id:
++                            conflicts.append((key, dscp, seen[pair], cls_id))
++                        else:
++                            seen[pair] = cls_id
++                    else:
++                        non_supported.append(key)
++                if non_supported:
++                    unsupported[(cls_str, mname)] = non_supported
++
++        entries = sorted((fam, dscp, cid) for (fam, dscp), cid in seen.items())
++        return entries, conflicts, invalid, unsupported
++
++    @staticmethod
++    def clear_offload_dscp(ifname: str):
++        """Remove only QoS-owned CEETM DSCP egress flower filters (pref 1000..1199)."""
++        out, _ = popen(f'tc filter show dev {ifname} egress 2>/dev/null')
++        prefs = sorted({
++            int(m.group(1))
++            for m in re.finditer(r'\bpref\s+(\d+)\b', out or '')
++            if _CEETM_DSCP_PREF_MIN <= int(m.group(1)) <= _CEETM_DSCP_PREF_MAX
++        })
++        for pref in prefs:
++            run(f'tc filter del dev {ifname} egress pref {pref}')
++
 +    def _resolve_rate(self, raw_rate, total_bw):
 +        if raw_rate == 'auto':
 +            return self._rate_convert(total_bw)
@@ -31,8 +138,64 @@ index 24e2ca0..ec8fe79 100644
 +            return max(self._rate_convert(total_bw) * int(percent) // 100, 8)
 +        return self._rate_convert(raw_rate)
 +
++    def _attach_offload_leaf_qdisc(self, cls_cfg: dict, minor_id: int, speed: int):
++        """Attach Phase 5a hardware frame-mode CCGR WRED when queue-type is random-detect."""
++        if cls_cfg.get('queue_type') != 'random-detect':
++            return
++        avg_pkt = int(cls_cfg.get('average_packet') or 1024)
++        max_thr = int(cls_cfg.get('maximum_threshold') or 18)
++        min_thr = (
++            int(cls_cfg['minimum_threshold'])
++            if 'minimum_threshold' in cls_cfg
++            else (9 * max_thr) // 18
++        )
++        limit = cls_cfg.get('queue_limit')
++        mark_prob = int(cls_cfg.get('mark_probability') or 10)
++        qparams = self._calc_random_detect_queue_params(
++            avg_pkt=avg_pkt,
++            max_thr=max_thr,
++            limit=limit,
++            min_thr=min_thr,
++            mark_probability=mark_prob,
++        )
++        burst = max(qparams['burst'], min_thr + 1, 2)
++        self._cmdl([
++            'tc', 'qdisc', 'replace', 'dev', self._interface,
++            'parent', f'{self._parent:x}:{minor_id:x}',
++            'handle', f'{minor_id:x}:',
++            'red',
++            'limit', str(qparams['limit']),
++            'min', str(qparams['min_val']),
++            'max', str(qparams['max_val']),
++            'avpkt', str(qparams['avg_pkt']),
++            'burst', str(burst),
++            'probability', f'{qparams["probability"]:.6g}',
++            'bandwidth', str(speed),
++        ])
++
++    def _install_offload_dscp(self, config: dict):
++        """Render Phase 3 MURAM DSCP->CQ clsact egress flower filters."""
++        self.clear_offload_dscp(self._interface)
++        entries, _, _, _ = self.collect_offload_dscp(config)
++        if not entries:
++            return
++        self._cmdl(['ethtool', '-K', self._interface, 'hw-tc-offload', 'on'])
++        qdiscs, _ = popen(f'tc qdisc show dev {self._interface} 2>/dev/null')
++        if 'qdisc clsact ' not in (qdiscs or ''):
++            self._cmdl(['tc', 'qdisc', 'add', 'dev', self._interface, 'clsact'])
++        for family, dscp, cls_id in entries:
++            proto = 'ip' if family == 'ip' else 'ipv6'
++            pref = (_CEETM_DSCP_PREF_V4_BASE if family == 'ip' else _CEETM_DSCP_PREF_V6_BASE) + dscp
++            tos = dscp << 2
++            self._cmdl([
++                'tc', 'filter', 'replace', 'dev', self._interface,
++                'egress', 'protocol', proto, 'pref', str(pref),
++                'flower', 'skip_sw', 'ip_tos', f'{tos:#x}/0xfc',
++                'action', 'skbedit', 'priority', f'{self._parent:x}:{cls_id:x}',
++            ])
++
 +    def _update_offload(self, config):
-+        """Render QMan CEETM hardware HTB-offload qdisc without software leaf qdiscs."""
++        """Render QMan CEETM hardware HTB-offload qdisc, Phase 5a WRED, and Phase 3 DSCP."""
 +        speed = self._rate_convert(config['bandwidth'])
 +        classes = config.get('class', {})
 +        default_cfg = config.get('default', {})
@@ -44,6 +207,8 @@ index 24e2ca0..ec8fe79 100644
 +                                          config['bandwidth'])
 +            self._cmdl(f'tc qdisc replace dev {self._interface} root handle {self._parent:x}: htb offload default 1'.split())
 +            self._cmdl(f'tc class replace dev {self._interface} parent {self._parent:x}: classid {self._parent:x}:1 htb rate {def_rate} ceil {def_ceil}'.split())
++            self._attach_offload_leaf_qdisc(default_cfg, 1, def_ceil)
++            self.clear_offload_dscp(self._interface)
 +            return
 +
 +        class_ids = sorted(int(x) for x in classes)
@@ -60,6 +225,7 @@ index 24e2ca0..ec8fe79 100644
 +            prio = int(cls_cfg.get('priority', 0))
 +            used_prios.add(prio)
 +            self._cmdl(f'tc class replace dev {self._interface} parent {self._parent:x}:1 classid {self._parent:x}:{cls:x} htb rate {rate} ceil {ceil_rate} prio {prio}'.split())
++            self._attach_offload_leaf_qdisc(cls_cfg, cls, speed)
 +
 +        if default_cfg:
 +            def_rate = self._resolve_rate(default_cfg['bandwidth'], config['bandwidth'])
@@ -73,6 +239,9 @@ index 24e2ca0..ec8fe79 100644
 +                free_prios = [p for p in range(7, -1, -1) if p not in used_prios]
 +                def_prio = free_prios[0] if free_prios else 7
 +            self._cmdl(f'tc class replace dev {self._interface} parent {self._parent:x}:1 classid {self._parent:x}:{default_minor_id:x} htb rate {def_rate} ceil {def_ceil} prio {def_prio}'.split())
++            self._attach_offload_leaf_qdisc(default_cfg, default_minor_id, speed)
++
++        self._install_offload_dscp(config)
 +
      # https://man7.org/linux/man-pages/man8/tc-htb.8.html
      def update(self, config, direction):
@@ -83,13 +252,51 @@ index 24e2ca0..ec8fe79 100644
          if 'class' in config:
              tmp = list(config['class'])
 diff --git a/src/conf_mode/qos.py b/src/conf_mode/qos.py
-index 94802d6..93b92a7 100644
+index 94802d640..3d60bcda8 100644
 --- a/src/conf_mode/qos.py
 +++ b/src/conf_mode/qos.py
-@@ -256,6 +256,73 @@ def _check_shaper_hfsc_rate(cls, cls_conf):
+@@ -256,6 +256,123 @@ def _check_shaper_hfsc_rate(cls, cls_conf):
          )
  
  
++def _verify_shaper_offload_queue(policy, label, cls_conf):
++    qtype = cls_conf.get('queue_type')
++    # qos.xml.in defaults queue-type to 'fq-codel'; treat both 'fq-codel'
++    # (default) and 'drop-tail' as CEETM's built-in frame-mode CCGR tail-drop,
++    # and 'random-detect' as Phase 5a hardware frame-mode CCGR WRED.
++    if qtype in (None, 'fq-codel', 'drop-tail'):
++        return
++    if qtype != 'random-detect':
++        raise ConfigError(
++            f'Offloaded shaper policy "{policy}" {label} does not support queue-type "{qtype}"; use "drop-tail" or "random-detect"!'
++        )
++    max_thr = int(cls_conf.get('maximum_threshold', 18))
++    if max_thr < 1:
++        raise ConfigError(
++            f'Offloaded shaper policy "{policy}" {label} random-detect requires maximum-threshold >= 1!'
++        )
++    if 'minimum_threshold' in cls_conf:
++        min_thr = int(cls_conf['minimum_threshold'])
++        if min_thr < 0 or min_thr >= max_thr:
++            raise ConfigError(
++                f'Offloaded shaper policy "{policy}" {label} uses minimum-threshold "{min_thr}" >= maximum-threshold "{max_thr}"!'
++            )
++    if 'queue_limit' in cls_conf:
++        queue_lim = int(cls_conf['queue_limit'])
++        if queue_lim < max_thr:
++            raise ConfigError(
++                f'Offloaded shaper policy "{policy}" {label} uses queue-limit "{queue_lim}" < maximum-threshold "{max_thr}"!'
++            )
++    if 'mark_probability' in cls_conf and int(cls_conf['mark_probability']) < 1:
++        raise ConfigError(
++            f'Offloaded shaper policy "{policy}" {label} random-detect requires mark-probability >= 1!'
++        )
++    if 'average_packet' in cls_conf and int(cls_conf['average_packet']) < 64:
++        raise ConfigError(
++            f'Offloaded shaper policy "{policy}" {label} random-detect requires average-packet >= 64!'
++        )
++
++
 +def _verify_shaper_offload(policy, policy_config):
 +    if 'bandwidth' not in policy_config:
 +        raise ConfigError(f'Offloaded shaper policy "{policy}" requires "bandwidth"!')
@@ -101,6 +308,16 @@ index 94802d6..93b92a7 100644
 +            f'Offloaded shaper policy "{policy}" supports at most 7 classes plus default (8 CEETM strict-priority CQs)!'
 +        )
 +
++    _, dscp_conflicts, dscp_invalid, unsupported_matches = TrafficShaper.collect_offload_dscp(policy_config)
++    for cls_str, mname, fam, raw_val in dscp_invalid:
++        raise ConfigError(
++            f'Offloaded shaper policy "{policy}" class "{cls_str}" match "{mname}" has invalid {fam} DSCP value "{raw_val}"!'
++        )
++    for fam, dscp, first_cls, second_cls in dscp_conflicts:
++        raise ConfigError(
++            f'Offloaded shaper policy "{policy}" maps {fam} DSCP {dscp} to both class "{first_cls}" and class "{second_cls}"!'
++        )
++
 +    used_prios = {}
 +    for cls, cls_conf in classes.items():
 +        cls_id = int(cls)
@@ -108,6 +325,7 @@ index 94802d6..93b92a7 100644
 +            raise ConfigError(
 +                f'Offloaded shaper policy "{policy}" class "{cls}" does not support "set-dscp"!'
 +            )
++        _verify_shaper_offload_queue(policy, f'class "{cls}"', cls_conf)
 +        prio = int(cls_conf.get('priority', 0))
 +        if prio < 0 or prio > 7:
 +            raise ConfigError(
@@ -131,10 +349,10 @@ index 94802d6..93b92a7 100644
 +                    raise ConfigError(
 +                        f'Offloaded shaper policy "{policy}" class "{cls}" match "{mname}" mark {mcfg["mark"]} must equal class ID {cls_id} (or 0x{(1 << 16) | cls_id:x}); CEETM steers SW skb->mark and ASK2 HW ct->mark directly by HTB class ID!'
 +                    )
-+            non_mark = [k for k in mcfg.keys() if k not in ('mark', 'description')]
-+            if non_mark:
++            non_supported = unsupported_matches.get((cls, mname))
++            if non_supported:
 +                Warning(
-+                    f'Offloaded shaper "{policy}" class "{cls}" match "{mname}" uses unsupported criteria ({", ".join(non_mark)}); offloaded HTB ignores tc filters for both software and ASK2 hardware traffic (steer via skb/conntrack mark equal to class ID or skb->priority)!'
++                    f'Offloaded shaper "{policy}" class "{cls}" match "{mname}" uses unsupported criteria ({", ".join(non_supported)}); offloaded HTB steers via mark (equal to class ID) or pure ip/ipv6 dscp!'
 +                )
 +
 +    default_conf = policy_config.get('default', {})
@@ -142,6 +360,7 @@ index 94802d6..93b92a7 100644
 +        raise ConfigError(
 +            f'Offloaded shaper policy "{policy}" default class does not support "set-dscp"!'
 +        )
++    _verify_shaper_offload_queue(policy, 'default class', default_conf)
 +    # qos.xml.in assigns <defaultValue>20</defaultValue> to shaper default
 +    # priority; treat '20' as unset (auto-select lowest free CQ 7..0).
 +    raw_def_prio = default_conf.get('priority')
@@ -160,7 +379,7 @@ index 94802d6..93b92a7 100644
  def _verify_shaper_hfsc(policy, policy_config):
      _verify_default_policy_exist(policy, policy_config)
  
-@@ -313,6 +380,8 @@ def verify(qos):
+@@ -313,6 +430,8 @@ def verify(qos):
                  if policy_type in ['rate_control']:
                      if 'bandwidth' not in policy_config:
                          raise ConfigError('Bandwidth not defined')
@@ -169,7 +388,15 @@ index 94802d6..93b92a7 100644
                  if policy_type in ['shaper_hfsc']:
                      _verify_shaper_hfsc(policy, policy_config)
  
-@@ -336,6 +405,11 @@ def verify(qos):
+@@ -322,6 +441,7 @@ def verify(qos):
+ 
+     # we should check interface ingress/egress configuration after verifying that
+     # the policy name is used only once - this makes the logic easier!
++    dscp_offload_ifaces = []
+     for interface, interface_config in qos['interface'].items():
+         for direction in ['egress', 'ingress']:
+             # bail out early if shaper for given direction is not used at all
+@@ -336,6 +456,19 @@ def verify(qos):
              tmp = shaper_type(interface).get_direction()
              if direction not in tmp:
                  raise ConfigError(f'Selected QoS policy on interface "{interface}" only supports "{tmp}"!')
@@ -178,6 +405,22 @@ index 94802d6..93b92a7 100644
 +                    raise ConfigError(
 +                        f'Offloaded shaper policy "{policy_name}" can only be attached to physical Ethernet interfaces (not "{interface}")!'
 +                    )
++                dscp_entries, _, _, _ = TrafficShaper.collect_offload_dscp(shaper_config)
++                if dscp_entries:
++                    dscp_offload_ifaces.append(interface)
++
++    if len(dscp_offload_ifaces) > 1:
++        raise ConfigError(
++            f'Offloaded shaper DSCP matching uses FMan\'s single-port MURAM table and can only be enabled on one Ethernet interface at a time (configured on: {", ".join(sorted(dscp_offload_ifaces))})!'
++        )
  
      if 'traffic_match_group' in qos:
          for group, group_config in qos['traffic_match_group'].items():
+@@ -363,6 +496,7 @@ def apply_interface(qos, ifname):
+     # ingress redirect/mirror configuration (see set_mirror_redirect()).
+     if 'ingress' in interface_config:
+         run(f'tc qdisc del dev {ifname} parent ffff:')
++    TrafficShaper.clear_offload_dscp(ifname)
+     run(f'tc qdisc del dev {ifname} root')
+ 
+     if not interface_config:
