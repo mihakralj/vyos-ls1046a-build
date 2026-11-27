@@ -40,6 +40,14 @@ typedef unsigned int uint;
 #define be32_to_cpu(x) (x)
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x, v) ((x) = (v))
+#define smp_mb() __sync_synchronize()
+#define __ARG_PLACEHOLDER_1 0,
+#define __take_second_arg(__ignored, val, ...) val
+#define __is_defined(x) ___is_defined(x)
+#define ___is_defined(val) ____is_defined(__ARG_PLACEHOLDER_##val)
+#define ____is_defined(arg1_or_junk) __take_second_arg(arg1_or_junk 1, 0)
+#define IS_ENABLED(option) __is_defined(option)
+#define CONFIG_DPAA_HW_CEETM 1
 #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 #define div64_u64(a, b) ((uint64_t)(a) / (uint64_t)(b))
 #define min_t(type, a, b) ((type)(a) < (type)(b) ? (type)(a) : (type)(b))
@@ -128,6 +136,8 @@ struct dpaa_priv {
 	int offload_cgr_speed;
 	u16 rx_headroom;
 	bool use_ingress_cgr;
+	bool ceetm_tx_paused;
+	bool ceetm_cgr_congested;
 };
 
 struct cgr_data {
