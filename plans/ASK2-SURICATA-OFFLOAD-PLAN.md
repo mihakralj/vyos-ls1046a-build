@@ -2,7 +2,7 @@
 
 ## 0. Status
 
-This document defines a proposed design for Suricata inspection with hardware flow offload. A limited runtime NFQUEUE prototype demonstrates part of the IPv4/TCP path, but production authorization, a Suricata-aware flowtable gate, a shared steering consumer and Suricata mirroring are not implemented. No production throughput or security guarantee is implied.
+This document defines a proposed design for Suricata inspection with hardware flow offload. **Track 0 (D8 commit-time bypass guard + `show offload config` override visibility) is implemented in source and host-gated** (`data/vyos-1x-062-suricata-offload-bypass-guard.patch`, `data/vyos-1x-files/python/vyos/ask_inspection_guard.py`, `data/vyos-1x-files/src/op_mode/show_offload.py`, `bin/test-g7-track0-guard.py`; pending CI ISO live commit test on DUT1). A limited runtime NFQUEUE prototype demonstrates part of the IPv4/TCP path, but production authorization, a Suricata-aware flowtable gate, a shared steering consumer and Suricata mirroring are not implemented. No production throughput or security guarantee is implied.
 
 The design separates passive inspection, inline inspection and explicit flow shunting because they have different coverage and failure properties. Passive capture may remain visible with a software flowtable, depending on the receive path and configuration; hardware offload can bypass capture. With default settings, an inline inspector does not resume inspection of a flow after releasing it: it accepts packets while the bypass entry exists and may drop the connection after that entry expires.
 
@@ -500,7 +500,7 @@ If the target mix cannot be inspected within these limits, B is not built and th
 
 | Track | Deliverable | Depends on | Value on its own |
 |---|---|---|---|
-| 0 Guard | Commit-time validation (D8) and status output | E1 baseline, for the exact rule | Detects or rejects the named validated passive and hand-built inline bypass combinations; other paths remain outside the claim |
+| 0 Guard | **Implemented in source + host gate (`vyos-1x-062`, `bin/test-g7-track0-guard.py`; pending CI ISO DUT1 commit verification):** commit-time validation (D8: `service suricata allow-offload-bypass` and `firewall global-options allow-queue-offload-bypass` overrides) and `show offload config` status output | E1 baseline for refining SW-flowtable passive rules | Detects and rejects the named passive (`service suricata` vs HW offload) and hand-built inline (`action queue` vs flowtable/HW offload) bypass combinations; other paths remain outside the claim |
 | 1 Passive prefix IDS (A2) | Flowtable admission on monitored interfaces waits for an operator-defined conntrack byte threshold; documented coverage | E1 baseline; D1 and D3 wording; passive-specific configuration and post-prototype E1 threshold validation | Passive capture before hardware forwarding, subject to measured capture coverage and loss |
 | 2 Inline prefix IPS (B) | Section 7 | R0, R1 baseline (E1/E2/E3/E6/E7), R2, R3 prototype, then E4/E5 and remaining R3–R6 gates | Prevention on the prefix |
 | 3 Research | C, D, live demotion | R7 and the retirement requirements in sections 7.7–7.8 | None until proven |

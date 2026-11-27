@@ -41,6 +41,7 @@ from ipaddress import ip_address
 
 from tabulate import tabulate
 
+from vyos.ask_inspection_guard import describe_inspection_bypass_status
 from vyos.configquery import ConfigTreeQuery
 from vyos.utils.process import rc_cmd
 
@@ -313,6 +314,29 @@ def show_config():
         fb_str = _fmt_fallbacks(info)
         if fb_str is not None:
             print(f'Software fallbacks (since load): {fb_str}')
+    suricata = conf.get_config_dict(['service', 'suricata'],
+                                    key_mangling=('-', '_'),
+                                    get_first_key=True,
+                                    no_tag_node_value_mangle=True) or {}
+    ethernet = conf.get_config_dict(['interfaces', 'ethernet'],
+                                    key_mangling=('-', '_'),
+                                    get_first_key=True,
+                                    no_tag_node_value_mangle=True) or {}
+    bridges = conf.get_config_dict(['interfaces', 'bridge'],
+                                   key_mangling=('-', '_'),
+                                   get_first_key=True,
+                                   no_tag_node_value_mangle=True) or {}
+    firewall = conf.get_config_dict(['firewall'],
+                                    key_mangling=('-', '_'),
+                                    get_first_key=True,
+                                    no_tag_node_value_mangle=True) or {}
+    guard_lines = describe_inspection_bypass_status(
+        suricata, ethernet=ethernet, firewall=firewall, bridges=bridges
+    )
+    if guard_lines:
+        print('\nInspection bypass status (G7 Track 0):')
+        for line in guard_lines:
+            print(f'  {line}')
     return 0
 
 
