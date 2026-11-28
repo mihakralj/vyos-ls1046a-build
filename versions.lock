@@ -20,7 +20,7 @@
 
 # ── Kernel ─────────────────────────────────────────────────────────────
 # Persistent pin synchronized with upstream vyos/vyos-build data/defaults.toml.
-: "${KERNEL_VERSION:=6.18.64}"
+: "${KERNEL_VERSION:=6.18.65}"
 : "${KERNEL_SERIES:=6.18}"
 # VyOS internal revision (vyos-build T9591): release = <version>-<revision>-vyos.
 : "${KERNEL_REVISION:=1}"
