@@ -3,7 +3,7 @@
 Measured forwarding, packet-rate, and flow-scaling results for **VyOS on the NXP QorIQ LS1046A Mono Gateway DK** with the **ASK2** FMan FE-VM hardware offload dataplane (`S1`, dual 10 GbE SFP+ transit ports `eth3` ↔ `eth4`, 4× Cortex-A72 @ 1.6 GHz, 8 GiB DDR4, FMan microcode `210.10.1`).
 
 - **Test rig:** Two Intel X710 10 GbE SFP+ traffic generators directly attached to DUT `eth3` and `eth4` over 10G DACs (no switch in the dataplane; management SSH isolated on `eth0`).
-- **Kernel:** `Linux 6.18.65-1-vyos` (`dpaa1` branch).
+- **Kernel:** `Linux 6.18.65-1-vyos` (`dpaa1` / `main`).
 - **Boot note:** All tables below are single-pass (`REPS=1`) runs on fresh image boots without an intermediate cold power-cycle between preceding functional checks and the benchmark runs.
 
 ---
@@ -83,18 +83,18 @@ Frame  Flows  Metric   Mpps  L2 Gbps  L1 Gbps   Offer%    20G%      Drop%
 
 ## 3. 64 B Flow-Scaling Ladder & Collapse Ceiling (UDP, 3 Mpps / 90 M Packets)
 
-**Tested:** `2026-11-27` · **Build:** `VyOS 2026.11.27-0330-rolling` (`Linux 6.18.65-1-vyos #1+b2026.11.270330`, CI `45934489997`, commit `380a10b3`, `REPS=1`)
+**Tested:** `2026-11-27` (`40,960` and `57,344` re-measured `2026-11-28` on helper-free ports `6000..63343`) · **Build:** `VyOS 2026.11.27-0330-rolling` (`Linux 6.18.65-1-vyos #1+b2026.11.270330`, CI `45934489997`, commit `380a10b3`, `REPS=1`)
 
 Tests control-plane admission speed, kernel workqueue health, and silicon forwarding stability across increasing active bidirectional UDP 5-tuple counts. Each step installs `N` unique 64 B bidirectional flows during a hold phase (`100–250 kpps/port`), measures time from first packet to 100% hardware offload (`full after`), peak 1-minute load average (`load max`), peak kernel worker threads (`kworkers`), peak D-state tasks (`stuck max`), packet loss over a sustained **30 s trial at 3 Mpps (`90 M` packets)**, and natural hardware teardown time (`drain`).
 
-- **Shipping default budget (`2,048` – `131,072` bidirectional flows, `ask.max_flows=262144` directions):** Every step offloaded in **`6–16 s`** with `load max ≤ 1.59`, `54–58` kworkers, `0–2` stuck tasks, `~0%` trial loss (`0`–`0.0065%` dual-TRex start-edge floor, `kpath_pps < 10 pps` = 100% HW), and `32–37 s` clean natural drain.
+- **Shipping default budget (`2,048` – `131,072` bidirectional flows, `ask.max_flows=262144` directions):** Every step offloaded **100%** in **`6–16 s`** with `load max ≤ 1.59`, `54–58` kworkers, `1–2` stuck tasks, `~0%` trial loss (`0.0003%–0.0065%` dual-TRex async start/stop edge floor, `kpath_pps ≤ 10 pps` = 100% HW), and `32–37 s` clean natural drain.
 - **Extended bisect & collapse hunt (`262,144` – `1,048,576` flows, `ask.max_flows` raised above default):**
   - **Lossless ceiling (`≤ 0.01%` trial loss at 3 Mpps):** **`303,104` bidirectional flows (`606,208` HW ehash records)** — 100% offloaded in `35 s`, `load max 3.15`, `0.0044%` loss.
   - **Deep bucket-chain degradation (`311,296` – `786,432` flows):** ASK2 still offloads **100% of all `786,432` flows (`1,572,864` HW records)** with `kpath_pps = 8 pps` (zero SW spill) and `3,489 MiB` RAM free; loss rises gradually (`0.013%` → `0.70%` → `4.93%`) as per-bucket chains deepen across the silicon-fixed 32,768 buckets/port.
   - **Actual admission collapse (`1,048,576` flows = `2,097,152` directions):** Stalls at **`837,356 / 1,048,576`** (~`1.67 M` HW ehash records) when `dma_pool_alloc()` inside `fman_pcd_ehash_add_key()` exhausts the LS1046A 32-bit `ZONE_DMA` (`1.47 GiB` managed; `GFP_KERNEL|GFP_DMA` page allocation failure, while `3.26 GiB` remains free in `ZONE_NORMAL`). The remaining `~211k` flows fall back cleanly to software (`172k` kernel pps, `25.13%` trial loss) with `sync_timeouts=0`, no panic or wedge, and full natural teardown back to `0` records in `111 s` (`ask-check` was `47/49 OK` through `786,432` flows; the intentional `1,048,576` over-limit run logs the expected `warn_alloc` `GFP_DMA` trace).
 
 ```text
-64 B flow ladder, VyOS/ASK2 hardware offload (2026-11-27, VyOS 2026.11.27-0330-rolling)
+64 B flow ladder, VyOS/ASK2 hardware offload (2026-11-27/28, VyOS 2026.11.27-0330-rolling)
 Trial: 30 s at 3 Mpps (90 M packets).
 
 -- Shipping default budget (ask.max_flows=262144 directions / 131072 flows) --
@@ -104,13 +104,15 @@ Trial: 30 s at 3 Mpps (90 M packets).
   16384    16384 / 16384             8 s      0.45        54          1    0.0034 %     34s
   24576    24576 / 24576             8 s      0.51        56          2    0.0034 %     32s
   32768    32768 / 32768             8 s      0.71        58          2    0.0065 %     34s
-  40960    40959 / 40960          never*      0.45        58          0    0.0004 %     34s
+  40960    40960 / 40960             9 s      0.78        56          2    0.0029 %     33s
   49152    49152 / 49152            10 s      0.86        54          2    0.0040 %     35s
-  57344    57343 / 57344          never*      1.21        54          1           0     34s
+  57344    57344 / 57344            10 s      1.15        57          2    0.0060 %     35s
   65536    65536 / 65536            10 s      0.83        55          1    0.0030 %     35s
   98304    98304 / 98304            12 s      0.53        56          1    0.0029 %     34s
  122880   122880 / 122880           16 s      1.59        57          1    0.0003 %     37s
  131072   131072 / 131072           16 s      1.32        56          1    0.0036 %     34s
+
+-- Extended bisect & collapse hunt (ask.max_flows raised above default) --
  262144   262144 / 262144           27 s      1.41        56          1    0.0044 %     41s
  294912   294912 / 294912           32 s      2.92        58          1    0.0065 %     43s
  303104   303104 / 303104           35 s      3.15        59          1    0.0044 %     43s  <- max <=0.01% loss
@@ -122,4 +124,4 @@ Trial: 30 s at 3 Mpps (90 M packets).
 1048576   837356 / 1048576         never     12.68        65          7   25.1341 %    111s  <- admission collapse
 ```
 
-*\*Note:* At `40,960` and `57,344`, `N - 1` flows offloaded (`99.998%` HW) because the reverse generator won the `CT_NEW` race on UDP destination port `1719`, matching VyOS's default `VYOS_CT_HELPER` `ras_udp` (H.323 RAS) rule; Linux `nf_flow_table` intentionally keeps flows with an attached conntrack helper (`helper=RAS`) in software (~`73 pps` at `40,960`, ~`52 pps` at `57,344`). Steps `≥ 65,536` switch to a 2D port grid (`1025..1280` × `10000+`) that never crosses helper ports `1719`/`5060`/`5061`, and trial loss remained `0.0004%` and `0`.
+*Note:* The `0.0003%–0.0065%` trial-loss floor across `2,048`–`303,104` flows (~`300`–`5,800` frames out of `90 M`) is dual-host TRex asynchronous start/stop skew (~`1–2 ms` RPC offset between generators), not silicon drop (`kpath_pps ≤ 10 pps` throughout). The `40,960` and `57,344` steps were re-measured using UDP ports `6000..63343` to avoid VyOS's default `VYOS_CT_HELPER` rules (`udp dport 1719` H.323 RAS and `5060`/`5061` SIP), which Linux `nf_flow_table` keeps in software by design whenever a flow's first packet hits a helper port.
